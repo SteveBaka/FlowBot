@@ -583,6 +583,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     markRecordRead: (id: string) => ipcRenderer.invoke('insight:markRecordRead', id),
     clearRecords: (filters?: any) => ipcRenderer.invoke('insight:clearRecords', filters),
     triggerTest: () => ipcRenderer.invoke('insight:triggerTest'),
+    triggerSessionInsight: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => ipcRenderer.invoke('insight:triggerSessionInsight', payload),
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {

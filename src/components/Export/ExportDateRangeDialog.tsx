@@ -557,8 +557,7 @@ export function ExportDateRangeDialog({
         event.stopPropagation()
         onClose()
       }}
-    >
-      <div className="export-date-range-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
+    >      <div className="export-date-range-dialog" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
         <div className="export-date-range-dialog-header">
           <h4>{title}</h4>
           <button

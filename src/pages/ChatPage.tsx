@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react'
-import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper, Star } from 'lucide-react'
+import { Search, MessageSquare, AlertCircle, Loader2, RefreshCw, X, ChevronDown, ChevronLeft, Info, Calendar, Database, Hash, Play, Pause, Image as ImageIcon, Mic, CheckCircle, Copy, Check, CheckSquare, Download, BarChart3, Edit2, Trash2, BellOff, Users, FolderClosed, UserCheck, Crown, Aperture, Newspaper, Star, Sparkles } from 'lucide-react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { createPortal } from 'react-dom'
 import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
@@ -1639,6 +1639,9 @@ function ChatPage(props: ChatPageProps) {
   const highlightedMessageSet = useMemo(() => new Set(highlightedMessageKeys), [highlightedMessageKeys])
   const [aiMessageInsightEnabled, setAiMessageInsightEnabled] = useState(false)
   const [aiMessageInsightContextCount, setAiMessageInsightContextCount] = useState(50)
+  const [isTriggeringSessionInsight, setIsTriggeringSessionInsight] = useState(false)
+  const [sessionInsightHint, setSessionInsightHint] = useState<{ success: boolean; message: string } | null>(null)
+  const sessionInsightHintTimerRef = useRef<number | null>(null)
   const messageKeySetRef = useRef<Set<string>>(new Set())
   const lastMessageTimeRef = useRef(0)
   const isMessageListAtBottomRef = useRef(true)
@@ -3144,6 +3147,12 @@ function ChatPage(props: ChatPageProps) {
   useEffect(() => {
     currentSessionRef.current = currentSessionId
     messageInsightMemoryCache.clear()
+    setSessionInsightHint(null)
+    setIsTriggeringSessionInsight(false)
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
     isMessageListAtBottomRef.current = true
     topRangeLoadLockRef.current = false
     bottomRangeLoadLockRef.current = false
@@ -5840,6 +5849,27 @@ function ChatPage(props: ChatPageProps) {
     })
   }, [currentSession, isCurrentSessionPrivateSnsSupported])
 
+  const showSessionInsightHint = useCallback((hint: { success: boolean; message: string }) => {
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
+    setSessionInsightHint(hint)
+    sessionInsightHintTimerRef.current = window.setTimeout(() => {
+      setSessionInsightHint(null)
+      sessionInsightHintTimerRef.current = null
+    }, 5000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (sessionInsightHintTimerRef.current !== null) {
+        window.clearTimeout(sessionInsightHintTimerRef.current)
+        sessionInsightHintTimerRef.current = null
+      }
+    }
+  }, [])
+
   useEffect(() => {
     if (!standaloneSessionWindow) return
     setStandaloneInitialLoadRequested(false)
@@ -6180,6 +6210,41 @@ function ChatPage(props: ChatPageProps) {
       requestId
     })
   }, [currentSession, currentSessionId, inProgressExportSessionIds, isPreparingExportDialog])
+
+  const handleTriggerSessionInsight = useCallback(async () => {
+    const session = currentSession
+    const sessionId = String(session?.username || currentSessionId || '').trim()
+    if (!sessionId || isTriggeringSessionInsight) return
+
+    setIsTriggeringSessionInsight(true)
+    if (sessionInsightHintTimerRef.current !== null) {
+      window.clearTimeout(sessionInsightHintTimerRef.current)
+      sessionInsightHintTimerRef.current = null
+    }
+    setSessionInsightHint({ success: true, message: '正在生成当前聊天的 AI 见解...' })
+    try {
+      const result = await window.electronAPI.insight.triggerSessionInsight({
+        sessionId,
+        displayName: session?.displayName || sessionId,
+        avatarUrl: session?.avatarUrl
+      })
+      if (currentSessionRef.current !== sessionId) return
+      showSessionInsightHint({
+        success: result.success,
+        message: result.message || (result.success ? 'AI 见解已生成' : 'AI 见解生成失败')
+      })
+    } catch (error) {
+      if (currentSessionRef.current !== sessionId) return
+      showSessionInsightHint({
+        success: false,
+        message: `触发失败：${(error as Error).message || String(error)}`
+      })
+    } finally {
+      if (currentSessionRef.current === sessionId) {
+        setIsTriggeringSessionInsight(false)
+      }
+    }
+  }, [currentSession, currentSessionId, isTriggeringSessionInsight, showSessionInsightHint])
 
   const handleGroupAnalytics = useCallback(() => {
     if (!currentSessionId || !isGroupChatSession(currentSessionId)) return
@@ -7321,10 +7386,12 @@ function ChatPage(props: ChatPageProps) {
                 isBatchTranscribing={isBatchTranscribing}
                 runningBatchVoiceTaskType={runningBatchVoiceTaskType}
                 isBatchDecrypting={isBatchDecrypting}
+                isTriggeringSessionInsight={isTriggeringSessionInsight}
                 isRefreshingMessages={isRefreshingMessages}
                 isLoadingMessages={isLoadingMessages}
                 currentSessionId={currentSessionId}
                 jumpCalendarWrapRef={jumpCalendarWrapRef}
+                onTriggerSessionInsight={handleTriggerSessionInsight}
                 onGroupAnalytics={handleGroupAnalytics}
                 onToggleGroupMembersPanel={toggleGroupMembersPanel}
                 onExportCurrentSession={handleExportCurrentSession}
@@ -7366,6 +7433,13 @@ function ChatPage(props: ChatPageProps) {
               <div className="export-prepare-hint" role="status" aria-live="polite">
                 <Loader2 size={14} className="spin" />
                 <span>{exportPrepareHint}</span>
+              </div>
+            )}
+
+            {sessionInsightHint && (
+              <div className={`session-insight-hint ${sessionInsightHint.success ? 'success' : 'error'}`} role="status" aria-live="polite">
+                {isTriggeringSessionInsight ? <Loader2 size={14} className="spin" /> : <Sparkles size={14} />}
+                <span>{sessionInsightHint.message}</span>
               </div>
             )}
 

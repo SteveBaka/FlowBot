@@ -4,7 +4,7 @@ import path from 'path'
 import { createHash, randomUUID } from 'crypto'
 import { ConfigService } from './config'
 
-export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test' | 'message_analysis'
+export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test' | 'manual' | 'message_analysis'
 export type InsightRecordSourceType = 'insight' | 'message_analysis'
 
 export interface MessageInsightAnalysis {

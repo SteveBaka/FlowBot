@@ -1813,6 +1813,14 @@ function registerIpcHandlers() {
     return insightService.triggerTest()
   })
 
+  ipcMain.handle('insight:triggerSessionInsight', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }) => {
+    return insightService.triggerSessionInsight(payload)
+  })
+
   ipcMain.handle('insight:generateFootprintInsight', async (_, payload: {
     rangeLabel: string
     summary: {

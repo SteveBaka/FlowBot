@@ -84,6 +84,15 @@ interface SharedAiModelConfig {
   maxTokens: number
 }
 
+interface SessionInsightTriggerResult {
+  success: boolean
+  message: string
+  recordId?: string
+  insight?: string
+  skipped?: boolean
+  notificationEnabled?: boolean
+}
+
 type InsightFilterMode = 'whitelist' | 'blacklist'
 
 class ApiRequestError extends Error {
@@ -537,11 +546,14 @@ class InsightService {
       const sessionId = session.username?.trim() || ''
       const displayName = session.displayName || sessionId
       insightLog('INFO', `测试目标会话：${displayName} (${sessionId})`)
-      await this.generateInsightForSession({
+      const result = await this.generateInsightForSession({
         sessionId,
         displayName,
         triggerReason: 'test'
       })
+      if (!result.success) {
+        return { success: false, message: result.message }
+      }
       const notificationEnabled = this.config.get('aiInsightNotificationEnabled') !== false
       return {
         success: true,
@@ -551,6 +563,47 @@ class InsightService {
       }
     } catch (e) {
       return { success: false, message: `测试失败：${(e as Error).message}` }
+    }
+  }
+
+  /**
+   * 手动对指定会话立即触发一次 AI 见解。
+   * 只新增触发入口；实际上下文、朋友圈/微博拼接、prompt 和入库仍走 generateInsightForSession。
+   */
+  async triggerSessionInsight(params: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }): Promise<SessionInsightTriggerResult> {
+    const sessionId = String(params?.sessionId || '').trim()
+    if (!sessionId) {
+      return { success: false, message: '当前会话无效，无法触发 AI 见解' }
+    }
+    if (!this.isEnabled()) {
+      return { success: false, message: '请先在设置中开启「AI 见解」' }
+    }
+
+    const { apiBaseUrl, apiKey } = this.getSharedAiModelConfig()
+    if (!apiBaseUrl || !apiKey) {
+      return { success: false, message: '请先填写通用 AI 模型配置（API 地址和 Key）' }
+    }
+
+    try {
+      const connectResult = await chatService.connect()
+      if (!connectResult.success) {
+        return { success: false, message: '数据库连接失败，请先在"数据库连接"页完成配置' }
+      }
+      this.dbConnected = true
+
+      const displayName = String(params?.displayName || sessionId).trim() || sessionId
+      insightLog('INFO', `手动触发当前会话见解：${displayName} (${sessionId})`)
+      return await this.generateInsightForSession({
+        sessionId,
+        displayName,
+        triggerReason: 'manual'
+      })
+    } catch (error) {
+      return { success: false, message: `触发失败：${(error as Error).message}` }
     }
   }
 
@@ -1372,10 +1425,10 @@ ${afterText}
     displayName: string
     triggerReason: InsightRecordTriggerReason
     silentDays?: number
-  }): Promise<void> {
+  }): Promise<SessionInsightTriggerResult> {
     const { sessionId, displayName, triggerReason, silentDays } = params
-    if (!sessionId) return
-    if (!this.isEnabled()) return
+    if (!sessionId) return { success: false, message: '会话无效，无法生成见解' }
+    if (!this.isEnabled()) return { success: false, message: '请先在设置中开启「AI 见解」' }
 
     const { apiBaseUrl, apiKey, model, maxTokens } = this.getSharedAiModelConfig()
     const allowContext = this.config.get('aiInsightAllowContext') as boolean
@@ -1393,7 +1446,7 @@ ${afterText}
 
     if (!apiBaseUrl || !apiKey) {
       insightLog('WARN', 'API 地址或 Key 未配置，跳过见解生成')
-      return
+      return { success: false, message: '请先填写通用 AI 模型配置（API 地址和 Key）' }
     }
 
     // ── 构建 prompt ────────────────────────────────────────────────────────────
@@ -1483,9 +1536,9 @@ ${afterText}
       // 模型主动选择跳过
       if (result.trim().toUpperCase() === 'SKIP' || result.trim().startsWith('SKIP')) {
         insightLog('INFO', `模型选择跳过 ${resolvedDisplayName}`)
-        return
+        return { success: true, message: `模型判断「${resolvedDisplayName}」暂无可生成的见解`, skipped: true }
       }
-      if (!this.isEnabled()) return
+      if (!this.isEnabled()) return { success: false, message: 'AI 见解已关闭，生成结果未保存' }
 
       const insight = result.trim()
       const notifTitle = `见解 · ${resolvedDisplayName}`
@@ -1550,6 +1603,15 @@ ${afterText}
 
       insightLog('INFO', `已完成 ${resolvedDisplayName} 的见解处理`)
       this.recordTrigger(sessionId)
+      return {
+        success: true,
+        message: insightNotificationEnabled
+          ? `已生成「${resolvedDisplayName}」的 AI 见解，请查看通知弹窗`
+          : `已生成「${resolvedDisplayName}」的 AI 见解，AI 见解消息通知当前已关闭`,
+        recordId: record.id,
+        insight,
+        notificationEnabled: insightNotificationEnabled
+      }
     } catch (e) {
       insightDebugSection(
         'ERROR',
@@ -1557,6 +1619,7 @@ ${afterText}
         `错误信息：${(e as Error).message}\n\n堆栈：\n${(e as Error).stack || '[无堆栈]'}`
       )
       insightLog('ERROR', `API 调用失败 (${resolvedDisplayName}): ${(e as Error).message}`)
+      return { success: false, message: `生成失败：${(e as Error).message}` }
     }
   }
 

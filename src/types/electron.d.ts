@@ -21,7 +21,7 @@ export interface SocialSaveWeiboCookieResult {
   error?: string
 }
 
-export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test' | 'message_analysis'
+export type InsightRecordTriggerReason = 'activity' | 'silence' | 'test' | 'manual' | 'message_analysis'
 export type InsightRecordSourceType = 'insight' | 'message_analysis'
 
 export interface MessageInsightAnalysis {
@@ -1344,6 +1344,11 @@ export interface ElectronAPI {
     markRecordRead: (id: string) => Promise<{ success: boolean; error?: string }>
     clearRecords: (filters?: InsightRecordFilters) => Promise<{ success: boolean; removed: number; error?: string }>
     triggerTest: () => Promise<{ success: boolean; message: string }>
+    triggerSessionInsight: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => Promise<{ success: boolean; message: string; recordId?: string; insight?: string; skipped?: boolean; notificationEnabled?: boolean }>
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {

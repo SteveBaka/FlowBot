@@ -67,6 +67,7 @@ function getTriggerLabel(reason: InsightRecordTriggerReason): string {
   if (reason === 'message_analysis') return '深度解析'
   if (reason === 'silence') return '沉默提醒'
   if (reason === 'test') return '测试见解'
+  if (reason === 'manual') return '手动触发'
   return '活跃分析'
 }
 

@@ -265,6 +265,11 @@
     color: #5b55a0;
     background: rgba(99, 102, 241, 0.12);
   }
+
+  &.manual {
+    color: #0f766e;
+    background: rgba(20, 184, 166, 0.13);
+  }
 }
 
 .insight-source-pill {

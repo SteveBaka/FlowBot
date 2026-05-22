@@ -10,6 +10,7 @@ import {
   Mic,
   RefreshCw,
   Search,
+  Sparkles,
   Users
 } from 'lucide-react'
 import { Avatar } from '../../components/Avatar'
@@ -32,10 +33,12 @@ export interface ChatHeaderProps {
   isBatchTranscribing: boolean
   runningBatchVoiceTaskType?: BatchVoiceTaskType
   isBatchDecrypting: boolean
+  isTriggeringSessionInsight: boolean
   isRefreshingMessages: boolean
   isLoadingMessages: boolean
   currentSessionId?: string | null
   jumpCalendarWrapRef: React.RefObject<HTMLDivElement | null>
+  onTriggerSessionInsight: () => void
   onGroupAnalytics: () => void
   onToggleGroupMembersPanel: () => void
   onExportCurrentSession: () => void
@@ -64,10 +67,12 @@ function ChatHeader({
   isBatchTranscribing,
   runningBatchVoiceTaskType,
   isBatchDecrypting,
+  isTriggeringSessionInsight,
   isRefreshingMessages,
   isLoadingMessages,
   currentSessionId,
   jumpCalendarWrapRef,
+  onTriggerSessionInsight,
   onGroupAnalytics,
   onToggleGroupMembersPanel,
   onExportCurrentSession,
@@ -102,6 +107,15 @@ function ChatHeader({
         {isGroupChat && <div className="header-subtitle">群聊</div>}
       </div>
       <div className="header-actions">
+        <button
+          className={`icon-btn session-insight-btn${isTriggeringSessionInsight ? ' triggering' : ''}`}
+          onClick={onTriggerSessionInsight}
+          disabled={!currentSessionId || isTriggeringSessionInsight}
+          title={isTriggeringSessionInsight ? '正在生成 AI 见解' : '立即触发当前聊天 AI 见解'}
+          aria-label="立即触发当前聊天 AI 见解"
+        >
+          {isTriggeringSessionInsight ? <Loader2 size={18} className="spin" /> : <Sparkles size={18} />}
+        </button>
         {!standaloneSessionWindow && isGroupChat && (
           <button className="icon-btn group-analytics-btn" onClick={onGroupAnalytics} title="群聊分析">
             <BarChart3 size={18} />
@@ -214,10 +228,12 @@ function areEqual(prev: ChatHeaderProps, next: ChatHeaderProps) {
     prev.isBatchTranscribing === next.isBatchTranscribing &&
     prev.runningBatchVoiceTaskType === next.runningBatchVoiceTaskType &&
     prev.isBatchDecrypting === next.isBatchDecrypting &&
+    prev.isTriggeringSessionInsight === next.isTriggeringSessionInsight &&
     prev.isRefreshingMessages === next.isRefreshingMessages &&
     prev.isLoadingMessages === next.isLoadingMessages &&
     prev.currentSessionId === next.currentSessionId &&
     prev.jumpCalendarWrapRef === next.jumpCalendarWrapRef &&
+    prev.onTriggerSessionInsight === next.onTriggerSessionInsight &&
     prev.onGroupAnalytics === next.onGroupAnalytics &&
     prev.onToggleGroupMembersPanel === next.onToggleGroupMembersPanel &&
     prev.onExportCurrentSession === next.onExportCurrentSession &&

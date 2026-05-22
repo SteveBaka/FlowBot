@@ -1747,6 +1747,29 @@
   }
 }
 
+.session-insight-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-tertiary);
+
+  &.success {
+    color: var(--text-secondary);
+  }
+
+  &.error {
+    color: var(--danger);
+  }
+
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;
