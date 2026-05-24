@@ -124,6 +124,36 @@ export interface InsightRecordResult {
   error?: string
 }
 
+export type InsightProfileStatusValue = 'none' | 'ready' | 'running' | 'failed'
+
+export interface InsightProfileStatus {
+  sessionId: string
+  status: InsightProfileStatusValue
+  updatedAt?: number
+  error?: string
+  phase?: string
+  busy?: boolean
+}
+
+export interface InsightProfileStatusListResult {
+  success: boolean
+  statuses: Record<string, InsightProfileStatus>
+  activeTask?: {
+    sessionId: string
+    displayName: string
+    phase: string
+    startedAt: number
+  }
+  error?: string
+}
+
+export interface InsightProfileGenerateResult {
+  success: boolean
+  message: string
+  cancelled?: boolean
+  error?: string
+}
+
 export type GroupSummaryTriggerType = 'auto' | 'manual'
 
 export interface GroupSummaryTopic {
@@ -1421,6 +1451,13 @@ export interface ElectronAPI {
       displayName?: string
       avatarUrl?: string
     }) => Promise<{ success: boolean; message: string; recordId?: string; insight?: string; skipped?: boolean; notificationEnabled?: boolean }>
+    listProfileStatuses: (sessionIds: string[]) => Promise<InsightProfileStatusListResult>
+    generateProfile: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => Promise<InsightProfileGenerateResult>
+    cancelProfile: (sessionId?: string) => Promise<{ success: boolean; message: string }>
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {

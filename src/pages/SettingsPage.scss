@@ -3391,15 +3391,22 @@
 
   &.insight-social-tab {
     --insight-moments-column-width: 76px;
-    --insight-social-column-width: minmax(220px, 300px);
+    --insight-profile-column-width: 90px;
+    --insight-social-column-width: minmax(190px, 260px);
     --insight-status-column-width: 82px;
-    --insight-social-list-grid: minmax(0, 1fr) var(--insight-moments-column-width) var(--insight-social-column-width) var(--insight-status-column-width);
+    --insight-social-list-grid: minmax(0, 1fr) var(--insight-moments-column-width) var(--insight-profile-column-width) var(--insight-social-column-width) var(--insight-status-column-width);
 
     .anti-revoke-list-header {
       grid-template-columns: var(--insight-social-list-grid);
       gap: 14px;
 
       .insight-moments-column-title {
+        display: flex;
+        justify-content: center;
+        color: var(--text-tertiary);
+      }
+
+      .insight-profile-column-title {
         display: flex;
         justify-content: center;
         color: var(--text-tertiary);
@@ -3433,6 +3440,63 @@
       align-items: center;
       justify-content: center;
       min-height: 30px;
+    }
+
+    .insight-profile-cell {
+      min-width: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 30px;
+    }
+
+    .insight-profile-status-btn {
+      width: 78px;
+      height: 28px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--border-color) 84%, transparent);
+      background: color-mix(in srgb, var(--bg-secondary) 90%, var(--bg-primary) 10%);
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 5px;
+      font-size: 12px;
+      line-height: 1;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: border-color 0.16s ease, background 0.16s ease, color 0.16s ease, opacity 0.16s ease;
+
+      &:disabled {
+        cursor: not-allowed;
+        opacity: 0.48;
+      }
+
+      .profile-status-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 999px;
+        background: color-mix(in srgb, var(--text-tertiary) 86%, transparent);
+        flex-shrink: 0;
+      }
+
+      &.ready {
+        color: var(--primary);
+        border-color: color-mix(in srgb, var(--primary) 35%, var(--border-color));
+        background: color-mix(in srgb, var(--primary) 10%, var(--bg-secondary));
+      }
+
+      &.running {
+        color: color-mix(in srgb, var(--primary) 70%, var(--text-primary) 30%);
+        border-color: color-mix(in srgb, var(--primary) 30%, var(--border-color));
+        background: color-mix(in srgb, var(--primary) 9%, var(--bg-secondary));
+      }
+
+      &.failed {
+        color: color-mix(in srgb, var(--danger) 72%, var(--text-primary) 28%);
+        border-color: color-mix(in srgb, var(--danger) 24%, var(--border-color));
+        background: color-mix(in srgb, var(--danger) 8%, var(--bg-secondary));
+      }
     }
 
     .insight-moments-toggle {
@@ -3605,6 +3669,7 @@
         grid-template-columns: minmax(0, 1fr) auto;
 
         .insight-moments-column-title,
+        .insight-profile-column-title,
         .insight-social-column-title {
           display: none;
         }
@@ -3617,12 +3682,14 @@
       }
 
       .insight-moments-cell,
+      .insight-profile-cell,
       .insight-social-binding-cell,
       .anti-revoke-row-status {
         width: 100%;
       }
 
-      .insight-moments-cell {
+      .insight-moments-cell,
+      .insight-profile-cell {
         justify-content: flex-start;
       }
 

@@ -588,6 +588,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       displayName?: string
       avatarUrl?: string
     }) => ipcRenderer.invoke('insight:triggerSessionInsight', payload),
+    listProfileStatuses: (sessionIds: string[]) => ipcRenderer.invoke('insight:listProfileStatuses', sessionIds),
+    generateProfile: (payload: {
+      sessionId: string
+      displayName?: string
+      avatarUrl?: string
+    }) => ipcRenderer.invoke('insight:generateProfile', payload),
+    cancelProfile: (sessionId?: string) => ipcRenderer.invoke('insight:cancelProfile', sessionId),
     generateFootprintInsight: (payload: {
       rangeLabel: string
       summary: {

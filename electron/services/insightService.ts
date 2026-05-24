@@ -21,6 +21,7 @@ import { chatService, ChatSession, Message } from './chatService'
 import { snsService } from './snsService'
 import { weiboService } from './social/weiboService'
 import { showNotification } from '../windows/notificationWindow'
+import { insightProfileService } from './insightProfileService'
 import {
   insightRecordService,
   type InsightRecordLog,
@@ -385,6 +386,7 @@ class InsightService {
     this.clearTimers()
     this.clearRuntimeCache()
     this.processing = false
+    insightProfileService.cancelActiveTask('AI 见解服务已停止，画像任务已取消')
     if (hadActiveFlow) {
       insightLog('INFO', '已停止')
     }
@@ -400,6 +402,7 @@ class InsightService {
     }
 
     if (normalizedKey === 'dbPath' || normalizedKey === 'decryptKey' || normalizedKey === 'myWxid') {
+      insightProfileService.cancelActiveTask('数据库或账号配置已变化，画像任务已取消')
       this.clearRuntimeCache()
     }
 
@@ -409,6 +412,7 @@ class InsightService {
   handleConfigCleared(): void {
     this.clearTimers()
     this.clearRuntimeCache()
+    insightProfileService.cancelActiveTask('配置已清除，画像任务已取消')
     this.processing = false
   }
 
@@ -1467,6 +1471,7 @@ ${afterText}
 
     const momentsContextSection = await this.getMomentsContextSection(sessionId)
     const socialContextSection = await this.getSocialContextSection(sessionId)
+    const profileContextSection = insightProfileService.getProfileContextSection(sessionId)
 
     // ── 默认 system prompt（稳定内容，有利于 provider 端 prompt cache 命中）────
     const DEFAULT_SYSTEM_PROMPT = `你是用户的私人关系观察助手，名叫"见解"。你的任务是主动提供有价值的观察和建议。
@@ -1486,6 +1491,7 @@ ${afterText}
         ? `已 ${silentDays} 天未联系「${resolvedDisplayName}」。`
         : '',
       contextSection,
+      profileContextSection,
       momentsContextSection,
       socialContextSection,
       '请给出你的见解（≤80字）：'

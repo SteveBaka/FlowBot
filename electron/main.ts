@@ -32,6 +32,7 @@ import { httpService } from './services/httpService'
 import { messagePushService } from './services/messagePushService'
 import { insightService } from './services/insightService'
 import { insightRecordService } from './services/insightRecordService'
+import { insightProfileService } from './services/insightProfileService'
 import { groupSummaryService } from './services/groupSummaryService'
 import { normalizeWeiboCookieInput, weiboService } from './services/social/weiboService'
 import { bizService } from './services/bizService'
@@ -1827,6 +1828,22 @@ function registerIpcHandlers() {
     avatarUrl?: string
   }) => {
     return insightService.triggerSessionInsight(payload)
+  })
+
+  ipcMain.handle('insight:listProfileStatuses', async (_, sessionIds: string[]) => {
+    return insightProfileService.listProfileStatuses(Array.isArray(sessionIds) ? sessionIds : [])
+  })
+
+  ipcMain.handle('insight:generateProfile', async (_, payload: {
+    sessionId: string
+    displayName?: string
+    avatarUrl?: string
+  }) => {
+    return insightProfileService.generateProfile(payload)
+  })
+
+  ipcMain.handle('insight:cancelProfile', async (_, sessionId?: string) => {
+    return insightProfileService.cancelProfile(sessionId)
   })
 
   ipcMain.handle('insight:generateFootprintInsight', async (_, payload: {

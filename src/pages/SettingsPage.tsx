@@ -1,5 +1,6 @@
 ﻿import { useState, useEffect, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
+import { useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
 import { useChatStore } from '../stores/chatStore'
 import { useThemeStore, themes } from '../stores/themeStore'
@@ -8,6 +9,7 @@ import { dialog } from '../services/ipc'
 import * as configService from '../services/config'
 import groupSummaryPrompt from '../../shared/groupSummaryPrompt.json'
 import type { ChatSession, ContactInfo } from '../types/models'
+import type { InsightProfileStatus } from '../types/electron'
 import {
   Eye, EyeOff, FolderSearch, FolderOpen, Search, Copy,
   RotateCcw, Trash2, Plug, Check, Sun, Moon, Monitor,
@@ -331,6 +333,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [weiboBindingDrafts, setWeiboBindingDrafts] = useState<Record<string, string>>({})
   const [weiboBindingErrors, setWeiboBindingErrors] = useState<Record<string, string>>({})
   const [weiboBindingLoadingSessionId, setWeiboBindingLoadingSessionId] = useState<string | null>(null)
+  const [aiInsightProfileStatuses, setAiInsightProfileStatuses] = useState<Record<string, InsightProfileStatus>>({})
+  const [aiInsightProfileActiveSessionId, setAiInsightProfileActiveSessionId] = useState<string | null>(null)
   const [aiFootprintEnabled, setAiFootprintEnabled] = useState(false)
   const [aiFootprintSystemPrompt, setAiFootprintSystemPrompt] = useState('')
   const [aiGroupSummaryEnabled, setAiGroupSummaryEnabled] = useState(false)
@@ -2861,37 +2865,41 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     showMessage('已清空主动推送过滤列表', true)
   }
 
-  const sessionFilterOptionMap = new Map<string, SessionFilterOption>()
+  const { sessionFilterOptionMap, sessionFilterOptions } = useMemo(() => {
+    const optionMap = new Map<string, SessionFilterOption>()
 
-  for (const session of chatSessions) {
-    if (session.username.toLowerCase().includes('placeholder_foldgroup')) continue
-    sessionFilterOptionMap.set(session.username, {
-      username: session.username,
-      displayName: session.displayName || session.username,
-      avatarUrl: session.avatarUrl,
-      type: getSessionFilterType(session)
-    })
-  }
+    for (const session of chatSessions) {
+      if (session.username.toLowerCase().includes('placeholder_foldgroup')) continue
+      optionMap.set(session.username, {
+        username: session.username,
+        displayName: session.displayName || session.username,
+        avatarUrl: session.avatarUrl,
+        type: getSessionFilterType(session)
+      })
+    }
 
-  for (const contact of messagePushContactOptions) {
-    if (!contact.username) continue
-    if (contact.type !== 'friend' && contact.type !== 'group' && contact.type !== 'official' && contact.type !== 'former_friend') continue
-    const existing = sessionFilterOptionMap.get(contact.username)
-    sessionFilterOptionMap.set(contact.username, {
-      username: contact.username,
-      displayName: existing?.displayName || contact.displayName || contact.remark || contact.nickname || contact.username,
-      avatarUrl: existing?.avatarUrl || contact.avatarUrl,
-      type: getSessionFilterType(contact)
-    })
-  }
+    for (const contact of messagePushContactOptions) {
+      if (!contact.username) continue
+      if (contact.type !== 'friend' && contact.type !== 'group' && contact.type !== 'official' && contact.type !== 'former_friend') continue
+      const existing = optionMap.get(contact.username)
+      optionMap.set(contact.username, {
+        username: contact.username,
+        displayName: existing?.displayName || contact.displayName || contact.remark || contact.nickname || contact.username,
+        avatarUrl: existing?.avatarUrl || contact.avatarUrl,
+        type: getSessionFilterType(contact)
+      })
+    }
 
-  const sessionFilterOptions = Array.from(sessionFilterOptionMap.values())
-    .sort((a, b) => {
-      const aSession = chatSessions.find(session => session.username === a.username)
-      const bSession = chatSessions.find(session => session.username === b.username)
-      return Number(bSession?.sortTimestamp || bSession?.lastTimestamp || 0) -
-        Number(aSession?.sortTimestamp || aSession?.lastTimestamp || 0)
-    })
+    const options = Array.from(optionMap.values())
+      .sort((a, b) => {
+        const aSession = chatSessions.find(session => session.username === a.username)
+        const bSession = chatSessions.find(session => session.username === b.username)
+        return Number(bSession?.sortTimestamp || bSession?.lastTimestamp || 0) -
+          Number(aSession?.sortTimestamp || aSession?.lastTimestamp || 0)
+      })
+
+    return { sessionFilterOptionMap: optionMap, sessionFilterOptions: options }
+  }, [chatSessions, messagePushContactOptions])
 
   const getSessionFilterOptionInfo = (username: string) => {
     return sessionFilterOptionMap.get(username) || {
@@ -3267,6 +3275,120 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     })
     await configService.setAiInsightWeiboBindings(nextBindings)
     if (!silent) showMessage('已清除微博绑定', true)
+  }
+
+  const refreshAiInsightProfileStatuses = async (sessionIds?: string[]) => {
+    const ids = normalizeSessionIds(
+      sessionIds || sessionFilterOptions
+        .filter((session) => session.type === 'private')
+        .map((session) => session.username)
+    )
+    if (ids.length === 0) {
+      setAiInsightProfileStatuses({})
+      setAiInsightProfileActiveSessionId(null)
+      return
+    }
+    try {
+      const result = await window.electronAPI.insight.listProfileStatuses(ids)
+      if (!result.success) return
+      setAiInsightProfileStatuses(result.statuses || {})
+      setAiInsightProfileActiveSessionId(result.activeTask?.sessionId || null)
+    } catch (error) {
+      console.warn('刷新 AI 画像状态失败:', error)
+    }
+  }
+
+  const handleGenerateInsightProfile = async (session: SessionFilterOption) => {
+    const sessionId = session.username
+    const currentStatus = aiInsightProfileStatuses[sessionId]
+    if (currentStatus?.status === 'running') {
+      try {
+        const result = await window.electronAPI.insight.cancelProfile(sessionId)
+        showMessage(result.message || '已请求取消画像任务', result.success)
+      } catch (e: any) {
+        showMessage(`取消画像失败：${e?.message || String(e)}`, false)
+      } finally {
+        setTimeout(() => { void refreshAiInsightProfileStatuses() }, 500)
+      }
+      return
+    }
+
+    if (aiInsightProfileActiveSessionId && aiInsightProfileActiveSessionId !== sessionId) return
+
+    setAiInsightProfileStatuses((prev) => ({
+      ...prev,
+      [sessionId]: {
+        sessionId,
+        status: 'running',
+        phase: '正在初始化画像...',
+        updatedAt: Date.now()
+      }
+    }))
+    setAiInsightProfileActiveSessionId(sessionId)
+    try {
+      const result = await window.electronAPI.insight.generateProfile({
+        sessionId,
+        displayName: session.displayName || session.username,
+        avatarUrl: session.avatarUrl
+      })
+      showMessage(result.message || (result.success ? '画像完成' : '画像失败'), result.success)
+    } catch (e: any) {
+      showMessage(`画像失败：${e?.message || String(e)}`, false)
+    } finally {
+      await refreshAiInsightProfileStatuses()
+    }
+  }
+
+  useEffect(() => {
+    if (activeTab !== 'insight') return
+    const ids = sessionFilterOptions
+      .filter((session) => session.type === 'private')
+      .map((session) => session.username)
+    if (ids.length === 0) return
+    void refreshAiInsightProfileStatuses(ids)
+    const timer = window.setInterval(() => {
+      void refreshAiInsightProfileStatuses(ids)
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [activeTab, sessionFilterOptions])
+
+  const getInsightProfileButtonMeta = (sessionId: string) => {
+    const status = aiInsightProfileStatuses[sessionId]
+    const activeOther = Boolean(aiInsightProfileActiveSessionId && aiInsightProfileActiveSessionId !== sessionId)
+    if (status?.status === 'running') {
+      return {
+        className: 'running',
+        label: '取消',
+        title: status.phase || '画像生成中，点击取消',
+        disabled: false,
+        icon: <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+      }
+    }
+    if (status?.status === 'ready') {
+      return {
+        className: 'ready',
+        label: '已画像',
+        title: activeOther ? '其他联系人正在画像中' : '点击以重新画像',
+        disabled: activeOther,
+        icon: <Check size={13} />
+      }
+    }
+    if (status?.status === 'failed') {
+      return {
+        className: 'failed',
+        label: '失败',
+        title: activeOther ? '其他联系人正在画像中' : (status.error || '画像失败，点击重试'),
+        disabled: activeOther,
+        icon: <XCircle size={13} />
+      }
+    }
+    return {
+      className: 'none',
+      label: '未画像',
+      title: activeOther ? '其他联系人正在画像中' : '点击进行画像',
+      disabled: activeOther,
+      icon: <i className="profile-status-dot" aria-hidden="true" />
+    }
   }
   const renderInsightTab = () => (
     <div className="tab-content">
@@ -3842,6 +3964,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                   <div className="anti-revoke-list-header">
                     <span>对话（{filteredSessions.length}）</span>
                     <span className="insight-moments-column-title">朋友圈</span>
+                    <span className="insight-profile-column-title">画像</span>
                     <span className="insight-social-column-title">社交平台（微博）</span>
                     <span className="anti-revoke-status-column-title">状态</span>
                   </div>
@@ -3853,6 +3976,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                     const weiboDraftValue = getWeiboBindingDraftValue(session.username)
                     const isBindingLoading = weiboBindingLoadingSessionId === session.username
                     const weiboBindingError = weiboBindingErrors[session.username]
+                    const profileButtonMeta = getInsightProfileButtonMeta(session.username)
                     return (
                       <div
                         key={session.username}
@@ -3899,6 +4023,22 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
                                 <Check size={12} />
                               </span>
                             </label>
+                          ) : (
+                            <span className="binding-feedback muted">-</span>
+                          )}
+                        </div>
+                        <div className="insight-profile-cell">
+                          {isPrivateSession ? (
+                            <button
+                              type="button"
+                              className={`insight-profile-status-btn ${profileButtonMeta.className}`}
+                              title={profileButtonMeta.title}
+                              disabled={profileButtonMeta.disabled}
+                              onClick={() => void handleGenerateInsightProfile(session)}
+                            >
+                              {profileButtonMeta.icon}
+                              <span>{profileButtonMeta.label}</span>
+                            </button>
                           ) : (
                             <span className="binding-feedback muted">-</span>
                           )}
