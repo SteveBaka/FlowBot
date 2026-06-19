@@ -1,4 +1,4 @@
-﻿import { join } from 'path'
+import { join } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import crypto from 'crypto'
 import Store from 'electron-store'
@@ -77,6 +77,8 @@ interface ConfigSchema {
   notificationFilterMode: 'all' | 'whitelist' | 'blacklist'
   notificationFilterList: string[]
   messagePushEnabled: boolean
+  messageSendEnabled: boolean
+  messageSendMode: 'foreground' | 'background'
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -223,6 +225,8 @@ export class ConfigService {
       httpApiPort: 5031,
       httpApiHost: '127.0.0.1',
       messagePushEnabled: false,
+      messageSendEnabled: true,
+      messageSendMode: 'foreground',
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

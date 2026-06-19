@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useMemo } from 'react'
 import { useAppStore } from '../stores/appStore'
@@ -15,7 +15,7 @@ import {
   RotateCcw, Trash2, Plug, Check, Sun, Moon, Monitor,
   Palette, Database, HardDrive, Info, RefreshCw, ChevronDown, Download, Mic,
   ShieldCheck, Fingerprint, Lock, KeyRound, Bell, Globe, BarChart2, X, UserRound,
-  Sparkles, Loader2, CheckCircle2, XCircle
+  Sparkles, Loader2, CheckCircle2, XCircle, Send
 } from 'lucide-react'
 import { Avatar } from '../components/Avatar'
 import './SettingsPage.scss'
@@ -27,6 +27,7 @@ type SettingsTab =
   | 'database'
   | 'models'
   | 'cache'
+  | 'messageSend'
   | 'api'
   | 'updates'
   | 'security'
@@ -47,6 +48,7 @@ const tabs: { id: Exclude<SettingsTab, 'insight' | 'aiFootprint' | 'aiMessageIns
   { id: 'models', label: '模型管理', icon: Mic },
   { id: 'autoDownload', label: '自动下载', icon: Download },
   { id: 'cache', label: '缓存', icon: HardDrive },
+  { id: 'messageSend', label: '发送消息', icon: Send },
   { id: 'api', label: 'API 服务', icon: Globe },
   { id: 'analytics', label: '分析', icon: BarChart2 },
   { id: 'security', label: '安全', icon: ShieldCheck },
@@ -278,6 +280,9 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
   const [isTogglingApi, setIsTogglingApi] = useState(false)
   const [showApiWarning, setShowApiWarning] = useState(false)
   const [messagePushEnabled, setMessagePushEnabled] = useState(false)
+  const [messageSendEnabled, setMessageSendEnabled] = useState(true)
+  const [messageSendMode, setMessageSendMode] = useState<configService.MessageSendMode>('foreground')
+  const [messageSendModeOpen, setMessageSendModeOpen] = useState(false)
   const [messagePushFilterMode, setMessagePushFilterMode] = useState<configService.MessagePushFilterMode>('all')
   const [messagePushFilterList, setMessagePushFilterList] = useState<string[]>([])
   const [messagePushFilterDropdownOpen, setMessagePushFilterDropdownOpen] = useState(false)
@@ -481,6 +486,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       const savedNotificationFilterMode = await configService.getNotificationFilterMode()
       const savedNotificationFilterList = await configService.getNotificationFilterList()
       const savedMessagePushEnabled = await configService.getMessagePushEnabled()
+      const savedMessageSendEnabled = await configService.getMessageSendEnabled()
+      const savedMessageSendMode = await configService.getMessageSendMode()
       const savedMessagePushFilterMode = await configService.getMessagePushFilterMode()
       const savedMessagePushFilterList = await configService.getMessagePushFilterList()
       const contactsResult = await window.electronAPI.chat.getContacts({ lite: true })
@@ -536,6 +543,8 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
       setNotificationFilterMode(savedNotificationFilterMode)
       setNotificationFilterList(savedNotificationFilterList)
       setMessagePushEnabled(savedMessagePushEnabled)
+      setMessageSendEnabled(savedMessageSendEnabled)
+      setMessageSendMode(savedMessageSendMode)
       setMessagePushFilterMode(savedMessagePushFilterMode)
       setMessagePushFilterList(savedMessagePushFilterList)
       if (contactsResult.success && Array.isArray(contactsResult.contacts)) {
@@ -2805,6 +2814,19 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     showMessage(enabled ? '已开启主动推送' : '已关闭主动推送', true)
   }
 
+  const handleToggleMessageSend = async (enabled: boolean) => {
+    setMessageSendEnabled(enabled)
+    await configService.setMessageSendEnabled(enabled)
+    showMessage(enabled ? '已开启发送消息' : '已关闭发送消息', true)
+  }
+
+  const handleSetMessageSendMode = async (mode: configService.MessageSendMode) => {
+    setMessageSendMode(mode)
+    await configService.setMessageSendMode(mode)
+    await (window as any).electronAPI.chat.setSendMode(mode)
+    showMessage(mode === 'background' ? '已切换为后台发送模式' : '已切换为前台发送模式', true)
+  }
+
   const getSessionFilterType = (session: { username: string; type?: ContactInfo['type'] | number }): SessionFilterType => {
     const username = String(session.username || '').trim()
     if (username.endsWith('@chatroom')) return 'group'
@@ -4515,6 +4537,82 @@ JSON 输出格式：
     </div>
   )
 
+  const renderMessageSendTab = () => (
+    <div className="tab-content">
+      <div className="section-header">
+        <h3>发送消息</h3>
+        <p className="section-desc">配置聊天页面的消息发送功能和模式</p>
+      </div>
+
+      <div className="form-group">
+        <label>启用发送消息</label>
+        <span className="form-hint">开启后可在聊天页面的输入框发送文本消息</span>
+        <div className="log-toggle-line">
+          <span className="log-status">
+            {messageSendEnabled ? '已开启' : '已关闭'}
+          </span>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={messageSendEnabled}
+              onChange={(e) => { void handleToggleMessageSend(e.target.checked) }}
+            />
+            <span className="switch-slider" />
+          </label>
+        </div>
+      </div>
+
+      <div className="divider" />
+
+      <div className="form-group">
+        <label>发送模式</label>
+        <span className="form-hint">
+          前台模式：激活微信窗口后通过剪贴板粘贴发送（需要微信可见）。
+          后台模式：通过 PostMessage 直接发送，无需激活微信窗口（适合自动化场景）。
+        </span>
+        <div className="custom-select">
+          <div
+            className={`custom-select-trigger ${messageSendModeOpen ? 'open' : ''}`}
+            onClick={() => setMessageSendModeOpen(!messageSendModeOpen)}
+          >
+            <span className="custom-select-value">
+              {messageSendMode === 'foreground' ? '前台模式（默认）' : '后台模式（自动化）'}
+            </span>
+            <ChevronDown size={14} className={`custom-select-arrow ${messageSendModeOpen ? 'rotate' : ''}`} />
+          </div>
+          <div className={`custom-select-dropdown ${messageSendModeOpen ? 'open' : ''}`}>
+            {[
+              { value: 'foreground' as const, label: '前台模式（默认）', desc: '激活微信窗口，剪贴板+按键发送' },
+              { value: 'background' as const, label: '后台模式（自动化）', desc: 'PostMessage 静默发送，无需激活窗口' },
+            ].map(option => (
+              <div
+                key={option.value}
+                className={`custom-select-option ${messageSendMode === option.value ? 'selected' : ''}`}
+                onClick={() => {
+                  setMessageSendModeOpen(false)
+                  void handleSetMessageSendMode(option.value)
+                }}
+              >
+                <span>{option.label}</span>
+                <span className="form-hint" style={{ marginLeft: 8 }}>{option.desc}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="divider" />
+
+      <div className="form-group">
+        <label>使用说明</label>
+        <span className="form-hint">
+          消息通过后台 IPC 直接发送，无需 HTTP API 服务和 Hook 插件。
+          发送时微信窗口需已登录。后台模式下消息在后台静默发送，不会打断当前操作。
+        </span>
+      </div>
+    </div>
+  )
+
   const renderApiTab = () => (
     <div className="tab-content">
       <div className="form-group">
@@ -5581,6 +5679,7 @@ JSON 输出格式：
             {activeTab === 'database' && renderDatabaseTab()}
             {activeTab === 'models' && renderModelsTab()}
             {activeTab === 'cache' && renderCacheTab()}
+            {activeTab === 'messageSend' && renderMessageSendTab()}
             {activeTab === 'api' && renderApiTab()}
             {activeTab === 'aiCommon' && renderAiCommonTab()}
             {activeTab === 'insight' && renderInsightTab()}

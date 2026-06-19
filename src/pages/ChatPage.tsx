@@ -32,6 +32,8 @@ import {
 } from '../services/exportBridge'
 import ChatHeader from './Chat/ChatHeader'
 import ChatMessageBubble from './Chat/ChatMessageBubble'
+import { MessageInput } from '../components/MessageInput'
+import { sendMessage as apiSendMessage } from '../services/messageService'
 import '../styles/batchTranscribe.scss'
 import './ChatPage.scss'
 
@@ -1541,6 +1543,7 @@ function ChatPage(props: ChatPageProps) {
   const [standaloneInitialLoadRequested, setStandaloneInitialLoadRequested] = useState(false)
   const [showVoiceTranscribeDialog, setShowVoiceTranscribeDialog] = useState(false)
   const [autoTranscribeVoiceEnabled, setAutoTranscribeVoiceEnabled] = useState(false)
+  const [messageSendEnabled, setMessageSendEnabled] = useState(true)
   const [pendingVoiceTranscriptRequest, setPendingVoiceTranscriptRequest] = useState<{ sessionId: string; messageId: string } | null>(null)
   const [inProgressExportSessionIds, setInProgressExportSessionIds] = useState<Set<string>>(new Set())
   const [isPreparingExportDialog, setIsPreparingExportDialog] = useState(false)
@@ -3243,6 +3246,13 @@ function ChatPage(props: ChatPageProps) {
         if (!canceled) {
           setAutoTranscribeVoiceEnabled(false)
         }
+      })
+    void configService.getMessageSendEnabled()
+      .then((enabled) => {
+        if (!canceled) setMessageSendEnabled(enabled)
+      })
+      .catch(() => {
+        if (!canceled) setMessageSendEnabled(true)
       })
     return () => {
       canceled = true
@@ -8312,6 +8322,25 @@ function ChatPage(props: ChatPageProps) {
                 </div>
               )}
             </div>
+
+            {/* 消息发送输入框 */}
+            {currentSessionId && (
+              <MessageInput
+                sessionId={currentSessionId}
+                disabled={!messageSendEnabled}
+                onSendMessage={async (msg) => {
+                  const result = await apiSendMessage({
+                    sessionId: msg.sessionId,
+                    content: msg.content,
+                    type: msg.type as any,
+                    imagePath: msg.imagePath,
+                  })
+                  if (!result.success) {
+                    window.alert(`发送失败: ${result.error || '请检查 HTTP API 服务是否启动及 Hook 插件是否激活'}`)
+                  }
+                }}
+              />
+            )}
           </>
         ) : (
           <div className="empty-chat">

@@ -1,4 +1,4 @@
-﻿import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
 
 type CloseConfirmPayload = {
   canMinimizeToTray: boolean
@@ -194,6 +194,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 聊天
   chat: {
     connect: () => ipcRenderer.invoke('chat:connect'),
+    sendMessage: (sessionId: string, content: string) => ipcRenderer.invoke('chat:sendMessage', sessionId, content),
+    setSendMode: (mode: 'foreground' | 'background') => ipcRenderer.invoke('chat:setSendMode', mode),
+    sendBatch: (tasks: Array<{ sessionId: string; content: string }>) => ipcRenderer.invoke('chat:sendBatch', tasks),
+    cancelSendQueue: () => ipcRenderer.invoke('chat:cancelSendQueue'),
+    sendProgress: () => ipcRenderer.invoke('chat:sendProgress'),
+    isWeChatRunning: () => ipcRenderer.invoke('chat:isWeChatRunning'),
     getSessions: () => ipcRenderer.invoke('chat:getSessions'),
     markAllSessionsRead: () => ipcRenderer.invoke('chat:markAllSessionsRead'),
     getAntiRevokeSessions: () => ipcRenderer.invoke('chat:getAntiRevokeSessions'),

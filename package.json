@@ -1,6 +1,6 @@
 {
   "name": "weflow",
-  "version": "4.3.0",
+  "version": "4.6.1",
   "description": "WeFlow",
   "main": "dist-electron/main.js",
   "author": {
@@ -16,8 +16,8 @@
     "postinstall": "electron-builder install-app-deps && node scripts/prepare-electron-runtime.cjs",
     "rebuild": "electron-rebuild",
     "dev": "node scripts/prepare-electron-runtime.cjs && vite",
-    "typecheck": "tsc --noEmit",
-    "build": "tsc && vite build && electron-builder",
+    "typecheck": "npx tsc --noEmit",
+    "build": "npx tsc && npx vite build && npx electron-builder",
     "preview": "vite preview",
     "electron:dev": "node scripts/prepare-electron-runtime.cjs && vite --mode electron",
     "electron:build": "npm run build"
@@ -28,7 +28,7 @@
     "echarts-for-react": "^3.0.2",
     "electron-store": "^11.0.2",
     "electron-updater": "^6.3.9",
-    "exceljs": "^4.4.0",
+    "exceljs": "^3.4.0",
     "ffmpeg-static": "^5.3.0",
     "fzstd": "^0.1.1",
     "html2canvas": "^1.4.1",
@@ -56,6 +56,7 @@
     "electron-builder": "^26.8.1",
     "esbuild": "^0.28.0",
     "sass": "^1.98.0",
+    "sass-embedded": "^1.100.0",
     "sharp": "^0.34.5",
     "typescript": "^6.0.3",
     "vite": "^8.0.10",
@@ -75,7 +76,7 @@
     }
   },
   "build": {
-    "appId": "com.WeFlow.app",
+    "appId": "com.hicccc77.weflow",
     "publish": {
       "provider": "github",
       "owner": "hicccc77",

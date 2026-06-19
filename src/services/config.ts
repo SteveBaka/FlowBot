@@ -1,4 +1,4 @@
-﻿// 配置服务 - 封装 Electron Store
+// 配置服务 - 封装 Electron Store
 import { config } from './ipc'
 import type { ExportDefaultDateRangeConfig } from '../utils/exportDateRange'
 import type { ExportAutomationTask } from '../types/exportAutomation'
@@ -75,6 +75,8 @@ export const CONFIG_KEYS = {
   HTTP_API_PORT: 'httpApiPort',
   HTTP_API_HOST: 'httpApiHost',
   MESSAGE_PUSH_ENABLED: 'messagePushEnabled',
+  MESSAGE_SEND_ENABLED: 'messageSendEnabled',
+  MESSAGE_SEND_MODE: 'messageSendMode',
   MESSAGE_PUSH_FILTER_MODE: 'messagePushFilterMode',
   MESSAGE_PUSH_FILTER_LIST: 'messagePushFilterList',
   WINDOW_CLOSE_BEHAVIOR: 'windowCloseBehavior',
@@ -1760,6 +1762,26 @@ export async function getMessagePushEnabled(): Promise<boolean> {
 
 export async function setMessagePushEnabled(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.MESSAGE_PUSH_ENABLED, enabled)
+}
+
+export async function getMessageSendEnabled(): Promise<boolean> {
+  const value = await config.get(CONFIG_KEYS.MESSAGE_SEND_ENABLED)
+  return value !== false
+}
+
+export async function setMessageSendEnabled(enabled: boolean): Promise<void> {
+  await config.set(CONFIG_KEYS.MESSAGE_SEND_ENABLED, enabled)
+}
+
+export type MessageSendMode = 'foreground' | 'background'
+
+export async function getMessageSendMode(): Promise<MessageSendMode> {
+  const value = await config.get(CONFIG_KEYS.MESSAGE_SEND_MODE)
+  return value === 'background' ? 'background' : 'foreground'
+}
+
+export async function setMessageSendMode(mode: MessageSendMode): Promise<void> {
+  await config.set(CONFIG_KEYS.MESSAGE_SEND_MODE, mode)
 }
 
 export type MessagePushFilterMode = 'all' | 'whitelist' | 'blacklist'

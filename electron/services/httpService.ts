@@ -14,6 +14,8 @@ import { videoService } from './videoService'
 import { imageDecryptService } from './imageDecryptService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
+import { getPluginManager } from '../plugins/pluginManager'
+import { SendOptions, MessageType } from '../plugins/plugin-interface'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -134,6 +136,8 @@ class HttpService {
   private messagePushEventId = 0
   private readonly messagePushReplayLimit = 1000
   private readonly messagePushReplayTtlMs = 10 * 60 * 1000
+  private wsClients: Set<import('ws').WebSocket> = new Set()
+  private wss: import('ws').WebSocketServer | null = null
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -185,6 +189,7 @@ class HttpService {
       this.server.listen(this.port, this.host, () => {
         this.running = true
         this.startMessagePushHeartbeat()
+        this.setupWebSocket()
         console.log(`[HttpService] HTTP API server started on http://${this.host}:${this.port}`)
         resolve({ success: true, port: this.port })
       })
@@ -197,6 +202,18 @@ class HttpService {
   async stop(): Promise<void> {
     return new Promise((resolve) => {
       if (this.server) {
+        // 关闭 WebSocket 服务器
+        if (this.wss) {
+          for (const client of this.wsClients) {
+            try {
+              client.close()
+            } catch {}
+          }
+          this.wsClients.clear()
+          this.wss.close()
+          this.wss = null
+        }
+
         for (const client of this.messagePushClients) {
           try {
             client.end()
@@ -491,6 +508,21 @@ class HttpService {
             } else if (pathname.startsWith('/api/v1/sns/post/')) {
                 if (req.method !== 'DELETE') return this.sendMethodNotAllowed(res, 'DELETE')
                 await this.handleSnsDeletePost(pathname, res)
+            } else if (pathname === '/api/v1/messages/send') {
+                if (req.method !== 'POST') return this.sendMethodNotAllowed(res, 'POST')
+                await this.handleSendMessage(req, res, bodyParams)
+            } else if (pathname === '/api/v1/plugins') {
+                if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
+                await this.handleGetPlugins(res)
+            } else if (pathname.match(/^\/api\/v1\/plugins\/[^/]+\/hook$/) && req.method === 'POST') {
+                const pluginName = pathname.split('/')[4]
+                await this.handleInstallHook(pluginName, req, res, bodyParams)
+            } else if (pathname.match(/^\/api\/v1\/plugins\/[^/]+\/hook$/) && req.method === 'DELETE') {
+                const pluginName = pathname.split('/')[4]
+                await this.handleUninstallHook(pluginName, res)
+            } else if (pathname === '/api/v1/hooks/status') {
+                if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
+                await this.handleGetHookStatus(res)
             } else if (pathname.startsWith('/api/v1/media/')) {
                 this.handleMediaRequest(pathname, res)
             } else {
@@ -2404,6 +2436,423 @@ class HttpService {
       case '49':
       default:
         return ChatLabType.LINK
+    }
+  }
+
+  /**
+   * 处理消息发送请求
+   */
+  private async handleSendMessage(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    bodyParams: any
+  ): Promise<void> {
+    try {
+      const { session_id, content, type = 'text', at_users, reply_to, image_path } = bodyParams
+
+      if (!session_id || !content) {
+        return this.sendError(res, 400, 'Missing required fields: session_id, content')
+      }
+
+      const pluginManager = getPluginManager()
+      const activePlugin = pluginManager.getActivePlugin()
+
+      if (!activePlugin) {
+        return this.sendError(res, 503, 'No active message hook plugin. Please install and activate a hook first.')
+      }
+
+      if (!activePlugin.capabilities.canSendMessage) {
+        return this.sendError(res, 503, 'Active plugin does not support sending messages')
+      }
+
+      // 解析消息类型
+      let messageType = MessageType.Text
+      switch (type.toLowerCase()) {
+        case 'text':
+          messageType = MessageType.Text
+          break
+        case 'image':
+          messageType = MessageType.Image
+          break
+        case 'voice':
+          messageType = MessageType.Voice
+          break
+        case 'video':
+          messageType = MessageType.Video
+          break
+        case 'emoji':
+          messageType = MessageType.Emoji
+          break
+        case 'file':
+          messageType = MessageType.File
+          break
+        default:
+          messageType = MessageType.Text
+      }
+
+      const sendOptions: SendOptions = {
+        sessionId: session_id,
+        content,
+        type: messageType,
+        atUsers: at_users,
+        replyTo: reply_to,
+        imagePath: image_path,
+      }
+
+      const result = await pluginManager.sendMessage(sendOptions)
+
+      if (result.success) {
+        this.sendJson(res, {
+          success: true,
+          message_id: result.messageId,
+          timestamp: result.timestamp,
+        })
+      } else {
+        this.sendError(res, 500, result.error || 'Failed to send message')
+      }
+    } catch (error) {
+      console.error('[HttpService] Send message error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * 处理获取插件列表请求
+   */
+  private async handleGetPlugins(res: http.ServerResponse): Promise<void> {
+    try {
+      const pluginManager = getPluginManager()
+      const plugins = pluginManager.listPlugins()
+
+      const pluginList = plugins.map(plugin => ({
+        name: plugin.metadata.name,
+        version: plugin.metadata.version,
+        description: plugin.metadata.description,
+        author: plugin.metadata.author,
+        platform: plugin.metadata.platform,
+        capabilities: plugin.capabilities,
+        status: pluginManager.getHookState(plugin.metadata.name)?.status || 'unknown',
+      }))
+
+      this.sendJson(res, {
+        success: true,
+        plugins: pluginList,
+        activePlugin: pluginManager.getActivePlugin()?.metadata.name || null,
+      })
+    } catch (error) {
+      console.error('[HttpService] Get plugins error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * 处理安装 Hook 请求
+   */
+  private async handleInstallHook(
+    pluginName: string,
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    bodyParams: any
+  ): Promise<void> {
+    try {
+      const { pid } = bodyParams
+
+      if (!pid) {
+        return this.sendError(res, 400, 'Missing required field: pid')
+      }
+
+      const pluginManager = getPluginManager()
+      const plugin = pluginManager.getPlugin(pluginName)
+
+      if (!plugin) {
+        return this.sendError(res, 404, `Plugin not found: ${pluginName}`)
+      }
+
+      const success = await pluginManager.installHook(pluginName, pid)
+
+      if (success) {
+        this.sendJson(res, {
+          success: true,
+          message: `Hook installed for plugin ${pluginName}`,
+          pid,
+        })
+      } else {
+        this.sendError(res, 500, `Failed to install hook for plugin ${pluginName}`)
+      }
+    } catch (error) {
+      console.error('[HttpService] Install hook error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * 处理卸载 Hook 请求
+   */
+  private async handleUninstallHook(
+    pluginName: string,
+    res: http.ServerResponse
+  ): Promise<void> {
+    try {
+      const pluginManager = getPluginManager()
+      const plugin = pluginManager.getPlugin(pluginName)
+
+      if (!plugin) {
+        return this.sendError(res, 404, `Plugin not found: ${pluginName}`)
+      }
+
+      const success = await pluginManager.uninstallHook(pluginName)
+
+      if (success) {
+        this.sendJson(res, {
+          success: true,
+          message: `Hook uninstalled for plugin ${pluginName}`,
+        })
+      } else {
+        this.sendError(res, 500, `Failed to uninstall hook for plugin ${pluginName}`)
+      }
+    } catch (error) {
+      console.error('[HttpService] Uninstall hook error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * 处理获取 Hook 状态请求
+   */
+  private async handleGetHookStatus(res: http.ServerResponse): Promise<void> {
+    try {
+      const pluginManager = getPluginManager()
+      const activePlugin = pluginManager.getActivePlugin()
+
+      if (!activePlugin) {
+        return this.sendJson(res, {
+          success: true,
+          status: 'no_active_plugin',
+          hookState: null,
+        })
+      }
+
+      const hookState = pluginManager.getHookState()
+
+      this.sendJson(res, {
+        success: true,
+        plugin: activePlugin.metadata.name,
+        hookState,
+      })
+    } catch (error) {
+      console.error('[HttpService] Get hook status error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * 设置 WebSocket 服务器
+   */
+  private setupWebSocket(): void {
+    if (!this.server) return
+
+    try {
+      // 动态导入 ws 模块
+      const WebSocket = require('ws')
+      this.wss = new WebSocket.Server({ server: this.server, path: '/api/v1/ws' })
+
+      this.wss.on('connection', (ws: import('ws').WebSocket, req: import('http').IncomingMessage) => {
+        console.log('[HttpService] WebSocket client connected')
+
+        // 验证 token
+        const url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
+        const token = url.searchParams.get('access_token') || 
+                      req.headers.authorization?.replace('Bearer ', '')
+
+        if (!this.verifyTokenSync(token)) {
+          ws.close(1008, 'Unauthorized')
+          return
+        }
+
+        this.wsClients.add(ws)
+
+        // 发送欢迎消息
+        ws.send(JSON.stringify({
+          event: 'connected',
+          data: {
+            message: 'WebSocket connected',
+            timestamp: Date.now(),
+          }
+        }))
+
+        // 监听消息
+        ws.on('message', (data: Buffer) => {
+          try {
+            const message = JSON.parse(data.toString())
+            this.handleWebSocketMessage(ws, message)
+          } catch (error) {
+            ws.send(JSON.stringify({
+              event: 'error',
+              data: { message: 'Invalid JSON' }
+            }))
+          }
+        })
+
+        // 监听关闭
+        ws.on('close', () => {
+          console.log('[HttpService] WebSocket client disconnected')
+          this.wsClients.delete(ws)
+        })
+
+        // 监听错误
+        ws.on('error', (error: Error) => {
+          console.error('[HttpService] WebSocket error:', error)
+          this.wsClients.delete(ws)
+        })
+      })
+
+      console.log('[HttpService] WebSocket server initialized at /api/v1/ws')
+    } catch (error) {
+      console.error('[HttpService] Failed to initialize WebSocket:', error)
+    }
+  }
+
+  /**
+   * 验证 token (同步版本)
+   */
+  private verifyTokenSync(token: string | null): boolean {
+    if (!token) return false
+    const expectedToken = this.configService.get('httpApiToken')
+    if (!expectedToken) return true
+    return this.safeEqual(token.trim(), expectedToken)
+  }
+
+  /**
+   * 处理 WebSocket 消息
+   */
+  private handleWebSocketMessage(ws: import('ws').WebSocket, message: any): void {
+    const { action, data } = message
+
+    switch (action) {
+      case 'ping':
+        ws.send(JSON.stringify({
+          event: 'pong',
+          data: { timestamp: Date.now() }
+        }))
+        break
+
+      case 'send_message':
+        this.handleWebSocketSendMessage(ws, data)
+        break
+
+      case 'get_status':
+        this.handleWebSocketGetStatus(ws)
+        break
+
+      default:
+        ws.send(JSON.stringify({
+          event: 'error',
+          data: { message: `Unknown action: ${action}` }
+        }))
+    }
+  }
+
+  /**
+   * 处理 WebSocket 发送消息请求
+   */
+  private async handleWebSocketSendMessage(ws: import('ws').WebSocket, data: any): Promise<void> {
+    try {
+      const { session_id, content, type = 'text', at_users, reply_to, image_path } = data
+
+      if (!session_id || !content) {
+        ws.send(JSON.stringify({
+          event: 'error',
+          data: { message: 'Missing required fields: session_id, content' }
+        }))
+        return
+      }
+
+      const pluginManager = getPluginManager()
+      const activePlugin = pluginManager.getActivePlugin()
+
+      if (!activePlugin) {
+        ws.send(JSON.stringify({
+          event: 'error',
+          data: { message: 'No active message hook plugin' }
+        }))
+        return
+      }
+
+      // 解析消息类型
+      let messageType = MessageType.Text
+      switch (type.toLowerCase()) {
+        case 'text':
+          messageType = MessageType.Text
+          break
+        case 'image':
+          messageType = MessageType.Image
+          break
+        default:
+          messageType = MessageType.Text
+      }
+
+      const sendOptions: SendOptions = {
+        sessionId: session_id,
+        content,
+        type: messageType,
+        atUsers: at_users,
+        replyTo: reply_to,
+        imagePath: image_path,
+      }
+
+      const result = await pluginManager.sendMessage(sendOptions)
+
+      ws.send(JSON.stringify({
+        event: 'send_result',
+        data: result
+      }))
+    } catch (error) {
+      ws.send(JSON.stringify({
+        event: 'error',
+        data: { message: String(error) }
+      }))
+    }
+  }
+
+  /**
+   * 处理 WebSocket 获取状态请求
+   */
+  private handleWebSocketGetStatus(ws: import('ws').WebSocket): void {
+    try {
+      const pluginManager = getPluginManager()
+      const activePlugin = pluginManager.getActivePlugin()
+      const hookState = pluginManager.getHookState()
+
+      ws.send(JSON.stringify({
+        event: 'status',
+        data: {
+          plugin: activePlugin?.metadata.name || null,
+          hookState,
+          timestamp: Date.now(),
+        }
+      }))
+    } catch (error) {
+      ws.send(JSON.stringify({
+        event: 'error',
+        data: { message: String(error) }
+      }))
+    }
+  }
+
+  /**
+   * 广播 WebSocket 消息
+   */
+  public broadcastWebSocket(event: string, data: any): void {
+    const message = JSON.stringify({ event, data })
+    for (const client of this.wsClients) {
+      try {
+        if (client.readyState === 1) { // WebSocket.OPEN
+          client.send(message)
+        }
+      } catch (error) {
+        console.error('[HttpService] WebSocket broadcast error:', error)
+        this.wsClients.delete(client)
+      }
     }
   }
 

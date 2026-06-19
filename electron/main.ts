@@ -1,4 +1,4 @@
-﻿import './preload-env'
+import './preload-env'
 import { app, BrowserWindow, ipcMain, nativeTheme, session, Tray, Menu, nativeImage } from 'electron'
 import { Worker } from 'worker_threads'
 import { randomUUID } from 'crypto'
@@ -2419,6 +2419,63 @@ function registerIpcHandlers() {
     return chatService.connect()
   })
 
+  ipcMain.handle('chat:sendMessage', async (_, sessionId: string, content: string) => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+
+    // 每次发送前从 config 同步模式（避免启动时未加载）
+    try {
+      const { getMessageSendMode } = require('./services/config')
+      const mode = await getMessageSendMode()
+      sender.setMode(mode)
+    } catch {}
+
+    // 群聊(@chatroom)用群名搜索，个人用 wxid 搜索
+    let searchName = sessionId
+    if (sessionId.endsWith('@chatroom')) {
+      try {
+        const contact = await chatService.getContact(sessionId)
+        if (contact) {
+          searchName = contact.remark || contact.nickName || sessionId
+        }
+      } catch {}
+    }
+
+    const result = await sender.sendMessage(content, searchName)
+    return result
+  })
+
+  ipcMain.handle('chat:setSendMode', async (_, mode: 'foreground' | 'background') => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+    sender.setMode(mode)
+    return { success: true }
+  })
+
+  ipcMain.handle('chat:sendBatch', async (_, tasks: Array<{ sessionId: string; content: string }>) => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+    return sender.sendBatch(tasks)
+  })
+
+  ipcMain.handle('chat:cancelSendQueue', async () => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+    return { cancelled: sender.cancelPending() }
+  })
+
+  ipcMain.handle('chat:sendProgress', async () => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+    return sender.getProgress()
+  })
+
+  ipcMain.handle('chat:isWeChatRunning', async () => {
+    const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+    const sender = getEnhancedMessageSender()
+    return { running: sender.isWeChatRunning() }
+  })
+
   ipcMain.handle('chat:getSessions', async () => {
     return chatService.getSessions()
   })
@@ -4269,6 +4326,7 @@ app.whenReady().then(async () => {
 
   // 设置资源路径
   updateSplashProgress(12, '正在初始化...')
+
   const candidateResources = app.isPackaged
     ? join(process.resourcesPath, 'resources')
     : join(app.getAppPath(), 'resources')

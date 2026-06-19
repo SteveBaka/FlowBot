@@ -1,4 +1,4 @@
-﻿import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
+import type { ChatSession, Message, Contact, ContactInfo, ChatRecordItem } from './models'
 
 export interface SessionChatWindowOpenOptions {
   source?: 'chat' | 'export'
@@ -481,6 +481,12 @@ export interface ElectronAPI {
   }
   chat: {
     connect: () => Promise<{ success: boolean; error?: string }>
+    sendMessage: (sessionId: string, content: string) => Promise<{ success: boolean; error?: string; method?: string }>
+    setSendMode: (mode: 'foreground' | 'background') => Promise<{ success: boolean }>
+    sendBatch: (tasks: Array<{ sessionId: string; content: string }>) => Promise<{ total: number; sent: number; failed: number }>
+    cancelSendQueue: () => Promise<{ cancelled: number }>
+    sendProgress: () => Promise<{ total: number; sent: number; failed: number; current?: string }>
+    isWeChatRunning: () => Promise<{ running: boolean }>
     getSessions: () => Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }>
     markAllSessionsRead: () => Promise<{ success: boolean; error?: string }>
     getAntiRevokeSessions: () => Promise<{ success: boolean; sessions?: ChatSession[]; error?: string }>

@@ -9,22 +9,13 @@ ManifestDPIAware true
   System::Call 'USER32::SetProcessDPIAware()'
 !macroend
 
-; 在安装开始前修正安装目录
-!macro preInit
-  ; 如果安装目录不以 WeFlow 结尾，自动追加
-  ${WordFind} "$INSTDIR" "\" "-1" $R0
-  ${If} $R0 != "WeFlow"
-    StrCpy $INSTDIR "$INSTDIR\WeFlow"
-  ${EndIf}
-!macroend
-
 ; 安装完成后检测并安装 VC++ Redistributable
 !macro customInstall
   ; 检查 VC++ 2015-2022 x64 是否已安装
   ReadRegStr $0 HKLM "SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64" "Installed"
   ${If} $0 != "1"
     ; 未安装，显示提示并下载
-    MessageBox MB_YESNO|MB_ICONQUESTION "检测到系统缺少 Visual C++ 运行库，这可能导致程序无法正常运行。$\n$\n是否立即下载并安装？（约 24MB）" IDYES downloadVC IDNO skipVC
+    MessageBox MB_YESNO|MB_ICONQUESTION "检测到系统缺少 Visual C++ 运行库，这可能导致程序无法正常运行。$\n\n是否立即下载并安装？（约 24MB）" IDYES downloadVC IDNO skipVC
     
     downloadVC:
       DetailPrint "正在下载 Visual C++ Redistributable..."
@@ -51,7 +42,7 @@ ManifestDPIAware true
         ${EndIf}
         Delete "$TEMP\vc_redist.x64.exe"
       ${Else}
-        MessageBox MB_OK|MB_ICONEXCLAMATION "下载失败：$0$\n$\n你可以稍后手动下载安装 Visual C++ Redistributable。"
+        MessageBox MB_OK|MB_ICONEXCLAMATION "下载失败：$0$\n\n你可以稍后手动下载安装 Visual C++ Redistributable。"
       ${EndIf}
       Goto doneVC
     
