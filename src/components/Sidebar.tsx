@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
-import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users, ArchiveRestore, Sparkles } from 'lucide-react'
+import { Home, MessageSquare, BarChart3, FileText, Settings, Download, Aperture, UserCircle, Lock, LockOpen, ChevronUp, FolderClosed, Footprints, Users, ArchiveRestore, Sparkles, Bot } from 'lucide-react'
 import { useAppStore } from '../stores/appStore'
 import * as configService from '../services/config'
 import { onExportSessionStatus, requestExportSessionStatus } from '../services/exportBridge'
@@ -391,6 +391,26 @@ function Sidebar({ collapsed }: SidebarProps) {
           >
             <span className="nav-icon"><FileText size={20} /></span>
             <span className="nav-label">年度报告</span>
+          </NavLink>
+
+          {/* Bot 配置 */}
+          <NavLink
+            to="/bot-config"
+            className={`nav-item ${isActive('/bot-config') ? 'active' : ''}`}
+            title={collapsed ? 'Bot 配置' : undefined}
+          >
+            <span className="nav-icon"><Bot size={20} /></span>
+            <span className="nav-label">Bot 配置</span>
+          </NavLink>
+
+          {/* 账号管理 */}
+          <NavLink
+            to="/account-management"
+            className={`nav-item ${isActive('/account-management') ? 'active' : ''}`}
+            title={collapsed ? '账号管理' : undefined}
+          >
+            <span className="nav-icon"><Users size={20} /></span>
+            <span className="nav-label">账号管理</span>
           </NavLink>
 
           {/* 我的足迹 */}

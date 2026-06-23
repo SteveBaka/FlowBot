@@ -150,6 +150,17 @@ interface ConfigSchema {
 
   // Docker WebUI Bot 配置
   bots: string
+
+  // OneBot 配置
+  oneBotEnabled: boolean
+  oneBotPort: number
+  oneBotAccessToken: string
+  oneBotSelfId: string
+  oneBotMaxConnections: number
+  oneBotBroadcastBatchSize: number
+  oneBotBroadcastIntervalMs: number
+  oneBotDebounceMs: number
+  oneBotBatchSize: number
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -281,7 +292,19 @@ export class ConfigService {
       aiMessageInsightSystemPrompt: '',
       aiInsightDebugLogEnabled: false,
       autoDownloadHighRes: false,
-      autoDownloadWhitelist: []
+      autoDownloadWhitelist: [],
+      agreementAccepted: false,
+      analyticsConsent: false,
+      bots: '[]',
+      oneBotEnabled: false,
+      oneBotPort: 3001,
+      oneBotAccessToken: '',
+      oneBotSelfId: '',
+      oneBotMaxConnections: 10,
+      oneBotBroadcastBatchSize: 100,
+      oneBotBroadcastIntervalMs: 50,
+      oneBotDebounceMs: 350,
+      oneBotBatchSize: 50,
     }
 
     const storeOptions: any = {
