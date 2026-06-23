@@ -525,6 +525,21 @@ class HttpService {
                 await this.handleGetHookStatus(res)
             } else if (pathname.startsWith('/api/v1/media/')) {
                 this.handleMediaRequest(pathname, res)
+            } else if (pathname === '/api/v1/mgmt/config' && req.method === 'GET') {
+                await this.handleMgmtGetConfig(res)
+            } else if (pathname === '/api/v1/mgmt/config' && req.method === 'POST') {
+                await this.handleMgmtSetConfig(req, res, bodyParams)
+            } else if (pathname === '/api/v1/mgmt/system' && req.method === 'GET') {
+                this.handleMgmtSystem(res)
+            } else if (pathname === '/api/v1/mgmt/disclaimer' && req.method === 'GET') {
+                this.handleMgmtDisclaimerGet(res)
+            } else if (pathname === '/api/v1/mgmt/disclaimer' && req.method === 'POST') {
+                this.handleMgmtDisclaimerSet(res)
+            } else if (pathname === '/api/v1/mgmt/docker' && req.method === 'GET') {
+                this.handleMgmtDocker(res)
+            } else if (pathname.startsWith('/api/v1/mgmt/')) {
+                const mgmtSub = pathname.slice('/api/v1/mgmt/'.length)
+                this.sendError(res, 404, 'Unknown mgmt endpoint: ' + mgmtSub)
             } else {
                 this.sendError(res, 404, 'Not Found')
             }
@@ -2868,6 +2883,113 @@ class HttpService {
   private sendMethodNotAllowed(res: http.ServerResponse, allow: string): void {
     res.setHeader('Allow', allow)
     this.sendError(res, 405, `Method Not Allowed. Allowed: ${allow}`)
+  }
+
+  // ─── Management API handlers ────────────────────────────────────────────
+
+  private async handleMgmtGetConfig(res: http.ServerResponse): Promise<void> {
+    try {
+      const config: Record<string, any> = {}
+      const sensitiveKeys = ['decryptKey', 'httpApiToken', 'authPassword', 'imageAesKey']
+      const keys = [
+        'httpApiEnabled', 'httpApiPort', 'httpApiToken', 'httpApiHost',
+        'messagePushEnabled', 'messagePushFilterMode', 'messagePushFilterList',
+        'messageSendEnabled', 'messageSendMode',
+        'notificationEnabled', 'notificationFilterMode',
+        'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
+        'logEnabled', 'bots'
+      ]
+      for (const key of keys) {
+        try {
+          const val = (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
+          if (val !== undefined) {
+            config[key] = sensitiveKeys.includes(key) ? '[encrypted]' : val
+          }
+        } catch {}
+      }
+      this.sendJson(res, { success: true, config })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private async handleMgmtSetConfig(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
+    try {
+      const updated: string[] = []
+      for (const [key, value] of Object.entries(body)) {
+        try {
+          if ((this.configService as any).store?.set) {
+            (this.configService as any).store.set(key, value)
+          } else if ((this.configService as any).set) {
+            (this.configService as any).set(key, value)
+          }
+          updated.push(key)
+        } catch (e) {
+          console.warn(`[HttpService] Failed to set config key "${key}":`, e)
+        }
+      }
+      this.sendJson(res, { success: true, updated })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtSystem(res: http.ServerResponse): void {
+    try {
+      const os = require('os')
+      this.sendJson(res, {
+        success: true,
+        system: {
+          uptime: os.uptime(),
+          memory: { total: os.totalmem(), free: os.freemem(), used: os.totalmem() - os.freemem() },
+          platform: process.platform,
+          arch: process.arch,
+          nodeVersion: process.version,
+          electronVersion: process.versions?.electron || 'N/A'
+        }
+      })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtDisclaimerGet(res: http.ServerResponse): void {
+    try {
+      const accepted = (this.configService as any).store?.get?.('disclaimerAccepted') ?? (this.configService as any).get?.('disclaimerAccepted') ?? false
+      this.sendJson(res, { success: true, accepted: !!accepted })
+    } catch {
+      this.sendJson(res, { success: true, accepted: false })
+    }
+  }
+
+  private handleMgmtDisclaimerSet(res: http.ServerResponse): void {
+    try {
+      if ((this.configService as any).store?.set) {
+        (this.configService as any).store.set('disclaimerAccepted', true)
+      } else if ((this.configService as any).set) {
+        (this.configService as any).set('disclaimerAccepted', true)
+      }
+      this.sendJson(res, { success: true })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtDocker(res: http.ServerResponse): void {
+    try {
+      const isDocker = this.isDockerEnvironment()
+      this.sendJson(res, {
+        success: true,
+        isDocker,
+        env: {
+          WEFLOW_DOCKER: process.env.WEFLOW_DOCKER || '',
+          ONEBOT_PORT: process.env.ONEBOT_PORT || '',
+          DISPLAY: process.env.DISPLAY || ''
+        }
+      })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
   }
 
   /**

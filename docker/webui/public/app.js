@@ -727,19 +727,6 @@ var App = {
     '</router-link></nav>' +
     '</div>' +
 
-    '<div class="sidebar-bottom">' +
-    '<div class="sidebar-module module-bottom">' +
-    '<div class="nav-bottom">' +
-    '<router-link to="/settings" class="nav-btn-sm" @click="onNavClick">' +
-    '<span>设置</span>' +
-    '</router-link>' +
-    '<router-link to="/about" class="nav-btn-sm" @click="onNavClick">' +
-    '<span>关于</span>' +
-    '</router-link>' +
-    '</div>' +
-    '</div>' +
-    '</div>' +
-
     '</aside>' +
 
     '<main class="main-content">' +
