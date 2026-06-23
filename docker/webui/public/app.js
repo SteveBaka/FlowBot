@@ -325,6 +325,8 @@ var BotPage = {
     '<div v-if="showModal" class="modal-overlay" @click.self="closeModal">' +
     '<div class="modal">' +
 
+    '<transition name="modal-step" mode="out-in">' +
+    '<div :key="modalStep">' +
     '<div v-if="modalStep===1">' +
     '<h3>选择连接模式</h3>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
@@ -338,7 +340,7 @@ var BotPage = {
     '<div style="text-align:center;margin-top:16px"><button class="btn btn-secondary" @click="closeModal">取消</button></div>' +
     '</div>' +
 
-    '<div v-if="modalStep===2">' +
+    '<div v-else-if="modalStep===2">' +
     '<h3>选择连接方向</h3>' +
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
     '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectDirection(\'server\')">' +
@@ -351,7 +353,7 @@ var BotPage = {
     '<div style="text-align:center;margin-top:16px"><button class="btn btn-secondary" @click="modalStep=1">返回</button></div>' +
     '</div>' +
 
-    '<div v-if="modalStep===3">' +
+    '<div v-else-if="modalStep===3">' +
     '<h3>配置 Bot</h3>' +
     '<div class="form-group"><label>名称</label><input type="text" v-model="modalBotName" placeholder="Bot 1"></div>' +
     '<div class="form-group"><label>地址</label><input type="text" v-model="modalAddress" placeholder="127.0.0.1"></div>' +
@@ -362,6 +364,7 @@ var BotPage = {
     '<button class="btn btn-primary" @click="addBot">保存</button>' +
     '</div></div>' +
 
+    '</div></transition>' +
     '</div></div></div>'
 }
 
@@ -471,6 +474,7 @@ var AccountsPage = {
     '<div style="display:flex;gap:8px">' +
     '<button class="btn btn-primary" @click="openNoVnc">打开 noVNC</button>' +
     '<button class="btn btn-secondary" @click="load">刷新状态</button>' +
+    '</div></transition>' +
     '</div></div></div>'
 }
 
@@ -530,6 +534,7 @@ var SettingsPage = {
     '<div class="input-with-toggle">' +
     '<input :type="showHttpToken ? \'text\' : \'password\'" v-model="wf.httpToken" placeholder="自动生成">' +
     '<button class="btn btn-secondary btn-sm" @click="showHttpToken=!showHttpToken">{{ showHttpToken?\'隐藏\':\'显示\' }}</button>' +
+    '</div></transition>' +
     '</div></div></div>' +
 
     '<div class="card"><h2>消息设置</h2>' +
@@ -612,6 +617,7 @@ var AboutPage = {
     '<div class="code-block">docker run -d --name weflow \\\n  --cap-add=SYS_PTRACE \\\n  -v /path/to/xwechat_files:/data/xwechat_files \\\n  -p 3001:3001 -p 5031:5031 -p 5099:5099 -p 6080:6080 \\\n  weflow-onebot</div>' +
     '<p>使用 docker-compose：</p>' +
     '<div class="code-block">docker compose up -d</div>' +
+    '</div></transition>' +
     '</div></div></div>'
 }
 

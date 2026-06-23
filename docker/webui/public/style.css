@@ -584,6 +584,10 @@ textarea {
 .modal-zoom-leave-active { transition: opacity 0.2s cubic-bezier(0.4, 0, 1, 1), transform 0.2s cubic-bezier(0.4, 0, 1, 1); }
 .modal-zoom-enter-from { opacity: 0; transform: scale(0.92) translateY(8px); }
 .modal-zoom-leave-to { opacity: 0; transform: scale(0.96) translateY(4px); }
+.modal-step-enter-active { transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1); }
+.modal-step-leave-active { transition: opacity 0.15s cubic-bezier(0.4, 0, 1, 1), transform 0.15s cubic-bezier(0.4, 0, 1, 1); }
+.modal-step-enter-from { opacity: 0; transform: translateX(20px); }
+.modal-step-leave-to { opacity: 0; transform: translateX(-20px); }
 
 /* ── Buttons ── */
 .btn {
@@ -638,8 +642,8 @@ textarea {
 .toggle {
   display: inline-flex !important;
   position: relative;
-  width: 40px;
-  height: 22px;
+  width: 36px;
+  height: 20px;
   cursor: pointer;
   flex-shrink: 0;
   margin-bottom: 0 !important;
@@ -655,8 +659,8 @@ textarea {
 .toggle .slider::before {
   content: '';
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 14px;
+  height: 14px;
   left: 3px;
   top: 3px;
   background: #fff;
@@ -664,7 +668,7 @@ textarea {
   transition: transform 0.3s;
 }
 .toggle input:checked + .slider { background: var(--accent); }
-.toggle input:checked + .slider::before { transform: translateX(18px); }
+.toggle input:checked + .slider::before { transform: translateX(16px); }
 
 /* ── Bot Card ── */
 .bot-card {
