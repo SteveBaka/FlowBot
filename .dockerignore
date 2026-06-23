@@ -1,0 +1,10 @@
+node_modules
+dist
+dist-electron
+.git
+.vscode
+.idea
+test
+*.log
+*.local
+.kilo
