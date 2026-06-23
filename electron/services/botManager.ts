@@ -12,6 +12,9 @@ interface BotEntry {
   server: OneBotServer | null
   status: 'running' | 'stopped' | 'error'
   error?: string
+  lastHealthCheck?: number
+  clientCount?: number
+  connectionStatus?: 'connected' | 'disconnected' | 'unknown'
 }
 
 interface BotConfig {
@@ -67,6 +70,8 @@ export async function startBotManager(
 
     await startBot(cfg, getConfig)
   }
+
+  setInterval(() => { healthCheckAll() }, 30_000)
 }
 
 async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promise<void> {
@@ -188,6 +193,41 @@ export async function restartBot(botId: string, getConfig: (key: string) => any)
   return true
 }
 
+export async function healthCheckAll(): Promise<void> {
+  const now = Date.now()
+  for (const [, entry] of bots) {
+    if (entry.status !== 'running') {
+      entry.connectionStatus = 'unknown'
+      continue
+    }
+
+    if (entry.mode === 'http' || (entry.mode === 'ws' && entry.direction === 'server')) {
+      try {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), 3000)
+        const res = await fetch(`http://127.0.0.1:${entry.port}/api/get_status`, {
+          signal: controller.signal,
+          headers: entry.token ? { Authorization: `Bearer ${entry.token}` } : {},
+        })
+        clearTimeout(timeout)
+        if (res.ok) {
+          const body = await res.json() as any
+          entry.connectionStatus = 'connected'
+          entry.clientCount = body?.data?.client_count ?? entry.server?.getClientCount() ?? 0
+        } else {
+          entry.connectionStatus = 'disconnected'
+        }
+      } catch {
+        entry.connectionStatus = 'disconnected'
+      }
+      entry.lastHealthCheck = now
+    } else if (entry.mode === 'ws' && entry.direction === 'client') {
+      entry.connectionStatus = entry.server?.isConnected() ? 'connected' : 'disconnected'
+      entry.lastHealthCheck = now
+    }
+  }
+}
+
 export function getBotStatus(): Array<{
   id: string
   name: string
@@ -197,13 +237,15 @@ export function getBotStatus(): Array<{
   status: string
   error?: string
   clientCount: number
+  connectionStatus?: 'connected' | 'disconnected' | 'unknown'
+  lastHealthCheck?: number
 }> {
   const result: any[] = []
   for (const [id, entry] of bots) {
-    let clientCount = 0
+    let clientCount = entry.clientCount ?? 0
     if (entry.server) {
       try {
-        clientCount = (entry.server as any).clients?.size || 0
+        clientCount = (entry.server as any).clients?.size || clientCount
       } catch {}
     }
     result.push({
@@ -214,7 +256,9 @@ export function getBotStatus(): Array<{
       port: entry.port,
       status: entry.status,
       error: entry.error,
-      clientCount
+      clientCount,
+      connectionStatus: entry.connectionStatus,
+      lastHealthCheck: entry.lastHealthCheck,
     })
   }
   return result

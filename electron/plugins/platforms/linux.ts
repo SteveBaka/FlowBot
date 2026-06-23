@@ -112,31 +112,31 @@ export class LinuxSender implements IPlatformSender {
     log(`Activating window ${wid}...`)
     await run(`xdotool windowactivate --sync "${wid}"`)
     await run(`xdotool windowfocus --sync "${wid}"`)
-    await new Promise(r => setTimeout(r, 200))
+    await new Promise(r => setTimeout(r, 100))
   }
 
   private async searchAndSelectContact(contactName: string, wid: string): Promise<void> {
     log(`Step 1: Opening search with Ctrl+F...`)
     await run(`xdotool key --window "${wid}" ctrl+f`)
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => setTimeout(r, 200))
 
     log(`Step 2: Clearing search field...`)
     await run(`xdotool key --window "${wid}" ctrl+a`)
-    await new Promise(r => setTimeout(r, 100))
+    await new Promise(r => setTimeout(r, 50))
 
     log(`Step 3: Typing contact name: "${contactName}"`)
     if (contactName.length <= 50) {
-      await run(`xdotool type --window "${wid}" --delay 50 "${contactName}"`)
+      await run(`xdotool type --window "${wid}" --delay 30 "${contactName}"`)
     } else {
       await xclipSet(contactName)
       await new Promise(r => setTimeout(r, 100))
       await run(`xdotool key --window "${wid}" ctrl+v`)
     }
-    await new Promise(r => setTimeout(r, 800))
+    await new Promise(r => setTimeout(r, 500))
 
     log(`Step 4: Pressing Enter to select first result...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, 300))
+    await new Promise(r => setTimeout(r, 200))
 
     log(`Search complete for contact: "${contactName}"`)
   }
@@ -144,13 +144,13 @@ export class LinuxSender implements IPlatformSender {
   private async pasteAndSend(content: string, wid: string): Promise<void> {
     log(`Step 5: Pasting message (${content.length} chars)...`)
     await xclipSet(content)
-    await new Promise(r => setTimeout(r, 100))
+    await new Promise(r => setTimeout(r, 80))
     await run(`xdotool key --window "${wid}" ctrl+v`)
-    await new Promise(r => setTimeout(r, 150))
+    await new Promise(r => setTimeout(r, 100))
 
     log(`Step 6: Pressing Enter to send...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, 200))
+    await new Promise(r => setTimeout(r, 150))
 
     log('Message sent successfully')
   }
