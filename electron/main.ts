@@ -4496,6 +4496,39 @@ app.whenReady().then(async () => {
 
   await httpService.autoStart()
 
+  // 启动 OneBot bot 管理器
+  try {
+    const { startBotManager, setBotMessageCallback } = require('./services/botManager')
+    const rawBots = configService.get('bots' as any)
+    if (rawBots) {
+      setBotMessageCallback((msg: any) => {
+        console.log('[App] Bot message received:', msg.action, msg.botName)
+        // 将 bot 收到的消息转发到 messagePushService
+        if (msg.action === 'send_private_msg' || msg.action === 'send_group_msg' || msg.action === 'send_msg') {
+          try {
+            const chatService = require('./services/chatService').getChatService()
+            const params = msg.params || {}
+            if (params.user_id || params.group_id || params.target) {
+              const sessionId = params.group_id || params.user_id || params.target
+              const content = params.message || params.text || params.content || ''
+              if (sessionId && content) {
+                chatService.sendMessage(sessionId, content).catch((err: any) => {
+                  console.error('[App] Bot sendMessage failed:', err)
+                })
+              }
+            }
+          } catch (e) {
+            console.error('[App] Bot message forwarding error:', e)
+          }
+        }
+      })
+      await startBotManager(rawBots, (key: string) => configService.get(key as any))
+      console.log('[App] Bot manager started')
+    }
+  } catch (e) {
+    console.error('[App] Failed to start bot manager:', e)
+  }
+
   app.on('activate', () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       if (!mainWindow.isVisible()) {
@@ -4522,6 +4555,8 @@ const shutdownAppServices = async (): Promise<void> => {
     messagePushService.stop()
     insightService.stop()
     groupSummaryService.stop()
+    // 停止所有 OneBot bot
+    try { const { stopAllBots } = require('./services/botManager'); await stopAllBots() } catch {}
     // 兜底：5秒后强制退出，防止某个异步任务卡住导致进程残留
     const forceExitTimer = setTimeout(() => {
       console.warn('[App] Force exit after timeout')

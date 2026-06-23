@@ -537,6 +537,14 @@ class HttpService {
                 this.handleMgmtDisclaimerSet(res)
             } else if (pathname === '/api/v1/mgmt/docker' && req.method === 'GET') {
                 this.handleMgmtDocker(res)
+            } else if (pathname === '/api/v1/mgmt/bots/start' && req.method === 'POST') {
+                await this.handleMgmtBotStart(req, res, bodyParams)
+            } else if (pathname === '/api/v1/mgmt/bots/stop' && req.method === 'POST') {
+                await this.handleMgmtBotStop(req, res, bodyParams)
+            } else if (pathname === '/api/v1/mgmt/bots/restart' && req.method === 'POST') {
+                await this.handleMgmtBotRestart(req, res, bodyParams)
+            } else if (pathname === '/api/v1/mgmt/bots/status' && req.method === 'GET') {
+                this.handleMgmtBotStatus(res)
             } else if (pathname.startsWith('/api/v1/mgmt/')) {
                 const mgmtSub = pathname.slice('/api/v1/mgmt/'.length)
                 this.sendError(res, 404, 'Unknown mgmt endpoint: ' + mgmtSub)
@@ -2989,6 +2997,54 @@ class HttpService {
       })
     } catch (error) {
       this.sendError(res, 500, String(error))
+    }
+  }
+
+  private async handleMgmtBotStart(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
+    try {
+      const { startBotManager } = require('../../services/botManager')
+      const rawBots = (this.configService as any).store?.get?.('bots') ?? (this.configService as any).get?.('bots')
+      await startBotManager(rawBots || '[]', (key: string) => {
+        return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
+      })
+      this.sendJson(res, { success: true })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private async handleMgmtBotStop(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
+    try {
+      const { stopBot, stopAllBots } = require('../../services/botManager')
+      if (body.id) {
+        await stopBot(body.id)
+      } else {
+        await stopAllBots()
+      }
+      this.sendJson(res, { success: true })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private async handleMgmtBotRestart(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
+    try {
+      const { restartBot } = require('../../services/botManager')
+      const ok = await restartBot(body.id, (key: string) => {
+        return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
+      })
+      this.sendJson(res, { success: ok })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtBotStatus(res: http.ServerResponse): void {
+    try {
+      const { getBotStatus } = require('../../services/botManager')
+      this.sendJson(res, { success: true, bots: getBotStatus() })
+    } catch (error) {
+      this.sendJson(res, { success: true, bots: [] })
     }
   }
 

@@ -2,6 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
+import { broadcastToAllBots } from './botManager'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
@@ -513,6 +514,7 @@ class MessagePushService {
       if (!this.shouldPushPayload(payload)) continue
 
       httpService.broadcastMessagePush(payload)
+      broadcastToAllBots('messages:batch', payload)
       this.rememberMessageKey(messageKey)
       this.bumpSessionBaseline(session.username, message)
     }
@@ -565,6 +567,7 @@ class MessagePushService {
       if (!this.shouldPushPayload(payload)) continue
 
       httpService.broadcastMessagePush(payload)
+      broadcastToAllBots('messages:batch', payload)
       this.rememberMessageKey(messageKey)
       this.rememberSeenMessageKey(messageKey)
       this.bumpSessionBaseline(sessionId, message)
