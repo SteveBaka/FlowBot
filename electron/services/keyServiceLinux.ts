@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync } from 'fs'
+import { existsSync, readdirSync, statSync, readFileSync, chmodSync } from 'fs'
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
@@ -46,7 +46,10 @@ export class KeyServiceLinux {
       candidates.push(join(app.getAppPath(), '..', 'Xkey', 'build', 'xkey_helper_linux'))
     }
     for (const p of candidates) {
-      if (existsSync(p)) return p
+      if (existsSync(p)) {
+        try { chmodSync(p, 0o755) } catch {}
+        return p
+      }
     }
     throw new Error('找不到 xkey_helper_linux，请检查路径')
   }
@@ -191,7 +194,59 @@ export class KeyServiceLinux {
       }
 
       const targetAddr = scanRes.target_addr
-      onStatus?.('基址扫描成功，正在请求管理员权限进行内存 Hook...', 0)
+      onStatus?.('基址扫描成功，正在执行内存 Hook...', 0)
+
+      const isDocker = process.env.WEFLOW_DOCKER === '1'
+      const isRoot = isDocker || (typeof process.getuid === 'function' && process.getuid() === 0)
+      const timeoutSec = Math.ceil((timeoutMs + 15_000) / 1000)
+
+      if (isRoot) {
+        console.log('[KeyServiceLinux] Running as root/Docker, executing hook directly')
+        const hookCmd = `${helperPath} db_hook ${pid} ${targetAddr} ${timeoutMs}`
+        return await new Promise((resolve) => {
+          let settled = false
+          const finish = (result: DbKeyResult) => {
+            if (settled) return
+            settled = true
+            clearTimeout(watchdog)
+            resolve(result)
+          }
+          const watchdog = setTimeout(() => {
+            execAsync(`kill -CONT ${pid}`).catch(() => {})
+            const err = `Hook 等待超时（${Math.round(timeoutMs / 1000)} 秒）`
+            onStatus?.(err, 2)
+            finish({ success: false, error: err })
+          }, timeoutMs + 30_000)
+
+          onStatus?.('请在手机上确认登录微信，正在等待密钥回调...', 0)
+
+          exec(hookCmd, { timeout: timeoutMs + 30_000 }, (error, stdout, stderr) => {
+            execAsync(`kill -CONT ${pid}`).catch(() => {})
+            if (error) {
+              const detail = String(stderr || '').trim()
+              const message = detail ? `${error.message}: ${detail}` : error.message
+              onStatus?.('Hook 执行失败', 2)
+              finish({ success: false, error: `Hook 执行失败: ${message}` })
+              return
+            }
+            try {
+              const output = String(stdout || '').trim()
+              if (!output) throw new Error('Hook 无输出')
+              const hookRes = JSON.parse(output)
+              if (hookRes.success) {
+                onStatus?.('密钥获取成功', 1)
+                finish({ success: true, key: hookRes.key })
+              } else {
+                onStatus?.(hookRes.result, 2)
+                finish({ success: false, error: hookRes.result })
+              }
+            } catch (e: any) {
+              onStatus?.('解析 Hook 结果失败', 2)
+              finish({ success: false, error: e?.message || '解析 Hook 结果失败' })
+            }
+          })
+        })
+      }
 
       if (!this.sudo || typeof this.sudo.exec !== 'function') {
         const err = 'Linux 授权组件 @vscode/sudo-prompt 未加载，请确认依赖已安装并重新启动 WeFlow'
@@ -200,14 +255,6 @@ export class KeyServiceLinux {
       }
 
       return await new Promise((resolve) => {
-        const options = {
-          name: 'WeFlow',
-          env: {
-            PATH: `${process.env.PATH || ''}:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin`
-          }
-        }
-        const timeoutSec = Math.ceil((timeoutMs + 15_000) / 1000)
-        const command = `timeout -k 5s ${timeoutSec}s "${helperPath}" db_hook ${pid} ${targetAddr} ${timeoutMs}`
         let settled = false
         const finish = (result: DbKeyResult) => {
           if (settled) return
