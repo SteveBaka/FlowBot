@@ -564,6 +564,12 @@ class HttpService {
                 await this.handleMgmtBotRestart(req, res, bodyParams)
             } else if (pathname === '/api/v1/mgmt/bots/status' && req.method === 'GET') {
                 this.handleMgmtBotStatus(res)
+            } else if (pathname === '/api/v1/mgmt/logs' && req.method === 'GET') {
+                this.handleMgmtLogs(url, res)
+            } else if (pathname === '/api/v1/mgmt/logs/stats' && req.method === 'GET') {
+                this.handleMgmtLogStats(res)
+            } else if (pathname === '/api/v1/mgmt/logs/clear' && req.method === 'POST') {
+                this.handleMgmtLogClear(url, res)
             } else if (pathname.startsWith('/api/v1/mgmt/')) {
                 const mgmtSub = pathname.slice('/api/v1/mgmt/'.length)
                 this.sendError(res, 404, 'Unknown mgmt endpoint: ' + mgmtSub)
@@ -3062,6 +3068,41 @@ class HttpService {
       this.sendJson(res, { success: true, bots: getBotStatus() })
     } catch (error) {
       this.sendJson(res, { success: true, bots: [] })
+    }
+  }
+
+  private handleMgmtLogs(url: URL, res: http.ServerResponse): void {
+    try {
+      const { logger } = require('../../services/logger')
+      const categories = url.searchParams.get('categories')?.split(',') || undefined
+      const level = url.searchParams.get('level') || 'all'
+      const search = url.searchParams.get('search') || ''
+      const lines = Number(url.searchParams.get('lines')) || 200
+      const logs = logger.readLogs({ categories, level, search, lines })
+      this.sendJson(res, { success: true, logs, count: logs.length })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtLogStats(res: http.ServerResponse): void {
+    try {
+      const { logger } = require('../../services/logger')
+      const stats = logger.getLogStats()
+      this.sendJson(res, { success: true, stats, logDir: logger.getLogDir() })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  private handleMgmtLogClear(url: URL, res: http.ServerResponse): void {
+    try {
+      const { logger } = require('../../services/logger')
+      const category = url.searchParams.get('category') || undefined
+      logger.clearLogs(category)
+      this.sendJson(res, { success: true, cleared: category || 'all' })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
     }
   }
 

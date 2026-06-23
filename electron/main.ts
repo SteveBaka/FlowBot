@@ -4261,6 +4261,12 @@ function checkForUpdatesOnStartup() {
 app.whenReady().then(async () => {
   // 先初始化配置，以便在启动早期判定是否需要静默启动
   configService = new ConfigService()
+
+  // 初始化日志系统
+  const { logger } = require('./services/logger')
+  logger.init()
+  logger.info('system', 'WeFlow starting up...')
+
   applyAutoUpdateChannel('startup')
   syncLaunchAtStartupPreference()
   const onboardingDone = configService.get('onboardingDone') === true
