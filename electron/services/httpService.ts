@@ -347,13 +347,28 @@ class HttpService {
   }
 
   async autoStart(): Promise<void> {
-    const enabled = this.configService.get('httpApiEnabled')
+    let isDocker = false
+    try { if (require('fs').existsSync('/.dockerenv')) isDocker = true } catch {}
+    if (process.env.WEFLOW_DOCKER === '1') isDocker = true
+
+    let enabled = this.configService.get('httpApiEnabled')
+    const port = Number(this.configService.get('httpApiPort')) || 5031
+    let host = String(this.configService.get('httpApiHost') || '127.0.0.1').trim() || '127.0.0.1'
+
+    if (isDocker) {
+      if (!enabled) {
+        try { this.configService.set('httpApiEnabled', true) } catch {}
+        enabled = true
+        console.log('[HttpService] Docker: auto-enabling HTTP API')
+      }
+      host = '0.0.0.0'
+      try { this.configService.set('httpApiHost', host) } catch {}
+    }
+
     if (enabled) {
-      const port = Number(this.configService.get('httpApiPort')) || 5031
-      const host = String(this.configService.get('httpApiHost') || '127.0.0.1').trim() || '127.0.0.1'
       try {
         await this.start(port, host)
-        console.log(`[HttpService] Auto-started on port ${port}`)
+        console.log(`[HttpService] Auto-started on ${host}:${port}`)
       } catch (err) {
         console.error('[HttpService] Auto-start failed:', err)
       }
@@ -402,7 +417,11 @@ class HttpService {
     private verifyToken(req: http.IncomingMessage, url: URL, body: Record<string, any>): boolean {
         const expectedToken = String(this.configService.get('httpApiToken') || '').trim()
         if (!expectedToken) {
-            // token 未配置时拒绝所有请求，防止未授权访问
+            // Docker 模式或开发环境：token 为空时允许
+            let isDocker = false
+            try { if (require('fs').existsSync('/.dockerenv')) isDocker = true } catch {}
+            if (process.env.WEFLOW_DOCKER === '1') isDocker = true
+            if (isDocker) return true
             console.warn('[HttpService] Access denied: httpApiToken not configured')
             return false
         }
@@ -2895,31 +2914,33 @@ class HttpService {
 
   // ─── Management API handlers ────────────────────────────────────────────
 
-  private async handleMgmtGetConfig(res: http.ServerResponse): Promise<void> {
-    try {
-      const config: Record<string, any> = {}
-      const sensitiveKeys = ['decryptKey', 'httpApiToken', 'authPassword', 'imageAesKey']
-      const keys = [
-        'httpApiEnabled', 'httpApiPort', 'httpApiToken', 'httpApiHost',
-        'messagePushEnabled', 'messagePushFilterMode', 'messagePushFilterList',
-        'messageSendEnabled', 'messageSendMode',
-        'notificationEnabled', 'notificationFilterMode',
-        'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
-        'logEnabled', 'bots'
-      ]
-      for (const key of keys) {
+    private handleMgmtGetConfig(res: http.ServerResponse): void {
         try {
-          const val = (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
-          if (val !== undefined) {
-            config[key] = sensitiveKeys.includes(key) ? '[encrypted]' : val
-          }
-        } catch {}
-      }
-      this.sendJson(res, { success: true, config })
-    } catch (error) {
-      this.sendError(res, 500, String(error))
+            const store = (this.configService as any).store
+            const getVal = (key: string) => {
+                try { return store?.get?.(key) ?? (this.configService as any).get?.(key) } catch { return undefined }
+            }
+            const sensitiveKeys = ['decryptKey', 'httpApiToken', 'authPassword', 'imageAesKey']
+            const keys = [
+                'httpApiEnabled', 'httpApiPort', 'httpApiToken', 'httpApiHost',
+                'messagePushEnabled', 'messagePushFilterMode', 'messagePushFilterList',
+                'messageSendEnabled', 'messageSendMode',
+                'notificationEnabled', 'notificationFilterMode',
+                'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
+                'logEnabled', 'bots'
+            ]
+            const config: Record<string, any> = {}
+            for (const key of keys) {
+                const val = getVal(key)
+                if (val !== undefined) {
+                    config[key] = sensitiveKeys.includes(key) ? '[encrypted]' : val
+                }
+            }
+            this.sendJson(res, config)
+        } catch (error) {
+            this.sendError(res, 500, String(error))
+        }
     }
-  }
 
   private async handleMgmtSetConfig(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
@@ -2946,15 +2967,12 @@ class HttpService {
     try {
       const os = require('os')
       this.sendJson(res, {
-        success: true,
-        system: {
-          uptime: os.uptime(),
-          memory: { total: os.totalmem(), free: os.freemem(), used: os.totalmem() - os.freemem() },
-          platform: process.platform,
-          arch: process.arch,
-          nodeVersion: process.version,
-          electronVersion: process.versions?.electron || 'N/A'
-        }
+        uptime: os.uptime(),
+        memory: { total: os.totalmem(), free: os.freemem(), used: os.totalmem() - os.freemem() },
+        platform: process.platform,
+        arch: process.arch,
+        nodeVersion: process.version,
+        electronVersion: process.versions?.electron || 'N/A'
       })
     } catch (error) {
       this.sendError(res, 500, String(error))
@@ -2963,7 +2981,8 @@ class HttpService {
 
   private handleMgmtDisclaimerGet(res: http.ServerResponse): void {
     try {
-      const accepted = (this.configService as any).store?.get?.('disclaimerAccepted') ?? (this.configService as any).get?.('disclaimerAccepted') ?? false
+      const store = (this.configService as any).store
+      const accepted = store?.get?.('disclaimerAccepted') ?? false
       this.sendJson(res, { success: true, accepted: !!accepted })
     } catch {
       this.sendJson(res, { success: true, accepted: false })
@@ -2985,15 +3004,13 @@ class HttpService {
 
   private handleMgmtDocker(res: http.ServerResponse): void {
     try {
-      const isDocker = this.isDockerEnvironment()
+      let isDocker = false
+      try { if (require('fs').existsSync('/.dockerenv')) isDocker = true } catch {}
+      if (process.env.WEFLOW_DOCKER === '1') isDocker = true
       this.sendJson(res, {
-        success: true,
         isDocker,
-        env: {
-          WEFLOW_DOCKER: process.env.WEFLOW_DOCKER || '',
-          ONEBOT_PORT: process.env.ONEBOT_PORT || '',
-          DISPLAY: process.env.DISPLAY || ''
-        }
+        WEFLOW_DOCKER: process.env.WEFLOW_DOCKER || '',
+        ONEBOT_PORT: process.env.ONEBOT_PORT || ''
       })
     } catch (error) {
       this.sendError(res, 500, String(error))
