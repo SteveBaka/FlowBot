@@ -143,6 +143,13 @@ interface ConfigSchema {
   aiInsightDebugLogEnabled: boolean
   autoDownloadHighRes: boolean
   autoDownloadWhitelist: string[]
+
+  // 免责声明 & 数据收集
+  agreementAccepted: boolean
+  analyticsConsent: boolean
+
+  // Docker WebUI Bot 配置
+  bots: string
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
