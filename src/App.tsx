@@ -27,8 +27,6 @@ import ResourcesPage from './pages/ResourcesPage'
 import ChatHistoryPage from './pages/ChatHistoryPage'
 import NotificationWindow from './pages/NotificationWindow'
 import AccountManagementPage from './pages/AccountManagementPage'
-import AddAccountPage from './pages/AddAccountPage'
-import BotConfigPage from './pages/BotConfigPage'
 import BackupPage from './pages/BackupPage'
 import InsightInboxPage from './pages/InsightInboxPage'
 
@@ -706,8 +704,6 @@ function App() {
               <Route path="/" element={<HomePage />} />
               <Route path="/home" element={<HomePage />} />
               <Route path="/account-management" element={<AccountManagementPage />} />
-              <Route path="/account-management/add" element={<AddAccountPage />} />
-              <Route path="/bot-config" element={<BotConfigPage />} />
               <Route path="/chat" element={<ChatPage />} />
 
               <Route path="/analytics" element={<ChatAnalyticsHubPage />} />

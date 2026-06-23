@@ -4476,15 +4476,7 @@ app.whenReady().then(async () => {
   closeSplash()
 
   if (!onboardingDone) {
-    if (process.platform === 'linux') {
-      console.log('[App] Linux: skipping onboarding, showing main window directly')
-      configService.set('onboardingDone' as any, true)
-      configService.set('agreementAccepted' as any, true)
-      configService.set('analyticsConsent' as any, false)
-      mainWindow?.show()
-    } else {
-      createOnboardingWindow()
-    }
+    createOnboardingWindow()
   } else if (startInBackground && tray) {
     mainWindow?.hide()
   } else {
