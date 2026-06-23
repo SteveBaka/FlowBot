@@ -4501,25 +4501,38 @@ app.whenReady().then(async () => {
     const { startBotManager, setBotMessageCallback } = require('./services/botManager')
     const rawBots = configService.get('bots' as any)
     if (rawBots) {
-      setBotMessageCallback((msg: any) => {
-        console.log('[App] Bot message received:', msg.action, msg.botName)
-        // 将 bot 收到的消息转发到 messagePushService
-        if (msg.action === 'send_private_msg' || msg.action === 'send_group_msg' || msg.action === 'send_msg') {
-          try {
-            const chatService = require('./services/chatService').getChatService()
-            const params = msg.params || {}
-            if (params.user_id || params.group_id || params.target) {
-              const sessionId = params.group_id || params.user_id || params.target
-              const content = params.message || params.text || params.content || ''
-              if (sessionId && content) {
-                chatService.sendMessage(sessionId, content).catch((err: any) => {
-                  console.error('[App] Bot sendMessage failed:', err)
-                })
-              }
-            }
-          } catch (e) {
-            console.error('[App] Bot message forwarding error:', e)
+      setBotMessageCallback(async (msg: any) => {
+        console.log('[App] Bot received:', msg.action, 'from bot:', msg.botName)
+        try {
+          const params = msg.params || {}
+          const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
+          const sender = getEnhancedMessageSender()
+          const content = params.message || params.text || params.content || ''
+          if (!content) {
+            console.warn('[App] Bot message empty, skipping')
+            return
           }
+
+          if (msg.action === 'send_private_msg') {
+            // 外部服务发送私聊消息 → 通过 xdotool 发到微信
+            const contactName = params.user_id || params.nickname || ''
+            console.log(`[App] Bot sending private msg to "${contactName}": ${content.substring(0, 50)}`)
+            const result = await sender.sendMessage(content, contactName)
+            console.log('[App] Bot sendMessage result:', result)
+          } else if (msg.action === 'send_group_msg') {
+            // 外部服务发送群聊消息
+            const groupName = params.group_id || params.group_name || ''
+            console.log(`[App] Bot sending group msg to "${groupName}": ${content.substring(0, 50)}`)
+            const result = await sender.sendMessage(content, groupName)
+            console.log('[App] Bot sendMessage result:', result)
+          } else if (msg.action === 'send_msg') {
+            const target = params.user_id || params.group_id || params.target || ''
+            console.log(`[App] Bot sending msg to "${target}": ${content.substring(0, 50)}`)
+            const result = await sender.sendMessage(content, target)
+            console.log('[App] Bot sendMessage result:', result)
+          }
+        } catch (e) {
+          console.error('[App] Bot message forwarding error:', e)
         }
       })
       await startBotManager(rawBots, (key: string) => configService.get(key as any))
