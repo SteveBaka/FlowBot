@@ -35,7 +35,11 @@ export function getEnhancedMessageSender(): IPlatformSender {
       break
     }
     // case 'darwin': { ... }
-    // case 'linux': { ... }
+    case 'linux': {
+      const { LinuxSender } = require('./platforms/linux')
+      cachedSender = new LinuxSender()
+      break
+    }
     default:
       throw new Error(`Unsupported platform: ${process.platform}`)
   }
