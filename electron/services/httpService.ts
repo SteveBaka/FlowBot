@@ -7,6 +7,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { URL } from 'url'
 import { timingSafeEqual } from 'crypto'
+import { logger } from './logger'
 import { chatService, Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
@@ -3073,11 +3074,6 @@ class HttpService {
 
   private handleMgmtLogs(url: URL, res: http.ServerResponse): void {
     try {
-      const { logger } = require('../../services/logger')
-      const categories = url.searchParams.get('categories')?.split(',') || undefined
-      const level = url.searchParams.get('level') || 'all'
-      const search = url.searchParams.get('search') || ''
-      const lines = Number(url.searchParams.get('lines')) || 200
       const logs = logger.readLogs({ categories, level, search, lines })
       this.sendJson(res, { success: true, logs, count: logs.length })
     } catch (error) {
@@ -3087,7 +3083,6 @@ class HttpService {
 
   private handleMgmtLogStats(res: http.ServerResponse): void {
     try {
-      const { logger } = require('../../services/logger')
       const stats = logger.getLogStats()
       this.sendJson(res, { success: true, stats, logDir: logger.getLogDir() })
     } catch (error) {
@@ -3097,7 +3092,6 @@ class HttpService {
 
   private handleMgmtLogClear(url: URL, res: http.ServerResponse): void {
     try {
-      const { logger } = require('../../services/logger')
       const category = url.searchParams.get('category') || undefined
       logger.clearLogs(category)
       this.sendJson(res, { success: true, cleared: category || 'all' })
