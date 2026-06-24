@@ -154,9 +154,80 @@ async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promis
       entry.error = String(err)
     }
   } else if (cfg.mode === 'ws' && cfg.direction === 'client') {
-    log(`BotManager: WS client mode not yet implemented for "${cfg.name}"`)
-    entry.status = 'stopped'
-    entry.error = 'WS client mode not yet implemented'
+    // WS Client 模式：WeFlow 作为客户端连接到外部 WS Server（如 AstrBot）
+    const wsUrl = cfg.address.startsWith('ws') ? cfg.address
+      : `ws://${cfg.address}:${cfg.port}`
+    const wsPath = wsUrl.includes('/ws') ? wsUrl : `${wsUrl}/ws`
+
+    const { OneBotWsClient } = require('./oneBotWsClient')
+    const client = new OneBotWsClient({
+      id: cfg.id,
+      name: cfg.name,
+      url: wsPath,
+      token: cfg.token || '',
+      selfId: cfg.name || cfg.id,
+      reconnectIntervalMs: 5000,
+      maxReconnectAttempts: 20
+    })
+
+    client.on('connected', () => {
+      log(`BotManager: Bot "${cfg.name}" connected to ${wsPath}`)
+      entry.status = 'running'
+      entry.error = undefined
+    })
+
+    client.on('disconnected', () => {
+      log(`BotManager: Bot "${cfg.name}" disconnected from ${wsPath}`)
+      entry.status = 'stopped'
+    })
+
+    client.on('failed', () => {
+      log(`BotManager: Bot "${cfg.name}" connection failed permanently`)
+      entry.status = 'error'
+      entry.error = 'Max reconnect attempts reached'
+    })
+
+    client.on('api', (request: { action: string; params?: any; echo?: any }) => {
+      log(`BotManager: Bot "${cfg.name}" received API: ${request.action}`)
+      // 外部 server 发来的 API 请求 → 转发到 onMessageCallback
+      if (onMessageCallback) {
+        onMessageCallback({
+          action: request.action,
+          botId: cfg.id,
+          botName: cfg.name,
+          params: request.params || {}
+        })
+      }
+      // 返回响应
+      try {
+        const result = handleApiAction(request.action, request.params || {})
+        client.sendResponse({
+          retcode: 0,
+          status: 'ok',
+          data: result,
+          echo: request.echo
+        })
+      } catch (e: any) {
+        client.sendResponse({
+          retcode: 100,
+          status: 'failed',
+          data: null,
+          message: e.message || String(e),
+          echo: request.echo
+        })
+      }
+    })
+
+    entry.server = client as any
+    try {
+      await client.connect()
+      entry.status = 'running'
+      log(`BotManager: Bot "${cfg.name}" WS client connecting to ${wsPath}`)
+    } catch (err: any) {
+      log(`BotManager: Bot "${cfg.name}" WS client connect failed: ${err}`)
+      entry.status = 'error'
+      entry.error = String(err)
+    }
   }
 
   bots.set(cfg.id, entry)
@@ -168,7 +239,12 @@ export async function stopBot(botId: string): Promise<boolean> {
 
   if (entry.server) {
     try {
-      await entry.server.stop()
+      // WS Client 有 disconnect()，Server 有 stop()
+      if (typeof (entry.server as any).disconnect === 'function') {
+        (entry.server as any).disconnect()
+      } else if (typeof (entry.server as any).stop === 'function') {
+        await (entry.server as any).stop()
+      }
     } catch {}
     entry.server = null
   }
@@ -263,6 +339,30 @@ export function getBotStatus(): Array<{
     })
   }
   return result
+}
+
+function handleApiAction(action: string, params: any): any {
+  switch (action) {
+    case 'get_status':
+      return { online: true, good: true, client_count: bots.size, self_id: 'WeFlow' }
+    case 'get_version_info':
+      return { app_name: 'WeFlow-OneBot', app_version: '1.0.0', protocol_version: 'v11' }
+    case 'get_login_info':
+      return { user_id: 0, nickname: '' }
+    case 'get_friend_list':
+      return []
+    case 'get_group_list':
+      return []
+    case 'send_private_msg':
+    case 'send_group_msg':
+    case 'send_msg':
+      // 消息发送已在 onMessageCallback 中处理
+      return { message_id: Date.now() }
+    case 'get_msg':
+      return { message: null }
+    default:
+      throw new Error(`Unknown action: ${action}`)
+  }
 }
 
 export function broadcastToAllBots(event: string, data: any): void {
