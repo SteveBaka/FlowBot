@@ -1,4 +1,5 @@
 import { OneBotServer, OneBotConfig } from './oneBotServer'
+import { logger } from './logger'
 
 interface BotEntry {
   id: string
@@ -268,12 +269,24 @@ export function broadcastToAllBots(event: string, data: any): void {
   for (const [, entry] of bots) {
     if (entry.server && entry.status === 'running') {
       try {
-        entry.server.pushMessage(data)
+        const msg = {
+          time: Math.floor(Date.now() / 1000),
+          self_id: entry.name || entry.id,
+          post_type: 'message',
+          message_type: data.sessionType === 'group' ? 'group' : 'private',
+          message_id: Date.now(),
+          user_id: data.rawid || 0,
+          group_id: data.sessionType === 'group' ? data.sessionId : undefined,
+          message: [{ type: 'text', data: { text: data.content || '' } }],
+          raw_message: data.content || '',
+          sender: { user_id: data.rawid || 0, nickname: data.senderName || '' }
+        }
+        entry.server.pushMessage(msg)
       } catch {}
     }
   }
 }
 
 function log(msg: string) {
-  console.log(`[BotManager] ${msg}`)
+  logger.info('onebot', msg)
 }

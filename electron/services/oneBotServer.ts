@@ -1,6 +1,7 @@
 import { EventEmitter } from 'events'
 import * as http from 'http'
 import * as crypto from 'crypto'
+import { logger } from './logger'
 
 export interface OneBotConfig {
   enabled: boolean
@@ -71,12 +72,12 @@ export class OneBotServer extends EventEmitter {
 
     this.httpServer.listen(this.config.port, () => {
       this.started = true
-      console.log(`[OneBot] Server started on port ${this.config.port}`)
+      logger.info('onebot', `Server started on port ${this.config.port}`)
       this.emit('started', { port: this.config.port })
     })
 
     this.httpServer.on('error', (error) => {
-      console.error('[OneBot] Server error:', error)
+      logger.error('onebot', `Server error: ${error}`)
       this.emit('error', error)
     })
   }
@@ -100,7 +101,7 @@ export class OneBotServer extends EventEmitter {
     }
 
     this.started = false
-    console.log('[OneBot] Server stopped')
+    logger.info('onebot', 'Server stopped')
     this.emit('stopped')
   }
 
@@ -219,7 +220,7 @@ export class OneBotServer extends EventEmitter {
       if (ws) {
         this.clients.add(ws)
         this.setupClientEvents(ws)
-        console.log(`[OneBot] WebSocket client connected (total: ${this.clients.size})`)
+        logger.info('onebot', `WebSocket client connected (total: ${this.clients.size})`)
       }
     })
   }
@@ -249,31 +250,25 @@ export class OneBotServer extends EventEmitter {
     let buffer = Buffer.alloc(0)
     const sendFrame = (data: string): void => {
       const payload = Buffer.from(data, 'utf8')
-      const mask = crypto.randomBytes(4)
       let header: Buffer
 
       if (payload.length < 126) {
         header = Buffer.alloc(2)
         header[0] = 0x81
-        header[1] = 0x80 | payload.length
+        header[1] = payload.length
       } else if (payload.length < 65536) {
         header = Buffer.alloc(4)
         header[0] = 0x81
-        header[1] = 0x80 | 126
+        header[1] = 126
         header.writeUInt16BE(payload.length, 2)
       } else {
         header = Buffer.alloc(10)
         header[0] = 0x81
-        header[1] = 0x80 | 127
+        header[1] = 127
         header.writeBigUInt64BE(BigInt(payload.length), 2)
       }
 
-      const masked = Buffer.alloc(payload.length)
-      for (let i = 0; i < payload.length; i++) {
-        masked[i] = payload[i] ^ mask[i % 4]
-      }
-
-      const frame = Buffer.concat([header, mask, masked])
+      const frame = Buffer.concat([header, payload])
       try { (socket as import('net').Socket).write(frame) } catch {}
     }
 
@@ -284,7 +279,13 @@ export class OneBotServer extends EventEmitter {
         try { (socket as import('net').Socket).destroy() } catch {}
         ws.readyState = 3
       },
-      on: (_event: string, _handler: (...args: any[]) => void) => {},
+      on: function(event: string, handler: (...args: any[]) => void) {
+        if (event === 'close') {
+          socket.on('close', handler)
+        } else if (event === 'error') {
+          socket.on('error', handler)
+        }
+      },
     }
 
     const onData = (chunk: Buffer): void => {
@@ -342,7 +343,7 @@ export class OneBotServer extends EventEmitter {
   private setupClientEvents(ws: WebSocketLike): void {
     ws.on('close', () => {
       this.clients.delete(ws)
-      console.log(`[OneBot] WebSocket client disconnected (total: ${this.clients.size})`)
+      logger.info('onebot', `WebSocket client disconnected (total: ${this.clients.size})`)
     })
   }
 
@@ -359,7 +360,12 @@ export class OneBotServer extends EventEmitter {
       this.sendJsonResponse(res, 200, {
         retcode: 0,
         status: 'ok',
-        data: { online: this.started, good: true },
+        data: {
+          online: this.started,
+          good: true,
+          client_count: this.clients.size,
+          self_id: this.config.selfId
+        },
       })
       return
     }
@@ -442,7 +448,12 @@ export class OneBotServer extends EventEmitter {
   private executeApi(action: string, params: Record<string, unknown>): unknown {
     switch (action) {
       case 'get_status':
-        return { online: this.started, good: true }
+        return {
+          online: this.started,
+          good: true,
+          client_count: this.clients.size,
+          self_id: this.config.selfId
+        }
 
       case 'get_version_info':
         return {
@@ -510,6 +521,9 @@ export class OneBotServer extends EventEmitter {
 
   private verifyToken(req: http.IncomingMessage): boolean {
     if (!this.config.accessToken) return true
+    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+    const queryToken = url.searchParams.get('access_token')
+    if (queryToken && queryToken === this.config.accessToken) return true
     const auth = req.headers['authorization'] || ''
     const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth
     return token === this.config.accessToken

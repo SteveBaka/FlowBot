@@ -331,11 +331,13 @@ var BotPage = {
         return
       }
       var botStatus = null
-      if (Array.isArray(d)) {
+      if (d.ok && d.bots) {
+        botStatus = d.bots.find(function (s) { return s.id === botItem.id })
+      } else if (Array.isArray(d)) {
         botStatus = d.find(function (s) { return s.id === botItem.id })
       }
       if (botStatus) {
-        var st = botStatus.connectionStatus || 'unknown'
+        var st = botStatus.connectionStatus || botStatus.status || 'unknown'
         var msg = botItem.name + ': ' + (st === 'connected' ? '已连接' : st === 'disconnected' ? '未连接' : st)
         toast(msg, st === 'connected' ? 'success' : 'warning')
       } else {
@@ -378,8 +380,8 @@ var BotPage = {
     '<span>{{ b.address }}:{{ b.port }}</span>' +
     '</div></div>' +
     '<div class="bot-actions">' +
-    '<button class="btn btn-secondary btn-sm" @click="editBot(b)" title="编辑"><svg viewBox="0 0 24 24" width="14" height="14"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
-    '<button class="btn btn-secondary btn-sm" @click="testBot(b)" title="测试连接"><svg viewBox="0 0 24 24" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg></button>' +
+    '<button class="btn btn-secondary btn-sm" @click="editBot(b)" title="编辑 Bot"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
+    '<button class="btn btn-secondary btn-sm" @click="testBot(b)" title="测试连接"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg></button>' +
     '<toggle-switch :model-value="b.enabled" @update:model-value="toggleBot(b)" />' +
     '<button class="btn btn-danger btn-sm" @click="deleteBot(b)">&times;</button>' +
     '</div></div>' +
@@ -419,13 +421,13 @@ var BotPage = {
     '</div>' +
 
     '<div v-else-if="modalStep===3">' +
-    '<h3>配置 Bot</h3>' +
+    '<h3>{{ editingBotId ? "编辑 Bot" : "配置 Bot" }}</h3>' +
     '<div class="form-group"><label>名称</label><input type="text" v-model="modalBotName" placeholder="Bot 1"></div>' +
     '<div class="form-group"><label>地址</label><input type="text" v-model="modalAddress" placeholder="127.0.0.1"></div>' +
     '<div class="form-group"><label>端口</label><input type="number" v-model.number="modalPort"></div>' +
     '<div class="form-group"><label>Token</label><input type="text" v-model="modalToken" placeholder="自动生成"></div>' +
     '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
-    '<button class="btn btn-secondary" @click="modalStep = modalMode===\'http\' ? 1 : 2">返回</button>' +
+    '<button class="btn btn-secondary" @click="editingBotId ? closeModal() : (modalStep = modalMode===\'http\' ? 1 : 2)">{{ editingBotId ? "取消" : "返回" }}</button>' +
     '<button class="btn btn-primary" @click="addBot">保存</button>' +
     '</div></div>' +
 
@@ -551,6 +553,9 @@ var SettingsPage = {
       pushEnabled: false, sendEnabled: true, sendMode: 'foreground'
     })
     var settings = reactive({ logEnabled: false })
+    var defaultLogCategories = ref(['weflow', 'wechat', 'onebot'])
+    var allLogCategories = ['weflow', 'wechat', 'onebot', 'vnc', 'system', 'sender']
+    var logCategoryLabels = { weflow: 'WeFlow', wechat: '微信', onebot: 'OneBot', vnc: 'VNC', system: '系统', sender: 'Sender' }
     var showHttpToken = ref(false)
 
     async function loadConfig() {
@@ -563,6 +568,7 @@ var SettingsPage = {
         wf.sendEnabled = d.messageSendEnabled !== false
         wf.sendMode = d.messageSendMode || 'foreground'
         settings.logEnabled = d.logEnabled || false
+        if (d.defaultLogCategories) defaultLogCategories.value = d.defaultLogCategories
       }
     }
 
@@ -577,15 +583,22 @@ var SettingsPage = {
           messagePushEnabled: wf.pushEnabled,
           messageSendEnabled: wf.sendEnabled,
           messageSendMode: wf.sendMode,
-          logEnabled: settings.logEnabled
+          logEnabled: settings.logEnabled,
+          defaultLogCategories: defaultLogCategories.value
         })
       })
       if (d.success) toast('配置已保存')
       else toast('保存失败: ' + (d.error || ''), 'error')
     }
 
+    function toggleDefaultLogCategory(cat) {
+      var idx = defaultLogCategories.value.indexOf(cat)
+      if (idx === -1) defaultLogCategories.value.push(cat)
+      else defaultLogCategories.value.splice(idx, 1)
+    }
+
     onMounted(loadConfig)
-    return { wf: wf, settings: settings, showHttpToken: showHttpToken, saveConfig: saveConfig }
+    return { wf: wf, settings: settings, showHttpToken: showHttpToken, saveConfig: saveConfig, defaultLogCategories: defaultLogCategories, allLogCategories: allLogCategories, logCategoryLabels: logCategoryLabels, toggleDefaultLogCategory: toggleDefaultLogCategory }
   },
   template: '<div>' +
     '<div class="page-header">' +
@@ -611,6 +624,15 @@ var SettingsPage = {
     '<div class="card"><h2>日志</h2>' +
     '<div class="form-row"><label>启用调试日志</label><toggle-switch v-model="settings.logEnabled" /></div>' +
     '<p style="font-size:12px;color:var(--text-muted);margin:4px 0 0">控制 WeFlow 主进程的调试日志输出，重启后生效</p></div>' +
+
+    '<div class="card"><h2>默认日志分类</h2>' +
+    '<p style="font-size:12px;color:var(--text-muted);margin:0 0 12px">设置日志页面默认选中的分类</p>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px">' +
+    '<button v-for="cat in allLogCategories" :key="cat" ' +
+    ':class="[\'btn\', \'btn-sm\', defaultLogCategories.indexOf(cat)===-1 ? \'btn-secondary\' : \'btn-primary\']" ' +
+    'style="border-radius:16px;padding:4px 12px;font-size:12px" ' +
+    '@click="toggleDefaultLogCategory(cat)">{{ logCategoryLabels[cat] }}</button>' +
+    '</div></div>' +
     '</div>'
 }
 
@@ -693,7 +715,7 @@ var LogsPage = {
       logs: [],
       categories: ['weflow', 'wechat', 'onebot', 'vnc', 'system', 'sender'],
       categoryLabels: { weflow: 'WeFlow', wechat: '微信', onebot: 'OneBot', vnc: 'VNC', system: '系统', sender: 'Sender' },
-      selectedCategories: [],
+      selectedCategories: ['weflow', 'wechat', 'onebot'],
       level: 'all',
       search: '',
       autoRefresh: false,
@@ -702,7 +724,11 @@ var LogsPage = {
       loading: false
     }
   },
-  mounted: function () { this.loadLogs() },
+  mounted: function () {
+    var saved = localStorage.getItem('weflow-log-categories')
+    if (saved) { try { this.selectedCategories = JSON.parse(saved) } catch (e) {} }
+    this.loadLogs()
+  },
   beforeUnmount: function () { if (this.refreshTimer) clearInterval(this.refreshTimer) },
   methods: {
     loadLogs: async function () {
@@ -738,6 +764,7 @@ var LogsPage = {
       var idx = this.selectedCategories.indexOf(cat)
       if (idx === -1) this.selectedCategories.push(cat)
       else this.selectedCategories.splice(idx, 1)
+      localStorage.setItem('weflow-log-categories', JSON.stringify(this.selectedCategories))
       this.loadLogs()
     },
     clearLogs: async function () {

@@ -2325,24 +2325,28 @@ export async function setAutoDownloadHighRes(enabled: boolean): Promise<void> {
   await config.set(CONFIG_KEYS.AUTO_DOWNLOAD_HIGH_RES, enabled)
 }
 
+export async function getAutoDownloadWhitelist(): Promise<string[]> {
+  return (await config.get(CONFIG_KEYS.AUTO_DOWNLOAD_WHITELIST)) as string[] || []
+}
+
 // === OneBot 配置 ===
-export async function getOneBotEnabled(): Promise<boolean> { return (await config.get(CONFIG_KEYS.oneBotEnabled)) || false }
+export async function getOneBotEnabled(): Promise<boolean> { return Boolean(await config.get(CONFIG_KEYS.oneBotEnabled)) }
 export async function setOneBotEnabled(enabled: boolean): Promise<void> { await config.set(CONFIG_KEYS.oneBotEnabled, enabled) }
-export async function getOneBotPort(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotPort)) || 3001 }
+export async function getOneBotPort(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotPort)) || 3001 }
 export async function setOneBotPort(port: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotPort, port) }
-export async function getOneBotAccessToken(): Promise<string> { return (await config.get(CONFIG_KEYS.oneBotAccessToken)) || '' }
+export async function getOneBotAccessToken(): Promise<string> { return String(await config.get(CONFIG_KEYS.oneBotAccessToken) || '') }
 export async function setOneBotAccessToken(token: string): Promise<void> { await config.set(CONFIG_KEYS.oneBotAccessToken, token) }
-export async function getOneBotSelfId(): Promise<string> { return (await config.get(CONFIG_KEYS.oneBotSelfId)) || '' }
+export async function getOneBotSelfId(): Promise<string> { return String(await config.get(CONFIG_KEYS.oneBotSelfId) || '') }
 export async function setOneBotSelfId(id: string): Promise<void> { await config.set(CONFIG_KEYS.oneBotSelfId, id) }
-export async function getOneBotMaxConnections(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotMaxConnections)) || 10 }
+export async function getOneBotMaxConnections(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotMaxConnections)) || 10 }
 export async function setOneBotMaxConnections(n: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotMaxConnections, n) }
-export async function getOneBotBroadcastBatchSize(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotBroadcastBatchSize)) || 100 }
+export async function getOneBotBroadcastBatchSize(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotBroadcastBatchSize)) || 100 }
 export async function setOneBotBroadcastBatchSize(n: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotBroadcastBatchSize, n) }
-export async function getOneBotBroadcastIntervalMs(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotBroadcastIntervalMs)) || 50 }
+export async function getOneBotBroadcastIntervalMs(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotBroadcastIntervalMs)) || 50 }
 export async function setOneBotBroadcastIntervalMs(n: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotBroadcastIntervalMs, n) }
-export async function getOneBotDebounceMs(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotDebounceMs)) || 350 }
+export async function getOneBotDebounceMs(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotDebounceMs)) || 350 }
 export async function setOneBotDebounceMs(n: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotDebounceMs, n) }
-export async function getOneBotBatchSize(): Promise<number> { return (await config.get(CONFIG_KEYS.oneBotBatchSize)) || 50 }
+export async function getOneBotBatchSize(): Promise<number> { return Number(await config.get(CONFIG_KEYS.oneBotBatchSize)) || 50 }
 export async function setOneBotBatchSize(n: number): Promise<void> { await config.set(CONFIG_KEYS.oneBotBatchSize, n) }
 
 export async function setAutoDownloadWhitelist(list: string[]): Promise<void> {
