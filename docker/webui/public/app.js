@@ -94,6 +94,7 @@ var HomePage = {
       if (c === 'green') return '#2ed573'
       if (c === 'red') return '#ff4757'
       if (c === 'yellow') return '#ffa502'
+      if (c === 'gray') return '#8892a4'
       return '#8892a4'
     }
 
@@ -106,7 +107,7 @@ var HomePage = {
 
       var c = await api('/api/v1/mgmt/config')
       if (!c.error) {
-        if (c.myWxid && c.onboardingDone) { cards.login.status = '已登录'; cards.login.color = 'green' }
+        if (c.myWxid) { cards.login.status = '已登录: ' + c.myWxid; cards.login.color = 'green' }
         else { cards.login.status = '未登录'; cards.login.color = 'red' }
         cards.login.loading = false
 
@@ -123,17 +124,24 @@ var HomePage = {
         var bots = []
         try { bots = typeof c.bots === 'string' ? JSON.parse(c.bots) : (c.bots || []) } catch (_) { bots = [] }
         if (!Array.isArray(bots)) bots = []
-        var enabled = bots.filter(function (b) { return b.enabled })
-        if (enabled.length > 0) {
-          var modes = enabled.map(function (b) { return b.mode === 'http' ? 'HTTP' : 'WS' })
-          modes = modes.filter(function (v, i, a) { return a.indexOf(v) === i })
-          cards.onebot.status = '运行中'
-          cards.onebot.color = 'green'
-          cards.onebot.sub = modes.join(', ') + ' (' + enabled.length + ')'
-        } else {
-          cards.onebot.status = '未启动'
-          cards.onebot.color = 'red'
+        if (bots.length === 0) {
+          cards.onebot.status = '未配置'
+          cards.onebot.color = 'gray'
           cards.onebot.sub = ''
+        } else {
+          var botStatusResult = await api('/api/v1/mgmt/bots/status')
+          var statusMap = {}
+          if (!botStatusResult.error && Array.isArray(botStatusResult)) {
+            botStatusResult.forEach(function (s) { statusMap[s.id] = s })
+          }
+          cards.onebot.status = bots.length + ' 个 Bot'
+          cards.onebot.color = 'green'
+          cards.onebot.sub = bots.map(function (b) {
+            var s = statusMap[b.id]
+            var st = s ? (s.connectionStatus || 'unknown') : 'unknown'
+            var label = (b.mode === 'http' ? 'HTTP' : 'WS') + ':' + b.name
+            return { label: label, status: st }
+          })
         }
         cards.onebot.loading = false
       }
@@ -168,8 +176,11 @@ var HomePage = {
 
     '<div class="stat-card">' +
     '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">OneBot 状态</span></div>' +
-    '<div class="stat-value">{{ cards.onebot.status }}</div>' +
-    '<div v-if="cards.onebot.sub" class="stat-sub">{{ cards.onebot.sub }}</div>' +
+    '<div class="stat-value">{{ typeof cards.onebot.sub === \'object\' ? cards.onebot.status : cards.onebot.status }}</div>' +
+    '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" style="margin-top:4px">' +
+    '<div v-for="bs in cards.onebot.sub" :key="bs.label" style="font-size:13px;font-family:monospace" :style="{color: bs.status===\'connected\'?\'#2ed573\':bs.status===\'disconnected\'?\'#ffa502\':\'#8892a4\'}">{{ bs.label }}</div>' +
+    '</div>' +
+    '<div v-else-if="typeof cards.onebot.sub === \'string\' && cards.onebot.sub" class="stat-sub">{{ cards.onebot.sub }}</div>' +
     '</div>' +
 
     '<div class="stat-card">' +
@@ -203,6 +214,7 @@ var BotPage = {
     var modalAddress = ref('127.0.0.1')
     var modalPort = ref(3001)
     var modalToken = ref('')
+    var editingBotId = ref(null)
 
     async function loadBots() {
       var d = await api('/api/v1/mgmt/config')
@@ -215,6 +227,7 @@ var BotPage = {
     }
 
     function openAddModal() {
+      editingBotId.value = null
       modalStep.value = 1
       modalMode.value = ''
       modalDirection.value = 'server'
@@ -252,18 +265,35 @@ var BotPage = {
     }
 
     async function addBot() {
-      var id = 'bot_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
-      var newBot = {
-        id: id,
-        name: modalBotName.value || 'Bot ' + (bots.value.length + 1),
-        mode: modalMode.value,
-        direction: modalDirection.value,
-        address: modalAddress.value || '127.0.0.1',
-        port: Number(modalPort.value) || 3001,
-        token: modalToken.value,
-        enabled: true
+      if (editingBotId.value) {
+        bots.value = bots.value.map(function (b) {
+          if (b.id === editingBotId.value) {
+            return Object.assign({}, b, {
+              name: modalBotName.value || b.name,
+              mode: modalMode.value,
+              direction: modalDirection.value,
+              address: modalAddress.value || '127.0.0.1',
+              port: Number(modalPort.value) || 3001,
+              token: modalToken.value
+            })
+          }
+          return b
+        })
+        editingBotId.value = null
+      } else {
+        var id = 'bot_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
+        var newBot = {
+          id: id,
+          name: modalBotName.value || 'Bot ' + (bots.value.length + 1),
+          mode: modalMode.value,
+          direction: modalDirection.value,
+          address: modalAddress.value || '127.0.0.1',
+          port: Number(modalPort.value) || 3001,
+          token: modalToken.value,
+          enabled: true
+        }
+        bots.value = bots.value.concat([newBot])
       }
-      bots.value = bots.value.concat([newBot])
       await saveBots()
       showModal.value = false
     }
@@ -282,6 +312,37 @@ var BotPage = {
       await saveBots()
     }
 
+    function editBot(botItem) {
+      editingBotId.value = botItem.id
+      modalMode.value = botItem.mode
+      modalDirection.value = botItem.direction
+      modalBotName.value = botItem.name
+      modalAddress.value = botItem.address
+      modalPort.value = botItem.port
+      modalToken.value = botItem.token
+      modalStep.value = 3
+      showModal.value = true
+    }
+
+    async function testBot(botItem) {
+      var d = await api('/api/v1/mgmt/bots/status')
+      if (d.error) {
+        toast('检测失败: ' + d.error, 'error')
+        return
+      }
+      var botStatus = null
+      if (Array.isArray(d)) {
+        botStatus = d.find(function (s) { return s.id === botItem.id })
+      }
+      if (botStatus) {
+        var st = botStatus.connectionStatus || 'unknown'
+        var msg = botItem.name + ': ' + (st === 'connected' ? '已连接' : st === 'disconnected' ? '未连接' : st)
+        toast(msg, st === 'connected' ? 'success' : 'warning')
+      } else {
+        toast(botItem.name + ': 未找到状态信息', 'warning')
+      }
+    }
+
     function modeBadge(m) { return m === 'http' ? 'badge-http' : 'badge-ws' }
     function modeLabel(m) { return m === 'http' ? 'HTTP' : 'WS' }
     function dirBadge(d) { return d === 'server' ? 'badge-server' : 'badge-client' }
@@ -293,9 +354,11 @@ var BotPage = {
       modalMode: modalMode, modalDirection: modalDirection,
       modalBotName: modalBotName, modalAddress: modalAddress,
       modalPort: modalPort, modalToken: modalToken,
+      editingBotId: editingBotId,
       openAddModal: openAddModal, closeModal: closeModal,
       selectMode: selectMode, selectDirection: selectDirection,
       addBot: addBot, toggleBot: toggleBot, deleteBot: deleteBot,
+      editBot: editBot, testBot: testBot,
       modeBadge: modeBadge, modeLabel: modeLabel,
       dirBadge: dirBadge, dirLabel: dirLabel,
       loadBots: loadBots
@@ -315,6 +378,8 @@ var BotPage = {
     '<span>{{ b.address }}:{{ b.port }}</span>' +
     '</div></div>' +
     '<div class="bot-actions">' +
+    '<button class="btn btn-secondary btn-sm" @click="editBot(b)" title="编辑"><svg viewBox="0 0 24 24" width="14" height="14"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
+    '<button class="btn btn-secondary btn-sm" @click="testBot(b)" title="测试连接"><svg viewBox="0 0 24 24" width="14" height="14"><polyline points="20 6 9 17 4 12"/></svg></button>' +
     '<toggle-switch :model-value="b.enabled" @update:model-value="toggleBot(b)" />' +
     '<button class="btn btn-danger btn-sm" @click="deleteBot(b)">&times;</button>' +
     '</div></div>' +
@@ -621,12 +686,123 @@ var AboutPage = {
     '</div></div></div>'
 }
 
+var LogsPage = {
+  components: { ToggleSwitch: ToggleSwitch },
+  data: function () {
+    return {
+      logs: [],
+      categories: ['weflow', 'wechat', 'onebot', 'vnc', 'system', 'sender'],
+      categoryLabels: { weflow: 'WeFlow', wechat: '微信', onebot: 'OneBot', vnc: 'VNC', system: '系统', sender: 'Sender' },
+      selectedCategories: [],
+      level: 'all',
+      search: '',
+      autoRefresh: false,
+      refreshInterval: 5,
+      refreshTimer: null,
+      loading: false
+    }
+  },
+  mounted: function () { this.loadLogs() },
+  beforeUnmount: function () { if (this.refreshTimer) clearInterval(this.refreshTimer) },
+  methods: {
+    loadLogs: async function () {
+      var self = this
+      self.loading = true
+      var params = new URLSearchParams()
+      if (self.selectedCategories.length > 0) params.set('categories', self.selectedCategories.join(','))
+      if (self.level !== 'all') params.set('level', self.level)
+      if (self.search) params.set('search', self.search)
+      params.set('lines', '200')
+      var d = await api('/api/v1/mgmt/logs?' + params.toString())
+      if (!d.error) {
+        var arr = Array.isArray(d) ? d : (d.logs || d.data || [])
+        self.logs = arr.map(function (line) {
+          if (typeof line === 'string') {
+            var lvl = 'info'
+            var ll = line.toLowerCase()
+            if (ll.indexOf('error') !== -1 || ll.indexOf('[error]') !== -1) lvl = 'error'
+            else if (ll.indexOf('warn') !== -1 || ll.indexOf('[warn]') !== -1) lvl = 'warn'
+            else if (ll.indexOf('debug') !== -1 || ll.indexOf('[debug]') !== -1) lvl = 'debug'
+            return { text: line, level: lvl }
+          }
+          return { text: line.message || line.msg || JSON.stringify(line), level: line.level || 'info' }
+        })
+      }
+      self.loading = false
+      self.$nextTick(function () {
+        var box = self.$refs.logBox
+        if (box) box.scrollTop = box.scrollHeight
+      })
+    },
+    toggleCategory: function (cat) {
+      var idx = this.selectedCategories.indexOf(cat)
+      if (idx === -1) this.selectedCategories.push(cat)
+      else this.selectedCategories.splice(idx, 1)
+      this.loadLogs()
+    },
+    clearLogs: async function () {
+      var d = await api('/api/v1/mgmt/logs/clear', { method: 'POST' })
+      if (!d.error) { this.logs = []; toast('日志已清除') }
+      else toast('清除失败: ' + d.error, 'error')
+    },
+    toggleAutoRefresh: function () {
+      var self = this
+      if (self.refreshTimer) { clearInterval(self.refreshTimer); self.refreshTimer = null }
+      if (self.autoRefresh) {
+        self.refreshTimer = setInterval(function () { self.loadLogs() }, self.refreshInterval * 1000)
+      }
+    },
+    logColor: function (lvl) {
+      if (lvl === 'error') return '#ff4757'
+      if (lvl === 'warn') return '#ffa502'
+      if (lvl === 'debug') return '#8892a4'
+      return '#e8eaed'
+    }
+  },
+  template: '<div>' +
+    '<div class="page-header">' +
+    '<div><h1 class="page-title" style="margin:0">日志</h1><p class="subtitle">查看系统运行日志</p></div>' +
+    '<div class="header-actions">' +
+    '<button class="btn btn-secondary" @click="loadLogs">刷新</button>' +
+    '<button class="btn btn-danger" @click="clearLogs">清除日志</button>' +
+    '</div></div>' +
+
+    '<div class="card" style="margin-bottom:16px">' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px">' +
+    '<button v-for="cat in categories" :key="cat" ' +
+    ':class="[\'btn\', \'btn-sm\', selectedCategories.indexOf(cat)===-1 ? \'btn-secondary\' : \'btn-primary\']" ' +
+    'style="border-radius:16px;padding:4px 12px;font-size:12px" ' +
+    '@click="toggleCategory(cat)">{{ categoryLabels[cat] }}</button>' +
+    '</div>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+    '<select v-model="level" @change="loadLogs" style="padding:6px 10px;border-radius:6px;font-size:13px">' +
+    '<option value="all">全部级别</option><option value="info">Info</option><option value="warn">Warning</option>' +
+    '<option value="error">Error</option><option value="debug">Debug</option></select>' +
+    '<input type="text" v-model="search" @keyup.enter="loadLogs" placeholder="搜索日志..." ' +
+    'style="flex:1;min-width:150px;padding:6px 10px;border-radius:6px;font-size:13px">' +
+    '<div style="display:flex;gap:6px;align-items:center">' +
+    '<toggle-switch v-model="autoRefresh" @update:model-value="toggleAutoRefresh" />' +
+    '<select v-model.number="refreshInterval" @change="toggleAutoRefresh" :disabled="!autoRefresh" ' +
+    'style="padding:4px 8px;border-radius:6px;font-size:12px">' +
+    '<option :value="5">5s</option><option :value="10">10s</option><option :value="30">30s</option></select>' +
+    '</div></div></div>' +
+
+    '<div ref="logBox" ' +
+    'style="background:var(--bg-secondary,#1e1e2e);border:1px solid var(--border,#333);border-radius:8px;padding:12px;' +
+    'height:calc(100vh - 320px);min-height:300px;overflow-y:auto;font-family:monospace;font-size:13px;line-height:1.6">' +
+    '<div v-if="loading && logs.length===0" style="color:var(--text-muted,#888)">加载中...</div>' +
+    '<div v-else-if="logs.length===0" style="color:var(--text-muted,#888)">暂无日志</div>' +
+    '<div v-for="(line, i) in logs" :key="i" :style="{color: logColor(line.level)}">{{ line.text }}</div>' +
+    '</div></div>'
+}
+
 var routes = [
   { path: '/', component: HomePage, meta: { title: '首页' } },
   { path: '/bot', component: BotPage, meta: { title: 'Bot 配置' } },
   { path: '/chat', component: ChatPage, meta: { title: '聊天 & 消息过滤' } },
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
+  { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } }
 ]
 
@@ -645,6 +821,7 @@ var App = {
       { path: '/chat', label: '聊天 & 消息过滤', icon: '<svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>' },
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
+      { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
     ]
 
