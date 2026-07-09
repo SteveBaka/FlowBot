@@ -1,5 +1,11 @@
 FROM ubuntu:22.04
 
+# apt-cacher-ng proxy (optional, pass --build-arg APT_PROXY=http://host:3142 to enable)
+ARG APT_PROXY=""
+RUN if [ -n "$APT_PROXY" ]; then \
+      printf 'Acquire::http::Proxy "%s";\n' "$APT_PROXY" > /etc/apt/apt.conf.d/01proxy; \
+    fi
+
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV NODE_ENV=production

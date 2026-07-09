@@ -2,6 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
+import { imageDecryptService } from './imageDecryptService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { promises as fs } from 'fs'
 import path from 'path'
@@ -40,6 +41,8 @@ interface MessagePushPayload {
   groupName?: string
   content: string | null
   timestamp: number
+  imagePath?: string
+  senderIdAlias?: string
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -737,6 +740,36 @@ class MessagePushService {
     return merged
   }
 
+  private async resolveAndDecryptImage(message: Message, sessionId: string): Promise<string | undefined> {
+    if (Number(message.localType || 0) !== 3) return undefined
+    const imageMd5 = String(message.imageMd5 || '').trim()
+    const imageDatName = String(message.imageDatName || '').trim()
+    if (!imageMd5 && !imageDatName) return undefined
+    try {
+      const result = await imageDecryptService.decryptImage({
+        sessionId,
+        imageMd5,
+        imageDatName,
+        createTime: Number(message.createTime || 0),
+        preferFilePath: true,
+        suppressEvents: true
+      })
+      if (result?.success && result.localPath) {
+        return result.localPath
+      }
+    } catch {}
+    return undefined
+  }
+
+  private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
+    if (!senderWxid) return undefined
+    try {
+      const contact = await chatService.getContact(senderWxid)
+      if (contact?.alias) return contact.alias
+    } catch {}
+    return undefined
+  }
+
   private async buildPayload(session: ChatSession, message: Message): Promise<MessagePushPayload | null> {
     const sessionId = String(session.username || '').trim()
     const messageKey = String(message.messageKey || '').trim()
@@ -748,6 +781,7 @@ class MessagePushService {
     const rawid = this.getMessageRawId(message)
 
     const createTime = Number(message.createTime || 0)
+    const imagePath = await this.resolveAndDecryptImage(message, sessionId)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -759,6 +793,7 @@ class MessagePushService {
       const myWxid = this.configService.getMyWxidCleaned()
       cacheGroup(sessionId, groupName, myWxid)
       scheduleGroupRefresh(sessionId)
+      const senderIdAlias = senderId ? await this.resolveSenderAlias(senderId) : undefined
       return {
         event: 'message.new',
         sessionId,
@@ -770,7 +805,9 @@ class MessagePushService {
         senderId,
         senderCard,
         content,
-        timestamp: createTime
+        timestamp: createTime,
+        imagePath,
+        senderIdAlias
       }
     }
 
@@ -779,6 +816,7 @@ class MessagePushService {
     const senderId = String(message.senderUsername || '').trim() || sessionId
     cachePrivate(senderId)
     schedulePrivateRefresh(senderId)
+    const senderIdAlias = await this.resolveSenderAlias(senderId)
     return {
       event: 'message.new',
       sessionId,
@@ -787,7 +825,9 @@ class MessagePushService {
       avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       content,
-      timestamp: createTime
+      timestamp: createTime,
+      imagePath,
+      senderIdAlias
     }
   }
 

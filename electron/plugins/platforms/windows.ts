@@ -235,7 +235,7 @@ export class WindowsSender implements IPlatformSender {
   }
 
   // ─── 公开接口 ─────────────────────────────────────────────
-  async sendMessage(content: string, contactName?: string): Promise<{
+  async sendMessage(content: string, contactName?: string, imagePath?: string): Promise<{
     success: boolean; error?: string; method: string
   }> {
     try {

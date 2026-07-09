@@ -16,7 +16,7 @@ export type { SendMode, SendTask, SendProgress }
 
 export interface IPlatformSender {
   setMode(mode: SendMode): void
-  sendMessage(content: string, contactName?: string): Promise<{ success: boolean; error?: string; method: string }>
+  sendMessage(content: string, contactName?: string, imagePath?: string): Promise<{ success: boolean; error?: string; method: string }>
   sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress>
   cancelPending(): number
   getProgress(): SendProgress

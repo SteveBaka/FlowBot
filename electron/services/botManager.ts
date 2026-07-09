@@ -2,6 +2,7 @@ import { OneBotServer, OneBotConfig } from './oneBotServer'
 import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
+import * as fs from 'fs'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -153,6 +154,10 @@ export function resolveGroupSearchName(numericId: number | string): string | und
 }
 
 export function resolvePrivateSearchName(numericId: number | string): string | undefined {
+  const infoByWxid = privateByWxid.get(String(numericId))
+  if (infoByWxid) {
+    return infoByWxid.remark || infoByWxid.nickName || infoByWxid.alias || undefined
+  }
   const id = typeof numericId === 'string' ? parseInt(numericId, 10) : numericId
   if (!Number.isFinite(id)) return undefined
   const info = privateByNumeric.get(id)
@@ -611,11 +616,21 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
     if (entry.server && entry.status === 'running') {
       try {
         const selfId = String(wxidToNumeric(currentSelfWxid || botDisplayName || entry.name || entry.id))
-        const senderUserId = data.senderId ? data.senderId : (isGroup ? data.senderName : data.sessionId)
+        const effectiveSenderId = data.senderIdAlias || data.senderId || (isGroup ? data.senderName : data.sessionId)
+        const senderUserId = String(effectiveSenderId)
         const senderNickname = data.senderName || data.sourceName || ''
         const senderCard = data.senderCard || senderNickname
 
         const messageSegments: Array<{ type: string; data: Record<string, string> }> = []
+
+        if (data.imagePath && fs.existsSync(data.imagePath)) {
+          const buf = fs.readFileSync(data.imagePath)
+          const b64 = buf.toString('base64')
+          messageSegments.push({ type: 'image', data: { file: `base64://${b64}` } })
+        } else if (data.imagePath) {
+          messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
+        }
+
         if (isGroup && data.content) {
           const escapedDisplay = botDisplayName ? botDisplayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : ''
           const escapedWxid = selfWxid ? selfWxid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : ''
@@ -632,7 +647,7 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           } else {
             messageSegments.push({ type: 'text', data: { text: data.content || '' } })
           }
-        } else {
+        } else if (!data.imagePath) {
           messageSegments.push({ type: 'text', data: { text: data.content || '' } })
         }
 
