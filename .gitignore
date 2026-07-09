@@ -79,3 +79,14 @@ weflow-web-offical
 /scripts/syncwcdb.py
 /scripts/syncWedecrypt.py
 .kilo/
+.mimocode/
+feat-linux-docker-webui.md
+REVIEW-2026-06-27.md
+docs/REFACTOR-PLAN.md
+docs/WORKFLOW.md
+WORKFLOW.md
+flowbot-latest.tar.gz
+plan-sender.md
+docker-compose.build.yml
+docs/http-server-fall.md
+docs/LINUX-SENDER.md

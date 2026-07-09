@@ -2,7 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { broadcastToAllBots } from './botManager'
+import { broadcastToAllBots, cacheGroup, cachePrivate, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
@@ -35,6 +35,8 @@ interface MessagePushPayload {
   rawid: string
   avatarUrl?: string
   sourceName: string
+  senderId?: string
+  senderCard?: string
   groupName?: string
   content: string | null
   timestamp: number
@@ -74,10 +76,35 @@ class MessagePushService {
   private baselineReady = false
   private messageTableScanRequested = false
   private readonly pendingMessageTableNames = new Set<string>()
+  private selfInfoCache: { wxid: string; displayName: string; updatedAt: number } | null = null
+  private readonly selfInfoCacheTtlMs = 60 * 1000
 
   constructor() {
     this.configService = ConfigService.getInstance()
     this.pushAvatarCacheDir = path.join(this.configService.getCacheBasePath(), 'push-avatar-files')
+  }
+
+  private async getSelfInfo(): Promise<{ wxid: string; displayName: string }> {
+    const now = Date.now()
+    if (this.selfInfoCache && (now - this.selfInfoCache.updatedAt) < this.selfInfoCacheTtlMs) {
+      return { wxid: this.selfInfoCache.wxid, displayName: this.selfInfoCache.displayName }
+    }
+    let wxid = ''
+    let displayName = ''
+    try {
+      wxid = this.configService.getMyWxidCleaned()
+      if (wxid) {
+        const contact = await Promise.race([
+          chatService.getContact(wxid),
+          new Promise<null>((_, reject) => setTimeout(() => reject(new Error('getContact timeout')), 5000))
+        ])
+        if (contact?.nickName) displayName = contact.nickName
+      }
+    } catch (e: any) {
+      console.warn('[MessagePushService] getSelfInfo error:', e?.message || e)
+    }
+    this.selfInfoCache = { wxid, displayName, updatedAt: now }
+    return { wxid, displayName }
   }
 
   start(): void {
@@ -405,6 +432,7 @@ class MessagePushService {
     previous: SessionBaseline | undefined,
     options: PushSessionOptions = {}
   ): Promise<PushSessionResult> {
+    const selfInfo = await this.getSelfInfo()
     const previousTimestamp = Math.max(0, Number(previous?.lastTimestamp || 0))
     const previousUnreadCount = Math.max(0, Number(previous?.unreadCount || 0))
     const currentUnreadCount = Math.max(0, Number(session.unreadCount || 0))
@@ -514,7 +542,7 @@ class MessagePushService {
       if (!this.shouldPushPayload(payload)) continue
 
       httpService.broadcastMessagePush(payload)
-      broadcastToAllBots('messages:batch', payload)
+      broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
       this.rememberMessageKey(messageKey)
       this.bumpSessionBaseline(session.username, message)
     }
@@ -544,6 +572,7 @@ class MessagePushService {
     previous: SessionBaseline | undefined,
     contextMessages: Message[]
   ): Promise<{ pushedCount: number; maxPushedTimestamp: number }> {
+    const selfInfo = await this.getSelfInfo()
     const sessionId = String(session.username || '').trim()
     if (!sessionId) return { pushedCount: 0, maxPushedTimestamp: 0 }
 
@@ -567,7 +596,7 @@ class MessagePushService {
       if (!this.shouldPushPayload(payload)) continue
 
       httpService.broadcastMessagePush(payload)
-      broadcastToAllBots('messages:batch', payload)
+      broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
       this.rememberMessageKey(messageKey)
       this.rememberSeenMessageKey(messageKey)
       this.bumpSessionBaseline(sessionId, message)
@@ -724,7 +753,12 @@ class MessagePushService {
       const groupInfo = await chatService.getContactAvatar(sessionId)
       const groupName = session.displayName || groupInfo?.displayName || sessionId
       const sourceName = await this.resolveGroupSourceName(sessionId, message, session)
+      const senderId = String(message.senderUsername || '').trim() || undefined
+      const senderCard = await this.resolveGroupSourceCard(sessionId, message)
       const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || groupInfo?.avatarUrl)
+      const myWxid = this.configService.getMyWxidCleaned()
+      cacheGroup(sessionId, groupName, myWxid)
+      scheduleGroupRefresh(sessionId)
       return {
         event: 'message.new',
         sessionId,
@@ -733,13 +767,18 @@ class MessagePushService {
         avatarUrl,
         groupName,
         sourceName,
+        senderId,
+        senderCard,
         content,
         timestamp: createTime
       }
     }
 
     const contactInfo = await chatService.getContactAvatar(sessionId)
-    const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || contactInfo?.avatarUrl)
+    const avatarUrl = this.normalizePushAvatarUrl(session.avatarUrl || contactInfo?.avatarUrl)
+    const senderId = String(message.senderUsername || '').trim() || sessionId
+    cachePrivate(senderId)
+    schedulePrivateRefresh(senderId)
     return {
       event: 'message.new',
       sessionId,
@@ -1376,6 +1415,15 @@ class MessagePushService {
 
     const contactInfo = await chatService.getContactAvatar(senderUsername)
     return contactInfo?.displayName || senderUsername
+  }
+
+  private async resolveGroupSourceCard(chatroomId: string, message: Message): Promise<string | undefined> {
+    const senderUsername = String(message.senderUsername || '').trim()
+    if (!senderUsername) return undefined
+
+    const groupNicknames = await this.getGroupNicknames(chatroomId)
+    const senderKey = senderUsername.toLowerCase()
+    return groupNicknames[senderKey] || undefined
   }
 
   private async getGroupNicknames(chatroomId: string): Promise<Record<string, string>> {

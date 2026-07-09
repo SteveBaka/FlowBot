@@ -1,5 +1,220 @@
 import { OneBotServer, OneBotConfig } from './oneBotServer'
 import { logger } from './logger'
+import { wcdbService } from './wcdbService'
+import { chatService } from './chatService'
+
+const GROUP_TTL_MS = 5 * 60 * 1000
+const PRIVATE_TTL_MS = 10 * 60 * 1000
+
+interface GroupInfo {
+  wxid: string
+  numericId: number
+  groupName: string
+  myNickname: string
+  myWxid: string
+  memberCount: number
+  updatedAt: number
+}
+
+interface PrivateInfo {
+  wxid: string
+  numericId: number
+  remark: string
+  nickName: string
+  alias: string
+  updatedAt: number
+}
+
+const groupByWxid = new Map<string, GroupInfo>()
+const groupByNumeric = new Map<number, GroupInfo>()
+const groupByName = new Map<string, string>()
+const privateByWxid = new Map<string, PrivateInfo>()
+const privateByNumeric = new Map<number, PrivateInfo>()
+const privateByName = new Map<string, string>()
+
+function numericIdOf(wxid: string): number {
+  let hash = 5381
+  for (let i = 0; i < wxid.length; i++) {
+    hash = ((hash << 5) + hash) + wxid.charCodeAt(i)
+    hash |= 0
+  }
+  return Math.abs(hash)
+}
+
+function wxidToNumeric(wxid: string): number {
+  return numericIdOf(wxid)
+}
+
+export async function preloadIdentity(myWxid: string): Promise<void> {
+  try {
+    const result = await wcdbService.getContactsCompact()
+    if (!result.success || !Array.isArray(result.contacts)) {
+      logger.warn('onebot', `preloadIdentity: getContactsCompact failed: ${result.error}`)
+      return
+    }
+    const contacts = result.contacts as Array<Record<string, any>>
+    let groupCount = 0
+    let privateCount = 0
+    for (const row of contacts) {
+      const username = String(row.username || row.user_name || row.userName || '').trim()
+      if (!username) continue
+      const remark = String(row.remark || row.Remark || '').trim()
+      const nickName = String(row.nickName || row.nick_name || row.nickname || row.NickName || '').trim()
+      const alias = String(row.alias || row.Alias || '').trim()
+      const displayName = remark || nickName || alias || username
+      if (username.endsWith('@chatroom')) {
+        const info: GroupInfo = {
+          wxid: username,
+          numericId: numericIdOf(username),
+          groupName: displayName,
+          myNickname: '',
+          myWxid: myWxid,
+          memberCount: 0,
+          updatedAt: Date.now()
+        }
+        groupByWxid.set(username, info)
+        groupByNumeric.set(info.numericId, info)
+        if (displayName !== username) {
+          groupByName.set(displayName, username)
+        }
+        groupCount++
+      } else if (username.startsWith('wxid_')) {
+        const info: PrivateInfo = {
+          wxid: username,
+          numericId: numericIdOf(username),
+          remark,
+          nickName,
+          alias,
+          updatedAt: Date.now()
+        }
+        privateByWxid.set(username, info)
+        privateByNumeric.set(info.numericId, info)
+        if (remark) privateByName.set(remark, username)
+        if (nickName) privateByName.set(nickName, username)
+        privateCount++
+      }
+    }
+    logger.info('onebot', `preloadIdentity: loaded ${groupCount} groups, ${privateCount} contacts`)
+  } catch (e: any) {
+    logger.warn('onebot', `preloadIdentity error: ${e?.message || e}`)
+  }
+}
+
+export function cacheGroup(sessionId: string, groupName: string, myWxid: string): GroupInfo | undefined {
+  const now = Date.now()
+  let info = groupByWxid.get(sessionId)
+  if (!info) {
+    info = {
+      wxid: sessionId,
+      numericId: numericIdOf(sessionId),
+      groupName,
+      myNickname: '',
+      myWxid,
+      memberCount: 0,
+      updatedAt: now
+    }
+    groupByWxid.set(sessionId, info)
+    groupByNumeric.set(info.numericId, info)
+  }
+  if (groupName && groupName !== sessionId) {
+    info.groupName = groupName
+    groupByName.set(groupName, sessionId)
+  }
+  info.updatedAt = now
+  return info
+}
+
+export function cachePrivate(senderWxid: string): PrivateInfo | undefined {
+  const now = Date.now()
+  let info = privateByWxid.get(senderWxid)
+  if (!info) {
+    info = {
+      wxid: senderWxid,
+      numericId: numericIdOf(senderWxid),
+      remark: '',
+      nickName: '',
+      alias: '',
+      updatedAt: now
+    }
+    privateByWxid.set(senderWxid, info)
+    privateByNumeric.set(info.numericId, info)
+  }
+  return info
+}
+
+export function resolveGroupSearchName(numericId: number | string): string | undefined {
+  const id = typeof numericId === 'string' ? parseInt(numericId, 10) : numericId
+  if (!Number.isFinite(id)) return undefined
+  const info = groupByNumeric.get(id)
+  if (info?.groupName && info.groupName !== info.wxid) {
+    return info.groupName
+  }
+  return undefined
+}
+
+export function resolvePrivateSearchName(numericId: number | string): string | undefined {
+  const id = typeof numericId === 'string' ? parseInt(numericId, 10) : numericId
+  if (!Number.isFinite(id)) return undefined
+  const info = privateByNumeric.get(id)
+  if (info) {
+    return info.remark || info.nickName || info.alias || undefined
+  }
+  return undefined
+}
+
+export function getGroup(wxid: string): GroupInfo | undefined {
+  return groupByWxid.get(wxid)
+}
+
+export function getPrivate(wxid: string): PrivateInfo | undefined {
+  return privateByWxid.get(wxid)
+}
+
+export function getGroupByNumeric(numericId: number): GroupInfo | undefined {
+  return groupByNumeric.get(numericId)
+}
+
+export function getPrivateByNumeric(numericId: number): PrivateInfo | undefined {
+  return privateByNumeric.get(numericId)
+}
+
+export function scheduleGroupRefresh(wxid: string): void {
+  const info = groupByWxid.get(wxid)
+  if (!info) return
+  const now = Date.now()
+  if (now - info.updatedAt < GROUP_TTL_MS) return
+  info.updatedAt = now
+  void (async () => {
+    try {
+      const contact = await chatService.getContact(wxid)
+      if (contact) {
+        const displayName = contact.remark || contact.nickName || contact.alias || wxid
+        info.groupName = displayName
+        groupByName.set(displayName, wxid)
+      }
+    } catch {}
+  })()
+}
+
+export function schedulePrivateRefresh(wxid: string): void {
+  const info = privateByWxid.get(wxid)
+  if (!info) return
+  const now = Date.now()
+  if (now - info.updatedAt < PRIVATE_TTL_MS) return
+  info.updatedAt = now
+  void (async () => {
+    try {
+      const contact = await chatService.getContact(wxid)
+      if (contact) {
+        info.remark = contact.remark || ''
+        info.nickName = contact.nickName || ''
+        info.alias = contact.alias || ''
+        if (info.remark) privateByName.set(info.remark, wxid)
+        if (info.nickName) privateByName.set(info.nickName, wxid)
+      }
+    } catch {}
+  })()
+}
 
 interface BotEntry {
   id: string
@@ -31,9 +246,21 @@ interface BotConfig {
 
 const bots: Map<string, BotEntry> = new Map()
 let onMessageCallback: ((msg: any) => void) | null = null
+let currentSelfWxid = ''
 
 export function setBotMessageCallback(cb: (msg: any) => void) {
   onMessageCallback = cb
+}
+
+const groupNameCache: Map<string, string> = new Map()
+const groupSelfNameCache: Map<string, string> = new Map()
+
+export function getCachedGroupName(chatroomId: string): string | undefined {
+  return groupNameCache.get(chatroomId)
+}
+
+export function getCachedSelfName(chatroomId: string): string | undefined {
+  return groupSelfNameCache.get(chatroomId)
 }
 
 function parseBotsConfig(raw: string | BotConfig[]): BotConfig[] {
@@ -48,8 +275,11 @@ function parseBotsConfig(raw: string | BotConfig[]): BotConfig[] {
 
 export async function startBotManager(
   botsConfigRaw: string | BotConfig[],
-  getConfig: (key: string) => any
+  getConfig: (key: string) => any,
+  selfDisplayName: string,
+  selfWxid?: string
 ): Promise<void> {
+  currentSelfWxid = selfWxid || currentSelfWxid
   const configs = parseBotsConfig(botsConfigRaw)
   log(`BotManager: Found ${configs.length} bot configs`)
 
@@ -89,7 +319,7 @@ async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promis
       enabled: true,
       port: cfg.port,
       accessToken: cfg.token || '',
-      selfId: cfg.name || cfg.id,
+      selfId: currentSelfWxid ? String(wxidToNumeric(currentSelfWxid)) : (cfg.name || cfg.id),
       maxConnections: 10,
       broadcastBatchSize: 100,
       broadcastIntervalMs: 50
@@ -165,7 +395,7 @@ async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promis
       name: cfg.name,
       url: wsPath,
       token: cfg.token || '',
-      selfId: cfg.name || cfg.id,
+      selfId: currentSelfWxid ? String(wxidToNumeric(currentSelfWxid)) : (cfg.name || cfg.id),
       reconnectIntervalMs: 5000,
       maxReconnectAttempts: 20
     })
@@ -365,23 +595,71 @@ function handleApiAction(action: string, params: any): any {
   }
 }
 
-export function broadcastToAllBots(event: string, data: any): void {
+export function broadcastToAllBots(event: string, data: any, selfWxid?: string, selfDisplayName?: string): void {
+  const isGroup = data.sessionType === 'group' || (data.sessionId && data.sessionId.includes('@chatroom'))
+
+  if (isGroup && data.groupName && data.groupName !== data.sessionId) {
+    groupNameCache.set(data.sessionId, data.groupName)
+  }
+
+  const botDisplayName = selfDisplayName || ''
+  if (isGroup && botDisplayName && data.sessionId) {
+    groupSelfNameCache.set(data.sessionId, botDisplayName)
+  }
+
   for (const [, entry] of bots) {
     if (entry.server && entry.status === 'running') {
       try {
-        const msg = {
-          time: Math.floor(Date.now() / 1000),
-          self_id: entry.name || entry.id,
-          post_type: 'message',
-          message_type: data.sessionType === 'group' ? 'group' : 'private',
-          message_id: Date.now(),
-          user_id: data.rawid || 0,
-          group_id: data.sessionType === 'group' ? data.sessionId : undefined,
-          message: [{ type: 'text', data: { text: data.content || '' } }],
-          raw_message: data.content || '',
-          sender: { user_id: data.rawid || 0, nickname: data.senderName || '' }
+        const selfId = String(wxidToNumeric(currentSelfWxid || botDisplayName || entry.name || entry.id))
+        const senderUserId = data.senderId ? data.senderId : (isGroup ? data.senderName : data.sessionId)
+        const senderNickname = data.senderName || data.sourceName || ''
+        const senderCard = data.senderCard || senderNickname
+
+        const messageSegments: Array<{ type: string; data: Record<string, string> }> = []
+        if (isGroup && data.content) {
+          const escapedDisplay = botDisplayName ? botDisplayName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : ''
+          const escapedWxid = selfWxid ? selfWxid.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : ''
+          const atParts = [escapedDisplay, escapedWxid].filter(Boolean)
+          const atPattern = atParts.length > 0 ? new RegExp(`@(?:${atParts.join('|')})`, 'i') : null
+          const match = atPattern ? data.content.match(atPattern) : null
+
+          if (match) {
+            const beforeAt = data.content.substring(0, match.index)
+            const afterAt = data.content.substring(match.index + match[0].length)
+            if (beforeAt) messageSegments.push({ type: 'text', data: { text: beforeAt } })
+            messageSegments.push({ type: 'at', data: { qq: selfId } })
+            if (afterAt) messageSegments.push({ type: 'text', data: { text: afterAt } })
+          } else {
+            messageSegments.push({ type: 'text', data: { text: data.content || '' } })
+          }
+        } else {
+          messageSegments.push({ type: 'text', data: { text: data.content || '' } })
         }
-        entry.server.pushMessage(msg)
+
+        const baseMsg: any = {
+          time: Math.floor(Date.now() / 1000),
+          self_id: selfId,
+          post_type: 'message',
+          message_type: isGroup ? 'group' : 'private',
+          sub_type: isGroup ? 'normal' : 'friend',
+          message_id: Date.now(),
+          user_id: senderUserId,
+          message: messageSegments,
+          raw_message: data.content || '',
+          sender: {
+            user_id: senderUserId,
+            nickname: senderNickname,
+            card: senderCard,
+            role: 'member',
+            sex: 'unknown',
+            age: 0
+          }
+        }
+        if (isGroup) {
+          baseMsg.group_id = data.sessionId
+          baseMsg.group_name = data.groupName || data.sessionId
+        }
+        entry.server.pushMessage(baseMsg)
       } catch {}
     }
   }

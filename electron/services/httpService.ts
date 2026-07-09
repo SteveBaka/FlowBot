@@ -8,6 +8,7 @@ import * as path from 'path'
 import { URL } from 'url'
 import { timingSafeEqual } from 'crypto'
 import { logger } from './logger'
+import * as botManager from './botManager'
 import { chatService, Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { ConfigService } from './config'
@@ -3026,9 +3027,8 @@ class HttpService {
 
   private async handleMgmtBotStart(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
-      const { startBotManager } = require('../../services/botManager')
       const rawBots = (this.configService as any).store?.get?.('bots') ?? (this.configService as any).get?.('bots')
-      await startBotManager(rawBots || '[]', (key: string) => {
+      await botManager.startBotManager(rawBots || '[]', (key: string) => {
         return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
       })
       this.sendJson(res, { success: true })
@@ -3039,11 +3039,10 @@ class HttpService {
 
   private async handleMgmtBotStop(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
-      const { stopBot, stopAllBots } = require('../../services/botManager')
       if (body.id) {
-        await stopBot(body.id)
+        await botManager.stopBot(body.id)
       } else {
-        await stopAllBots()
+        await botManager.stopAllBots()
       }
       this.sendJson(res, { success: true })
     } catch (error) {
@@ -3053,8 +3052,7 @@ class HttpService {
 
   private async handleMgmtBotRestart(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
-      const { restartBot } = require('../../services/botManager')
-      const ok = await restartBot(body.id, (key: string) => {
+      const ok = await botManager.restartBot(body.id, (key: string) => {
         return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
       })
       this.sendJson(res, { success: ok })
@@ -3065,8 +3063,7 @@ class HttpService {
 
   private handleMgmtBotStatus(res: http.ServerResponse): void {
     try {
-      const { getBotStatus } = require('../../services/botManager')
-      this.sendJson(res, { success: true, bots: getBotStatus() })
+      this.sendJson(res, { success: true, bots: botManager.getBotStatus() })
     } catch (error) {
       this.sendJson(res, { success: true, bots: [] })
     }
@@ -3074,6 +3071,10 @@ class HttpService {
 
   private handleMgmtLogs(url: URL, res: http.ServerResponse): void {
     try {
+      const categories = url.searchParams.get('categories')?.split(',') || undefined
+      const level = url.searchParams.get('level') || 'all'
+      const search = url.searchParams.get('search') || ''
+      const lines = Number(url.searchParams.get('lines')) || 200
       const logs = logger.readLogs({ categories, level, search, lines })
       this.sendJson(res, { success: true, logs, count: logs.length })
     } catch (error) {

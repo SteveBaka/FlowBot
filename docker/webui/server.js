@@ -1,10 +1,11 @@
 const http = require('http')
 const fs = require('fs')
 const path = require('path')
+const crypto = require('crypto')
 const { execSync } = require('child_process')
 
-const PORT = process.env.WEBUI_PORT || 5099
-const ONEBOT_PORT = process.env.ONEBOT_PORT || 3001
+const PORT = process.env.WEBUI_PORT || 7300
+const ONEBOT_PORT = process.env.ONEBOT_PORT || 7100
 const FLOW_PORT = process.env.FLOW_API_PORT || 5031
 const CONFIG_DIR = process.env.WEFLOW_CONFIG_DIR || '/opt/weflow/data'
 const CONFIG_FILE = path.join(CONFIG_DIR, 'webui-config.json')
@@ -29,7 +30,10 @@ function json(res, data, status = 200) {
 function file(res, fp) {
   try {
     const c = fs.readFileSync(fp)
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(fp)] || 'application/octet-stream' })
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(fp)] || 'application/octet-stream',
+      'Cache-Control': 'no-cache, no-store, must-revalidate'
+    })
     res.end(c)
   } catch { res.writeHead(404); res.end('Not Found') }
 }
@@ -50,6 +54,29 @@ function ensureDirSync(dir) {
   try {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   } catch {}
+}
+
+// ─── Auth (scrypt-hashed password, in-memory tokens) ─────────────────────────
+
+const AUTH_FILE = path.join(CONFIG_DIR, 'webui-auth.json')
+const activeTokens = new Set()
+
+function verifyPassword(password) {
+  try {
+    const auth = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'))
+    const hash = crypto.scryptSync(password, auth.salt, 64).toString('hex')
+    return hash === auth.hash
+  } catch { return false }
+}
+
+function generateToken() {
+  return crypto.randomBytes(32).toString('hex')
+}
+
+function isAuthenticated(req) {
+  const authHeader = req.headers.authorization || ''
+  const token = authHeader.replace('Bearer ', '').trim()
+  return token.length > 0 && activeTokens.has(token)
 }
 
 // ─── WeFlow config path discovery (dynamic) ───────────────────────────────────
@@ -163,69 +190,45 @@ function saveWebuiConfig(cfg) {
   }
 }
 
-// ─── Logs ──────────────────────────────────────────────────────────────────────
+// ─── Logs (single source: container.log) ─────────────────────────────────────
 
-const LOG_SOURCES = {
-  weflow: [
-    '/tmp/weflow.log',
-    '/var/log/weflow.log',
-    '/opt/weflow/logs/weflow.log'
-  ],
-  wechat: [
-    '/tmp/wechat.log',
-    '/var/log/wechat.log',
-    '/opt/weflow/logs/wechat.log'
-  ],
-  vnc: [
-    '/tmp/x11vnc.log',
-    '/var/log/x11vnc.log',
-    '/opt/weflow/logs/vnc.log'
-  ],
-  system: [
-    '/var/log/syslog',
-    '/var/log/messages',
-    '/var/log/supervisord.log'
-  ],
-  sender: [
-    '/tmp/linuxsender.log',
-    '/var/log/linuxsender.log',
-    '/opt/weflow/logs/sender.log'
-  ]
-}
+const CONTAINER_LOG = '/opt/weflow/data/logs/container.log'
+const WEFLOW_LOG_RE = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s+\[(\w+)\]\s+\[(\w+)\]\s+(.*)/
 
-function readLogFiles(maxLines, activeCategories) {
-  const lines = []
-  for (const [category, paths] of Object.entries(LOG_SOURCES)) {
-    if (activeCategories && !activeCategories.has(category)) continue
-    for (const lp of paths) {
-      try {
-        if (fs.existsSync(lp)) {
-          const content = fs.readFileSync(lp, 'utf-8')
-          for (const line of content.split('\n').filter(Boolean)) {
-            lines.push({ text: line, category })
-          }
-        }
-      } catch {}
+function parseContainerLog(maxLines, categories, levels, search) {
+  if (!fs.existsSync(CONTAINER_LOG)) return []
+  var content
+  try { content = fs.readFileSync(CONTAINER_LOG, 'utf-8') } catch { return [] }
+  var rawLines = content.split('\n')
+  var results = []
+  for (var i = 0; i < rawLines.length; i++) {
+    var line = rawLines[i]
+    if (!line) continue
+    var m = WEFLOW_LOG_RE.exec(line)
+    var ts = '', level = 'info', category = 'system', msg = line
+    if (m) {
+      ts = m[1]
+      level = m[2].toLowerCase()
+      category = m[3].toLowerCase()
+      msg = m[4]
+    } else {
+      var lower = line.toLowerCase()
+      if (lower.indexOf('wechat') !== -1 || lower.indexOf('wechatappex') !== -1) category = 'wechat'
+      else if (lower.indexOf('x11vnc') !== -1 || lower.indexOf('xvfb') !== -1 || lower.indexOf('vnc') !== -1) category = 'vnc'
+      else if (lower.indexOf('fluxbox') !== -1) category = 'system'
+      else if (lower.indexOf('onebot') !== -1 || lower.indexOf('wsclient') !== -1 || lower.indexOf('botmanager') !== -1) category = 'onebot'
+      else category = 'system'
+      if (lower.indexOf('error') !== -1 || lower.indexOf('fatal') !== -1 || lower.indexOf('fail') !== -1) level = 'error'
+      else if (lower.indexOf('warn') !== -1) level = 'warn'
+      else if (lower.indexOf('debug') !== -1) level = 'debug'
     }
+    if (categories && categories.length > 0 && categories.indexOf(category) === -1) continue
+    if (levels && levels.length > 0 && levels.indexOf(level) === -1) continue
+    if (search && line.toLowerCase().indexOf(search) === -1) continue
+    results.push({ timestamp: ts, level: level, category: category, message: msg, raw: line })
   }
-  return lines
-}
-
-function tryJournalctl(category) {
-  const unitMap = {
-    wechat: 'wechat',
-    weflow: 'weflow',
-    vnc: 'x11vnc',
-    system: null,
-    sender: 'linuxsender'
-  }
-  const unit = unitMap[category]
-  if (!unit) return []
-  try {
-    const raw = execSync(`journalctl -u ${unit} --no-pager -n 200 2>/dev/null`, { timeout: 3000, encoding: 'utf-8' })
-    return raw.split('\n').filter(Boolean).map(text => ({ text, category }))
-  } catch {}
-  return []
+  if (results.length > maxLines) results = results.slice(results.length - maxLines)
+  return results
 }
 
 // ─── HTTP API proxy helper ────────────────────────────────────────────────────
@@ -250,10 +253,43 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization')
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return }
 
   const p = url.pathname
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Auth endpoints (public)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  if (p === '/api/auth/login' && req.method === 'POST') {
+    const bodyData = await body(req)
+    if (verifyPassword(bodyData.password || '')) {
+      const token = generateToken()
+      activeTokens.add(token)
+      json(res, { ok: true, token })
+    } else {
+      json(res, { ok: false, error: '密码错误' }, 401)
+    }
+    return
+  }
+
+  if (p === '/api/auth/verify' && req.method === 'GET') {
+    if (isAuthenticated(req)) json(res, { ok: true })
+    else json(res, { ok: false }, 401)
+    return
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // Auth gate — protect all /api/* except auth + status + version
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+  }
 
   // ═══════════════════════════════════════════════════════════════════════════════
   // Status & version
@@ -277,7 +313,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/version') {
     json(res, {
-      app: 'WeFlow', version: '4.6.1', protocol: 'v11.0',
+      app: 'FlowBOT', version: '4.6.1', protocol: 'v11.0',
       onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT), flow_port: Number(FLOW_PORT)
     })
     return
@@ -380,8 +416,8 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  // 代理所有 /api/v1/* 请求到 WeFlow HTTP API（包括 /api/v1/mgmt/*）
-  if (p.startsWith('/api/v1/')) {
+  // 代理 /api/v1/* 请求到 WeFlow HTTP API（除了日志，由本地处理）
+  if (p.startsWith('/api/v1/') && !p.startsWith('/api/v1/mgmt/logs')) {
     try {
       const token = readApiToken()
       const targetUrl = `http://127.0.0.1:${FLOW_PORT}${p}`
@@ -395,6 +431,48 @@ const server = http.createServer(async (req, res) => {
     } catch (err) {
       json(res, { ok: false, error: String(err) }, 502)
     }
+    return
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // /api/v1/mgmt/logs — handled locally (reads from container.log)
+  // ═══════════════════════════════════════════════════════════════════════════════
+
+  if (p === '/api/v1/mgmt/logs' && req.method === 'GET') {
+    var maxLines = Math.min(Number(url.searchParams.get('lines')) || 300, 2000)
+    var categoriesParam = url.searchParams.get('categories') || ''
+    var levelsParam = url.searchParams.get('levels') || ''
+    var searchParam = (url.searchParams.get('search') || '').toLowerCase()
+
+    var activeCategories = categoriesParam
+      ? categoriesParam.split(',').map(function (s) { return s.trim().toLowerCase() }).filter(Boolean)
+      : []
+    var activeLevels = levelsParam
+      ? levelsParam.split(',').map(function (s) { return s.trim().toLowerCase() }).filter(Boolean)
+      : []
+
+    var parsed = parseContainerLog(maxLines, activeCategories, activeLevels, searchParam)
+    json(res, { success: true, logs: parsed, count: parsed.length })
+    return
+  }
+
+  if (p === '/api/v1/mgmt/logs/stats' && req.method === 'GET') {
+    var fileSize = 0
+    var lineCount = 0
+    try {
+      if (fs.existsSync(CONTAINER_LOG)) {
+        fileSize = fs.statSync(CONTAINER_LOG).size
+        var statContent = fs.readFileSync(CONTAINER_LOG, 'utf-8')
+        lineCount = statContent.split('\n').filter(Boolean).length
+      }
+    } catch {}
+    json(res, { success: true, file: CONTAINER_LOG, size: fileSize, lines: lineCount })
+    return
+  }
+
+  if (p === '/api/v1/mgmt/logs/clear' && req.method === 'POST') {
+    try { if (fs.existsSync(CONTAINER_LOG)) fs.writeFileSync(CONTAINER_LOG, '') } catch {}
+    json(res, { success: true, cleared: 'container.log' })
     return
   }
 
@@ -503,12 +581,79 @@ const server = http.createServer(async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════════
 
   if (p === '/api/system') {
-    const uptime = shell('uptime -p')
-    const mem = shell("free -h | awk '/^Mem:/{print $3\"/\"$2}'")
-    const disk = shell("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")
+    const uptime = shell('uptime -p').replace('up ', '')
+    const mem = shell("free -m | awk '/^Mem:/{print $3, $2}'")
+    const memParts = mem.split(' ')
+    const memUsed = parseInt(memParts[0]) || 0
+    const memTotal = parseInt(memParts[1]) || 1
+    const memPercent = Math.round((memUsed / memTotal) * 100)
+    const disk = shell("df -m / | awk 'NR==2{print $3, $2, $5}'")
+    const diskParts = disk.split(' ')
+    const diskUsed = parseInt(diskParts[0]) || 0
+    const diskTotal = parseInt(diskParts[1]) || 1
+    const diskPercent = Math.round((diskUsed / diskTotal) * 100)
+    const cpuLoad = shell("cat /proc/loadavg | awk '{print $1}'")
+    const cpuCores = shell("nproc")
+    const cpuModel = shell("cat /proc/cpuinfo | grep 'model name' | head -1 | sed 's/model name.*: //'")
     const nodeVer = shell('node --version')
     const appVersion = process.env.APP_VERSION || '4.6.1'
-    json(res, { ok: true, system: { uptime, memory: mem, disk, node: nodeVer, version: appVersion } })
+    const wechatVersion = shell("/opt/wechat/wechat --version 2>/dev/null || dpkg -l wechat 2>/dev/null | awk '/^ii/{print $3}' || echo '4.1.1.7'").split('\n')[0].trim() || '4.1.1.7'
+    const containerStart = shell("stat -c %Y /proc/1 2>/dev/null || echo '0'")
+    const now = Math.floor(Date.now() / 1000)
+    const containerStartTime = parseInt(containerStart) || (now - 1)
+    const containerUptimeSec = Math.max(now - containerStartTime, 1)
+    const days = Math.floor(containerUptimeSec / 86400)
+    const hours = Math.floor((containerUptimeSec % 86400) / 3600)
+    const mins = Math.floor((containerUptimeSec % 3600) / 60)
+    var containerUptime = ''
+    if (days > 0) containerUptime += days + '天'
+    if (hours > 0) containerUptime += hours + 'h'
+    containerUptime += mins + 'm'
+    json(res, {
+      ok: true,
+      system: {
+        uptime,
+        containerUptime,
+        memory: { used: memUsed, total: memTotal, usedPercent: memPercent },
+        disk: { used: diskUsed, total: diskTotal, usedPercent: diskPercent },
+        cpuLoad: parseFloat(cpuLoad) || 0,
+        cpuCores: parseInt(cpuCores) || 1,
+        cpuModel,
+        node: nodeVer,
+        version: appVersion,
+        wechatVersion
+      }
+    })
+    return
+  }
+
+  if ((p === '/api/restart/weflow' || p === '/api/restart/wechat') && req.method === 'POST') {
+    const target = p.includes('wechat') ? 'wechat' : 'weflow'
+    console.log(`[WebUI] 收到重启请求: ${target}`)
+    setTimeout(() => {
+      try {
+        if (target === 'wechat') {
+          console.log('[WebUI] 正在关闭微信...')
+          shell('pkill -9 -f /opt/wechat/wechat 2>/dev/null; sleep 1')
+          console.log('[WebUI] 微信已关闭，等待5秒后重启...')
+          setTimeout(() => {
+            shell('DISPLAY=:99 dbus-launch /opt/wechat/wechat > /tmp/wechat-restart.log 2>&1 &')
+            console.log('[WebUI] 微信重启命令已执行')
+          }, 5000)
+        } else {
+          console.log('[WebUI] 正在关闭 WeFlow...')
+          shell('pkill -9 -f "weflow --no-s" 2>/dev/null; pkill -9 -f "weflow --no-sandbox" 2>/dev/null; sleep 1')
+          console.log('[WebUI] WeFlow 已关闭，等待5秒后重启...')
+          setTimeout(() => {
+            shell('cd /opt/weflow && DISPLAY=:99 dbus-launch ./weflow --no-sandbox --disable-gpu > /tmp/weflow-restart.log 2>&1 &')
+            console.log('[WebUI] WeFlow 重启命令已执行')
+          }, 5000)
+        }
+      } catch (e) {
+        console.error('[WebUI] 重启失败:', e.message || e)
+      }
+    }, 1000)
+    json(res, { ok: true, message: '正在重启，请等待重新启动' })
     return
   }
 
@@ -527,64 +672,6 @@ const server = http.createServer(async (req, res) => {
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════
-  // Logs  — supports categories, level, search, lines query params
-  // ═══════════════════════════════════════════════════════════════════════════════
-
-  if (p === '/api/logs' && req.method === 'GET') {
-    const maxLines = Math.min(Number(url.searchParams.get('lines')) || 500, 2000)
-    const categoriesParam = url.searchParams.get('categories') || ''
-    const levelParam = (url.searchParams.get('level') || 'all').toLowerCase()
-    const searchParam = (url.searchParams.get('search') || '').toLowerCase()
-
-    const activeCategories = categoriesParam
-      ? new Set(categoriesParam.split(',').map(s => s.trim()).filter(Boolean))
-      : new Set(Object.keys(LOG_SOURCES))
-
-    let allLines = readLogFiles(maxLines, activeCategories)
-
-    if (allLines.length === 0) {
-      for (const cat of activeCategories) {
-        allLines.push(...tryJournalctl(cat))
-      }
-    }
-
-    if (searchParam) {
-      allLines = allLines.filter(l => l.text.toLowerCase().includes(searchParam))
-    }
-
-    if (levelParam !== 'all') {
-      allLines = allLines.filter(l => {
-        const t = l.text.toLowerCase()
-        if (levelParam === 'error') return t.includes('error') || t.includes('fatal') || t.includes('panic') || t.includes('fail')
-        if (levelParam === 'warning') return t.includes('warn') || t.includes('warning')
-        if (levelParam === 'info') return true
-        return true
-      })
-    }
-
-    allLines = allLines.slice(-maxLines)
-
-    json(res, { ok: true, logs: allLines.map(l => l.text), count: allLines.length })
-    return
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════════
-  // Clear logs
-  // ═══════════════════════════════════════════════════════════════════════════════
-
-  if (p === '/api/logs/clear' && req.method === 'POST') {
-    for (const [, paths] of Object.entries(LOG_SOURCES)) {
-      for (const lp of paths) {
-        try {
-          if (fs.existsSync(lp)) fs.writeFileSync(lp, '')
-        } catch {}
-      }
-    }
-    json(res, { ok: true })
-    return
-  }
-
-  // ═══════════════════════════════════════════════════════════════════════════════
   // Static files (SPA fallback)
   // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -593,7 +680,7 @@ const server = http.createServer(async (req, res) => {
 })
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[WebUI] Management panel running on http://0.0.0.0:${PORT}`)
+  console.log(`[WebUI] FlowBOT management panel running on http://0.0.0.0:${PORT}`)
   console.log(`[WebUI] WeFlow config path: ${discoverWeFlowConfigPath()}`)
   console.log(`[WebUI] Disclaimer accepted: ${isDisclaimerAccepted()}`)
 })

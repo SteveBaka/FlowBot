@@ -4379,9 +4379,12 @@ app.whenReady().then(async () => {
       console.warn('[StartupWarmup] 跳过预热，数据库连接失败:', reason)
       updateSplashProgress(68, '数据库预热已跳过')
     } else {
-      const preloadUsernames = new Set<string>()
-
+      // 数据库连接成功，重新启动消息推送 monitor（首次启动时 DB 未就绪，monitor 未建立）
+      console.log('[StartupWarmup] 数据库连接成功，重新启动消息推送 monitor...')
+      messagePushService.stop()
+      messagePushService.start()
       updateSplashProgress(44, '正在预加载会话...')
+      const preloadUsernames = new Set<string>()
       const sessionsWarmup = await withTimeout(() => chatService.getSessions(), 12000)
       if (!sessionsWarmup.timedOut && sessionsWarmup.value?.success && Array.isArray(sessionsWarmup.value.sessions)) {
         for (const session of sessionsWarmup.value.sessions) {
@@ -4505,35 +4508,121 @@ app.whenReady().then(async () => {
           const params = msg.params || {}
           const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
           const sender = getEnhancedMessageSender()
-          const content = params.message || params.text || params.content || ''
+
+          // OneBot v11 message 可以是字符串或 CQ segment 数组
+          var rawMsg = params.message || params.text || params.content || ''
+          var content = ''
+          if (typeof rawMsg === 'string') {
+            content = rawMsg
+          } else if (Array.isArray(rawMsg)) {
+            // 从 CQ segments 提取纯文本
+            content = rawMsg
+              .filter(function(s) { return s.type === 'text' })
+              .map(function(s) { return s.data && s.data.text || '' })
+              .join('')
+          } else if (rawMsg && typeof rawMsg === 'object') {
+            content = String(rawMsg.text || rawMsg.content || '')
+          } else {
+            content = String(rawMsg)
+          }
           if (!content) {
             console.warn('[App] Bot message empty, skipping')
             return
           }
 
           if (msg.action === 'send_private_msg') {
-            // 外部服务发送私聊消息 → 通过 xdotool 发到微信
-            const contactName = params.user_id || params.nickname || ''
-            console.log(`[App] Bot sending private msg to "${contactName}": ${content.substring(0, 50)}`)
-            const result = await sender.sendMessage(content, contactName)
+            var rawUserId = params.user_id || ''
+            var contactName = rawUserId
+            try {
+              var { resolvePrivateSearchName } = require('./services/botManager')
+              var resolvedName = resolvePrivateSearchName(rawUserId)
+              if (resolvedName) {
+                contactName = resolvedName
+              }
+            } catch {}
+            console.log('[App] Bot sending private msg to "' + contactName + '": ' + content.substring(0, 50))
+            var result = await sender.sendMessage(content, contactName)
             console.log('[App] Bot sendMessage result:', result)
           } else if (msg.action === 'send_group_msg') {
-            // 外部服务发送群聊消息
-            const groupName = params.group_id || params.group_name || ''
-            console.log(`[App] Bot sending group msg to "${groupName}": ${content.substring(0, 50)}`)
-            const result = await sender.sendMessage(content, groupName)
+            var rawGroupId = params.group_id || params.group_name || ''
+            var groupName = rawGroupId
+            try {
+              var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
+              var resolvedName = resolveGroupSearchName(rawGroupId)
+              if (resolvedName) {
+                groupName = resolvedName
+              } else {
+                var cached = getCachedGroupName(rawGroupId)
+                if (cached) {
+                  groupName = cached
+                } else {
+                  var contact = await chatService.getContact(rawGroupId)
+                  if (contact) {
+                    groupName = contact.remark || contact.nickName || rawGroupId
+                  }
+                  if ((!groupName || groupName === rawGroupId) && rawGroupId.includes('@chatroom')) {
+                    var avatarInfo = await chatService.getContactAvatar(rawGroupId)
+                    if (avatarInfo?.displayName && avatarInfo.displayName !== rawGroupId) {
+                      groupName = avatarInfo.displayName
+                    }
+                  }
+                }
+              }
+            } catch {}
+            console.log('[App] Bot sending group msg to "' + groupName + '" (from ' + rawGroupId + '): ' + content.substring(0, 50))
+            var result = await sender.sendMessage(content, groupName)
             console.log('[App] Bot sendMessage result:', result)
           } else if (msg.action === 'send_msg') {
-            const target = params.user_id || params.group_id || params.target || ''
-            console.log(`[App] Bot sending msg to "${target}": ${content.substring(0, 50)}`)
-            const result = await sender.sendMessage(content, target)
+            var rawTarget = params.group_id || params.user_id || params.target || ''
+            var target = rawTarget
+            if (params.group_id) {
+              try {
+                var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
+                var resolvedGroupName = resolveGroupSearchName(params.group_id)
+                if (resolvedGroupName) {
+                  target = resolvedGroupName
+                } else {
+                  var cachedGroupName = getCachedGroupName(params.group_id)
+                  if (cachedGroupName) {
+                    target = cachedGroupName
+                  } else {
+                    var gContact = await chatService.getContact(params.group_id)
+                    if (gContact) target = gContact.remark || gContact.nickName || rawTarget
+                    if ((!target || target === rawTarget) && params.group_id.includes('@chatroom')) {
+                      var gAvatarInfo = await chatService.getContactAvatar(params.group_id)
+                      if (gAvatarInfo?.displayName && gAvatarInfo.displayName !== rawTarget) {
+                        target = gAvatarInfo.displayName
+                      }
+                    }
+                  }
+                }
+              } catch {}
+            } else if (params.user_id) {
+              try {
+                var { resolvePrivateSearchName } = require('./services/botManager')
+                var resolvedUserName = resolvePrivateSearchName(params.user_id)
+                if (resolvedUserName) {
+                  target = resolvedUserName
+                }
+              } catch {}
+            }
+            console.log('[App] Bot sending msg to "' + target + '" (from ' + rawTarget + '): ' + content.substring(0, 50))
+            var result = await sender.sendMessage(content, target)
             console.log('[App] Bot sendMessage result:', result)
           }
         } catch (e) {
           console.error('[App] Bot message forwarding error:', e)
         }
       })
-      await startBotManager(rawBots, (key: string) => configService.get(key as any))
+      const myWxid = configService.getMyWxidCleaned()
+      let selfDisplayName = ''
+      try {
+        const selfContact = await chatService.getContact(myWxid)
+        if (selfContact?.nickName) selfDisplayName = selfContact.nickName
+      } catch {}
+      const { preloadIdentity } = require('./services/botManager')
+      await startBotManager(rawBots, (key: string) => configService.get(key as any), selfDisplayName, myWxid)
+      await preloadIdentity(myWxid)
       console.log('[App] Bot manager started')
     }
   } catch (e) {

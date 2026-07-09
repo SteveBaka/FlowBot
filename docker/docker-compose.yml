@@ -1,0 +1,22 @@
+services:
+  flowbot:
+    image: flowbot:latest
+    container_name: flowbot
+    restart: always
+    cap_add:
+      - SYS_PTRACE
+    environment:
+      - TZ=Asia/Shanghai
+      - WEFLOW_DOCKER=1
+      - ONEBOT_PORT=7100
+      - WEBUI_PORT=7300
+      - NOVNC_PORT=7600
+      - VNC_PASSWORD=vncpasswd  # 请修改为自定义密码，避免他人通过 noVNC 登录
+    ports:
+      - "7100:7100"   # OneBot v11 API
+      - "7300:7300"   # FlowBOT WebUI 管理面板
+      - "7600:7600"   # noVNC 虚拟桌面
+    volumes:
+      - ./data:/opt/weflow/data
+      - ./config:/root/.config
+      - ./xwechat_files:/root/xwechat_files

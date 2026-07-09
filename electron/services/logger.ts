@@ -71,8 +71,10 @@ class Logger {
       this.getStream('system').write(line)
     } catch {}
 
-    // Console output
-    const prefix = `[${category}]`
+    // Console output (short timestamp format for container logs)
+    const pad = (n: number) => n.toString().padStart(2, '0')
+    const shortTime = `${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
+    const prefix = `[${shortTime}] [${level.toUpperCase()}] [${category}]`
     if (level === 'error') console.error(prefix, message)
     else if (level === 'warn') console.warn(prefix, message)
     else if (level === 'debug') console.debug(prefix, message)

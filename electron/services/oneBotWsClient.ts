@@ -65,17 +65,21 @@ export class OneBotWsClient extends EventEmitter {
   constructor(config: OneBotWsClientConfig) {
     super()
     this.config = config
-    this.maxReconnect = config.maxReconnectAttempts || 10
+    this.maxReconnect = config.maxReconnectAttempts || 5
   }
 
   async connect(): Promise<void> {
     const url = this.config.url
-    const headers: Record<string, string> = {}
+    const headers: Record<string, string> = {
+      'User-Agent': 'OneBot/11',
+      'X-Self-ID': this.config.selfId || 'weflow',
+      'X-Client-Role': 'Universal',
+    }
     if (this.config.token) {
       headers['Authorization'] = `Bearer ${this.config.token}`
     }
 
-    log(`Connecting to ${url}...`)
+    log(`Connecting to ${url} with X-Self-ID=${this.config.selfId}...`)
 
     this.ws = new WebSocket(url, {
       headers,
@@ -87,7 +91,7 @@ export class OneBotWsClient extends EventEmitter {
       this.reconnectAttempts = 0
       log(`Connected to ${url}`)
       this.emit('connected')
-      this.startHeartbeat()
+      this.stopHeartbeat()
       this.startBroadcast()
       this.sendMetaEvent('connect')
     })
@@ -108,7 +112,7 @@ export class OneBotWsClient extends EventEmitter {
 
     this.ws.on('error', (error: Error) => {
       warn(`WebSocket error: ${error.message}`)
-      this.emit('error', error)
+      // Don't emit error to prevent UI dialogs
     })
   }
 
@@ -135,10 +139,55 @@ export class OneBotWsClient extends EventEmitter {
     const { action, params = {}, echo } = request
     log(`API request: ${action}`)
 
-    this.emit('api', { action, params })
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const ack: any = { status: 'ok', retcode: 0, data: null, echo: echo }
+      if (action === 'get_status') {
+        ack.data = { online: true, good: true }
+      } else if (action === 'get_version_info') {
+        ack.data = { app_name: 'WeFlow', app_version: '4.6.1', protocol_version: 'v11.0' }
+      } else if (action === 'get_login_info') {
+        ack.data = { user_id: Number(this.config.selfId) || 0, nickname: '' }
+      } else if (action === 'get_group_member_info') {
+        ack.data = {
+          group_id: params.group_id,
+          user_id: params.user_id,
+          nickname: '',
+          card: '',
+          sex: 'unknown',
+          age: 0,
+          area: '',
+          join_time: 0,
+          last_sent_time: 0,
+          level: 'normal',
+          role: 'member',
+          unfriendly: false,
+          title: '',
+          title_expire_time: 0,
+          nickname_changeable: true
+        }
+      } else if (action === 'get_stranger_info') {
+        ack.data = {
+          user_id: params.user_id,
+          nickname: '',
+          sex: 'unknown',
+          age: 0,
+          area: '',
+          level: 'normal',
+        }
+      } else {
+        ack.data = { message_id: Math.floor(Date.now()) }
+      }
+      try {
+        this.ws.send(JSON.stringify(ack))
+        log(`Sent ack: action=${action} echo=${echo || 'none'}`)
+      } catch (e) {
+        warn(`Failed to send ack: ${e}`)
+      }
+    }
 
-    // 如果外部 server 只是查询状态，直接返回
-    // 具体的执行逻辑由 botManager 的回调处理
+    if (action === 'send_private_msg' || action === 'send_group_msg' || action === 'send_msg') {
+      this.emit('api', { action, params })
+    }
   }
 
   public sendResponse(response: any): void {
@@ -154,7 +203,7 @@ export class OneBotWsClient extends EventEmitter {
     }
   }
 
-  public pushMessage(event: OneBotMessage | any): void {
+  public   pushMessage(event: OneBotMessage | any): void {
     this.messageBuffer.push(event as any)
   }
 
@@ -176,8 +225,10 @@ export class OneBotWsClient extends EventEmitter {
     this.broadcastTimer = setInterval(() => {
       if (this.messageBuffer.length === 0) return
       const batch = this.messageBuffer.splice(0, 100)
-      const data = JSON.stringify({ post_type: 'messages:batch', data: batch })
-      this.pushMessageImmediate(data)
+      // 逐条发送，兼容 AstrBot 等标准 OneBot v11 实现
+      for (const msg of batch) {
+        this.pushMessageImmediate(JSON.stringify(msg))
+      }
     }, 50)
   }
 
@@ -188,20 +239,18 @@ export class OneBotWsClient extends EventEmitter {
     }
   }
 
-  private startHeartbeat(): void {
-    this.heartbeatTimer = setInterval(() => {
-      if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-        const heartbeat = {
-          time: Math.floor(Date.now() / 1000),
-          self_id: this.config.selfId,
-          post_type: 'meta_event',
-          meta_event_type: 'heartbeat',
-          status: { online: true, good: true },
-          interval: 30000
-        }
-        this.pushMessageImmediate(heartbeat)
+  private sendHeartbeatOnce(): void {
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      const heartbeat = {
+        time: Math.floor(Date.now() / 1000),
+        self_id: this.config.selfId,
+        post_type: 'meta_event',
+        meta_event_type: 'heartbeat',
+        status: { online: true, good: true },
+        interval: 30000
       }
-    }, 30000)
+      this.pushMessageImmediate(heartbeat)
+    }
   }
 
   private stopHeartbeat(): void {
@@ -224,14 +273,17 @@ export class OneBotWsClient extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (this.reconnectAttempts >= this.maxReconnect) {
-      warn(`Max reconnect attempts (${this.maxReconnect}) reached, giving up`)
+      warn(`已尝试 ${this.maxReconnect} 次重连均失败，停止检测。等待下次消息触发或手动重启。`)
       this.emit('failed')
       return
     }
     this.reconnectAttempts++
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000)
-    log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnect})...`)
-    this.reconnectTimer = setTimeout(() => this.connect(), delay)
+    const delayMs = Math.min(30000 * Math.pow(2, this.reconnectAttempts - 1), 300000)
+    const delaySec = Math.round(delayMs / 1000)
+    const delayMin = Math.round(delaySec / 60)
+    const delayStr = delayMin > 0 ? `${delayMin} 分钟` : `${delaySec} 秒`
+    warn(`连接断开，第 ${this.reconnectAttempts}/${this.maxReconnect} 次重连，${delayStr}后尝试...`)
+    this.reconnectTimer = setTimeout(() => this.connect(), delayMs)
   }
 
   disconnect(): void {
@@ -252,6 +304,27 @@ export class OneBotWsClient extends EventEmitter {
 
   isConnected(): boolean {
     return this.connected && this.ws?.readyState === WebSocket.OPEN
+  }
+
+  isActive(): boolean {
+    return this.connected || this.reconnectAttempts < this.maxReconnect
+  }
+
+  wake(): void {
+    if (this.connected) {
+      log('wake() — 已连接，无需重连')
+      return
+    }
+    if (this.reconnectAttempts >= this.maxReconnect) {
+      log('wake() — 之前重连失败已达上限，重新开始重连...')
+      this.reconnectAttempts = 0
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = null
+    }
+    log('wake() — 消息触发重连')
+    this.connect()
   }
 
   getClientCount(): number {

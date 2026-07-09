@@ -154,7 +154,7 @@ const BotPage = {
   setup: function () {
     var bot = reactive({
       enabled: false,
-      port: 3001,
+      port: 7100,
       accessToken: '',
       selfId: '',
       maxConnections: 10,
@@ -168,7 +168,7 @@ const BotPage = {
       var d = await api('/api/v1/mgmt/config')
       if (!d.error) {
         bot.enabled = d.oneBotEnabled || false
-        bot.port = d.oneBotPort || 3001
+        bot.port = d.oneBotPort || 7100
         bot.accessToken = (d.oneBotAccessToken && d.oneBotAccessToken !== '[encrypted]') ? d.oneBotAccessToken : ''
         bot.selfId = d.oneBotSelfId || ''
         bot.maxConnections = d.oneBotMaxConnections || 10
@@ -466,7 +466,7 @@ const SettingsPage = {
         })
       })
       if (d.success) {
-        toast('WeFlow 配置已保存')
+        toast('FlowBOT 配置已保存')
         showSyncBanner.value = true
         setTimeout(function () { showSyncBanner.value = false }, 2000)
       } else toast('保存失败: ' + (d.error || '未知错误'), 'error')
@@ -503,7 +503,7 @@ const SettingsPage = {
     }
   },
   template: '<div>' +
-    '<div v-if="showSyncBanner" class="sync-banner">WeFlow 配置已同步</div>' +
+    '<div v-if="showSyncBanner" class="sync-banner">FlowBOT 配置已同步</div>' +
     '<h1 class="page-title">设置</h1>' +
 
     '<div class="card">' +
@@ -513,7 +513,7 @@ const SettingsPage = {
     '</div></div>' +
 
     '<div class="card">' +
-    '<h2>WeFlow 配置</h2>' +
+    '<h2>FlowBOT 配置</h2>' +
     '<div class="form-row"><label>HTTP API 启用</label><toggle-switch v-model="wf.httpEnabled" /></div>' +
     '<div class="form-row"><label>HTTP API 端口</label><input type="number" v-model.number="wf.httpPort"></div>' +
     '<div class="form-row"><label>HTTP API Token</label>' +
@@ -527,7 +527,7 @@ const SettingsPage = {
     '<select v-model="wf.sendMode"><option value="foreground">前台</option><option value="background">后台</option></select>' +
     '</div>' +
     '<div class="form-row"><label>启用调试日志</label><toggle-switch v-model="wf.debugLog" /></div>' +
-    '<button class="btn btn-primary" style="margin-top:12px" @click="saveWeFlow">保存 WeFlow 配置</button>' +
+    '<button class="btn btn-primary" style="margin-top:12px" @click="saveWeFlow">保存 FlowBOT 配置</button>' +
     '</div>' +
 
     '<div class="card">' +
@@ -640,7 +640,7 @@ const LogsPage = {
     '<div class="log-controls">' +
     '<div class="log-categories">' +
     '<button v-for="(active, cat) in categories" :key="cat" :class="[\'log-toggle\', active?\'active\':\'\']" @click="toggleCategory(cat)">' +
-    '{{ {wechat:"WeChat 日志",weflow:"WeFlow 日志",vnc:"VNC 日志",system:"系统日志",sender:"LinuxSender 日志",httpapi:"HTTP API 日志"}[cat] || cat }}' +
+    '{{ {wechat:"WeChat 日志",weflow:"FlowBOT 日志",vnc:"VNC 日志",system:"系统日志",sender:"LinuxSender 日志",httpapi:"HTTP API 日志"}[cat] || cat }}' +
     '</button>' +
     '</div>' +
     '<div class="log-toolbar">' +
@@ -724,7 +724,7 @@ const AboutPage = {
 
     '<div class="card centered">' +
     '<div class="about-logo">W</div>' +
-    '<h2>WeFlow</h2>' +
+    '<h2>FlowBOT</h2>' +
     '<p class="text-muted">微信聊天记录管理 & OneBot v11 服务</p>' +
     '<div class="about-info">' +
     '<div class="info-row"><span>版本</span><span>{{ info.version }}</span></div>' +
@@ -743,7 +743,7 @@ const AboutPage = {
     '<div class="card">' +
     '<h2>免责声明</h2>' +
     '<div style="font-size:12px;color:var(--text2);line-height:1.8;max-height:200px;overflow-y:auto">' +
-    '<p>WeFlow 是一款开源的微信聊天记录管理工具，仅供个人学习和研究使用。用户在使用本工具时应当遵守相关法律法规，不得将本工具用于任何非法用途。</p>' +
+    '<p>FlowBOT 是一款开源的微信聊天记录管理工具，仅供个人学习和研究使用。用户在使用本工具时应当遵守相关法律法规，不得将本工具用于任何非法用途。</p>' +
     '<p style="margin-top:8px">使用本工具即表示您同意以下条款：</p>' +
     '<ol style="padding-left:20px;margin-top:4px">' +
     '<li>本工具仅供个人学习和研究使用，不得用于商业用途</li>' +
@@ -758,11 +758,11 @@ const AboutPage = {
     '<div class="card">' +
     '<h2>端口映射</h2>' +
     '<div class="port-grid">' +
-    '<div class="port-item"><span>OneBot API</span><span class="port">3001</span></div>' +
-    '<div class="port-item"><span>WebUI 管理</span><span class="port">5099</span></div>' +
-    '<div class="port-item"><span>noVNC 桌面</span><span class="port">6080</span></div>' +
+    '<div class="port-item"><span>OneBot API</span><span class="port">7100</span></div>' +
+    '<div class="port-item"><span>WebUI 管理</span><span class="port">7300</span></div>' +
+    '<div class="port-item"><span>noVNC 桌面</span><span class="port">7600</span></div>' +
     '<div class="port-item"><span>VNC 内部</span><span class="port">5900</span></div>' +
-    '<div class="port-item"><span>WeFlow HTTP</span><span class="port">{{ info.httpPort }}</span></div>' +
+    '<div class="port-item"><span>FlowBOT HTTP</span><span class="port">{{ info.httpPort }}</span></div>' +
     '</div></div>' +
 
     '<div class="card">' +
@@ -784,9 +784,9 @@ const AboutPage = {
     '<h2>Docker 运行提示</h2>' +
     '<div class="docker-tips">' +
     '<p>获取数据库密钥需要 <code>--cap-add=SYS_PTRACE</code> 权限：</p>' +
-    '<div class="code-block">docker run -d --name weflow \\\n  --cap-add=SYS_PTRACE \\\n  -p 3001:3001 -p 5099:5099 -p 6080:6080 \\\n  weflow-onebot</div>' +
+    '<div class="code-block">docker run -d --name FlowBOT \\\n  --cap-add=SYS_PTRACE \\\n  -p 7100:7100 -p 7300:7300 -p 7600:7600 \\\n  FlowBOT</div>' +
     '<p>挂载微信数据目录以访问聊天数据库：</p>' +
-    '<div class="code-block">docker run -d --name weflow \\\n  --cap-add=SYS_PTRACE \\\n  -v /path/to/xwechat_files:/data/xwechat_files \\\n  -p 3001:3001 -p 5099:5099 -p 6080:6080 \\\n  weflow-onebot</div>' +
+    '<div class="code-block">docker run -d --name FlowBOT \\\n  --cap-add=SYS_PTRACE \\\n  -v /path/to/xwechat_files:/data/xwechat_files \\\n  -p 7100:7100 -p 7300:7300 -p 7600:7600 \\\n  FlowBOT</div>' +
     '<p>使用 docker-compose：</p>' +
     '<div class="code-block">docker compose up -d</div>' +
     '</div></div>' +
@@ -817,7 +817,7 @@ const DisclaimerOverlay = {
 
     function reject() {
       rejected.value = true
-      toast('请关闭容器并执行 docker rm weflow 移除', 'error')
+      toast('请关闭容器并执行 docker rm FlowBOT 移除', 'error')
     }
 
     return { accept: accept, reject: reject, rejected: rejected }
@@ -826,7 +826,7 @@ const DisclaimerOverlay = {
     '<div class="disclaimer-modal">' +
     '<h2>用户协议与隐私政策</h2>' +
     '<div class="disclaimer-text">' +
-    '<p>WeFlow 是一款开源的微信聊天记录管理工具。本软件所有数据处理均在本地完成，不会上传任何聊天记录、个人信息到服务器。</p>' +
+    '<p>FlowBOT 是一款开源的微信聊天记录管理工具。本软件所有数据处理均在本地完成，不会上传任何聊天记录、个人信息到服务器。</p>' +
     '<p style="margin-top:12px;font-weight:600">使用条款：</p>' +
     '<ol style="padding-left:20px;margin-top:4px;line-height:2">' +
     '<li>本软件仅供个人学习研究使用，请勿用于任何非法用途</li>' +
@@ -935,7 +935,7 @@ var App = {
     '<nav class="topbar">' +
     '<div class="topbar-brand">' +
     '<span class="logo">W</span>' +
-    '<span class="brand-text">WeFlow</span>' +
+    '<span class="brand-text">FlowBOT</span>' +
     '</div>' +
     '<div class="topbar-tabs">' +
     '<router-link v-for="item in navItems" :key="item.path" :to="item.path" :class="[\'nav-item\', route.path===item.path?\'active\':\'\']">' +

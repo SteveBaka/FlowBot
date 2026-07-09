@@ -3,11 +3,14 @@ FROM ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV NODE_ENV=production
-ENV ONEBOT_PORT=3001
+ENV ONEBOT_PORT=7100
 ENV VNC_PORT=5900
-ENV WEBUI_PORT=5099
-ENV FLOW_API_PORT=5031
+ENV WEBUI_PORT=7300
 ENV WEFLOW_DOCKER=1
+ENV TZ=Asia/Shanghai
+
+# Set timezone to Asia/Shanghai
+RUN ln -snf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime && echo 'Asia/Shanghai' > /etc/timezone
 
 # Install Node.js 22.x
 RUN apt-get update && apt-get install -y \
@@ -18,7 +21,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
-    procps psmisc coreutils \
+    procps psmisc coreutils tzdata \
     fluxbox \
     xvfb x11vnc novnc websockify \
     libgtk-3-0 libgbm1 libnss3 libxss1 libasound2 \
@@ -47,22 +50,29 @@ RUN wget -q -O /tmp/wechat.deb "${WECHAT_URL}" \
     && ln -snf /opt/wechat/wechat /usr/bin/wechat \
     && chmod +x /opt/wechat/wechat
 
+# Install Python3 + pinyin support for Chinese group name search
+RUN apt-get update && apt-get install -y python3 python3-pip \
+    && pip3 install pypinyin \
+    && rm -rf /var/lib/apt/lists/*
+
 # Copy pre-built Electron app (WeFlow HTTP API on port 5031)
 WORKDIR /opt/weflow
 COPY release/linux-unpacked/ ./
+RUN chmod +x ./weflow *.so *.node 2>/dev/null; chmod +x swiftshader/*.so 2>/dev/null; true
 
-# Copy WebUI Vue SPA + server (port 5099, proxies to WeFlow API)
+# Copy WebUI Vue SPA + server (port 7300, proxies to WeFlow API)
 COPY docker/webui/ /opt/weflow-webui/
 
 # Copy startup script
 COPY docker/start.sh /opt/start.sh
+COPY docker/pinyin.py /opt/pinyin.py
 RUN chmod +x /opt/start.sh
 
 # Create directories
 RUN mkdir -p /opt/weflow/data /root/.config
 
-# 3001: OneBot, 5031: WeFlow API (internal), 5099: WebUI, 6080: noVNC
-EXPOSE 3001 5031 5099 6080
+# 7100: OneBot, 5031: WeFlow API (internal), 7300: WebUI, 7600: noVNC
+EXPOSE 7100 5031 7300 7600
 
 VOLUME ["/opt/weflow/data", "/root/.config"]
 
