@@ -3,6 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
+import { registerImageToken } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -252,6 +253,7 @@ interface BotConfig {
 const bots: Map<string, BotEntry> = new Map()
 let onMessageCallback: ((msg: any) => void) | null = null
 let currentSelfWxid = ''
+let getConfigRef: ((key: string) => any) | null = null
 
 export function setBotMessageCallback(cb: (msg: any) => void) {
   onMessageCallback = cb
@@ -285,6 +287,7 @@ export async function startBotManager(
   selfWxid?: string
 ): Promise<void> {
   currentSelfWxid = selfWxid || currentSelfWxid
+  getConfigRef = getConfig
   const configs = parseBotsConfig(botsConfigRaw)
   log(`BotManager: Found ${configs.length} bot configs`)
 
@@ -612,6 +615,11 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
     groupSelfNameCache.set(data.sessionId, botDisplayName)
   }
 
+  if (data.imageDecryptFailed) {
+    logger.warn('onebot', `Image decrypt failed, skipped push: ${data.sessionId}/${data.rawid}`)
+    return
+  }
+
   for (const [, entry] of bots) {
     if (entry.server && entry.status === 'running') {
       try {
@@ -624,9 +632,18 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
         const messageSegments: Array<{ type: string; data: Record<string, string> }> = []
 
         if (data.imagePath && fs.existsSync(data.imagePath)) {
-          const buf = fs.readFileSync(data.imagePath)
-          const b64 = buf.toString('base64')
-          messageSegments.push({ type: 'image', data: { file: `base64://${b64}` } })
+          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
+
+          if (mode === 'url' && baseUrl) {
+            const token = registerImageToken(data.imagePath)
+            const imageUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${token}`
+            messageSegments.push({ type: 'image', data: { file: imageUrl } })
+          } else {
+            const buf = fs.readFileSync(data.imagePath)
+            const b64 = buf.toString('base64')
+            messageSegments.push({ type: 'image', data: { file: `base64://${b64}` } })
+          }
         } else if (data.imagePath) {
           messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
         }

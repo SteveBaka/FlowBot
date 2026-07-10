@@ -42,6 +42,7 @@ interface MessagePushPayload {
   content: string | null
   timestamp: number
   imagePath?: string
+  imageDecryptFailed?: boolean
   senderIdAlias?: string
 }
 
@@ -71,6 +72,8 @@ class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
+  private readonly imageDecryptMaxRetries = 3
+  private readonly imageDecryptRetryDelayMs = 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -544,10 +547,14 @@ class MessagePushService {
       if (!payload) continue
       if (!this.shouldPushPayload(payload)) continue
 
-      httpService.broadcastMessagePush(payload)
-      broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
-      this.rememberMessageKey(messageKey)
-      this.bumpSessionBaseline(session.username, message)
+      if (!payload.imageDecryptFailed) {
+        httpService.broadcastMessagePush(payload)
+        broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
+        this.rememberMessageKey(messageKey)
+        this.bumpSessionBaseline(session.username, message)
+      } else {
+        console.warn(`[MessagePushService] Image decrypt failed, message not pushed: ${payload.sessionId}/${payload.rawid}`)
+      }
     }
 
     for (const message of fetchedMessages) {
@@ -745,19 +752,30 @@ class MessagePushService {
     const imageMd5 = String(message.imageMd5 || '').trim()
     const imageDatName = String(message.imageDatName || '').trim()
     if (!imageMd5 && !imageDatName) return undefined
-    try {
-      const result = await imageDecryptService.decryptImage({
-        sessionId,
-        imageMd5,
-        imageDatName,
-        createTime: Number(message.createTime || 0),
-        preferFilePath: true,
-        suppressEvents: true
-      })
-      if (result?.success && result.localPath) {
-        return result.localPath
+    const payload = {
+      sessionId,
+      imageMd5,
+      imageDatName,
+      createTime: Number(message.createTime || 0),
+      preferFilePath: true,
+      suppressEvents: true
+    }
+    let lastError: unknown = undefined
+    for (let attempt = 0; attempt <= this.imageDecryptMaxRetries; attempt++) {
+      if (attempt > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.imageDecryptRetryDelayMs))
       }
-    } catch {}
+      try {
+        const result = await imageDecryptService.decryptImage(payload)
+        if (result?.success && result.localPath) {
+          return result.localPath
+        }
+        lastError = result?.error || 'decrypt_failed'
+      } catch (e) {
+        lastError = e
+      }
+    }
+    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)}`)
     return undefined
   }
 
@@ -782,6 +800,7 @@ class MessagePushService {
 
     const createTime = Number(message.createTime || 0)
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
+    const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -807,6 +826,7 @@ class MessagePushService {
         content,
         timestamp: createTime,
         imagePath,
+        imageDecryptFailed,
         senderIdAlias
       }
     }
@@ -827,6 +847,7 @@ class MessagePushService {
       content,
       timestamp: createTime,
       imagePath,
+      imageDecryptFailed,
       senderIdAlias
     }
   }

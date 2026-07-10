@@ -584,6 +584,11 @@ var SettingsPage = {
       httpEnabled: false, httpPort: 5031, httpToken: ''
     })
     var showHttpToken = ref(false)
+    var imgTransfer = reactive({
+      mode: 'base64',
+      baseUrl: ''
+    })
+    var baseUrlError = ref(false)
 
     async function loadConfig() {
       var d = await api('/api/v1/mgmt/config')
@@ -591,17 +596,44 @@ var SettingsPage = {
         wf.httpEnabled = d.httpApiEnabled || false
         wf.httpPort = d.httpApiPort || 5031
         wf.httpToken = (d.httpApiToken && d.httpApiToken !== '[encrypted]') ? d.httpApiToken : ''
+        imgTransfer.mode = d.imageTransferMode || 'base64'
+        imgTransfer.baseUrl = d.imageServerBaseUrl || ''
       }
     }
 
     async function saveConfig() {
+      if (imgTransfer.mode === 'url' && !imgTransfer.baseUrl.trim()) {
+        baseUrlError.value = true
+        toast('启用 URL 传输模式必须填写对外可达地址', 'error')
+        return
+      }
+      baseUrlError.value = false
+
+      var trimmedUrl = imgTransfer.baseUrl.trim()
+      if (imgTransfer.mode === 'url' && trimmedUrl) {
+        try {
+          var parsed = new URL(trimmedUrl)
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            toast('地址必须以 http:// 或 https:// 开头', 'error')
+            baseUrlError.value = true
+            return
+          }
+        } catch (e) {
+          toast('地址格式无效，请填写完整的 URL（如 http://192.168.1.100:7300）', 'error')
+          baseUrlError.value = true
+          return
+        }
+      }
+
       var d = await api('/api/v1/mgmt/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           httpApiEnabled: wf.httpEnabled,
           httpApiPort: Number(wf.httpPort),
-          httpApiToken: wf.httpToken || undefined
+          httpApiToken: wf.httpToken || undefined,
+          imageTransferMode: imgTransfer.mode,
+          imageServerBaseUrl: trimmedUrl
         })
       })
       if (d.success) toast('配置已保存')
@@ -615,7 +647,7 @@ var SettingsPage = {
     }
 
     onMounted(loadConfig)
-    return { wf: wf, showHttpToken: showHttpToken, saveConfig: saveConfig, restart: restart }
+    return { wf: wf, showHttpToken: showHttpToken, imgTransfer: imgTransfer, baseUrlError: baseUrlError, saveConfig: saveConfig, restart: restart }
   },
   template: '<div>' +
     '<div class="page-header">' +
@@ -631,6 +663,33 @@ var SettingsPage = {
     '<button class="btn btn-secondary btn-sm" @click="showHttpToken=!showHttpToken">{{ showHttpToken?\'隐藏\':\'显示\' }}</button>' +
     '</div></transition>' +
     '</div></div></div>' +
+
+    '<div class="card"><h2>图片传输设置</h2>' +
+    '<div class="form-row" style="align-items:flex-start">' +
+    '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
+    '<label style="margin-bottom:0">传输模式</label>' +
+    '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
+    'Base64 传输（默认，无需额外配置）；URL 传输（消息体缩小至 ~150 字节）' +
+    '</span>' +
+    '</div>' +
+    '<select v-model="imgTransfer.mode">' +
+    '<option value="base64">Base64</option>' +
+    '<option value="url">URL</option>' +
+    '</select>' +
+    '</div>' +
+    '<div class="form-row" style="margin-top:12px;align-items:flex-start">' +
+    '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
+    '<label style="margin-bottom:0">对外可达地址</label>' +
+    '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
+    '外部服务（如 AstrBot）用于下载图片的完整地址。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7300' +
+    '</span>' +
+    '</div>' +
+    '<input type="text" v-model="imgTransfer.baseUrl" ' +
+    'placeholder="http://192.168.1.100:7300" ' +
+    ':class="{ \'input-error\': baseUrlError }" ' +
+    ':disabled="imgTransfer.mode === \'base64\'">' +
+    '</div>' +
+    '</div>' +
 
     '<div class="card"><h2>重启服务</h2>' +
     '<div class="restart-module">' +

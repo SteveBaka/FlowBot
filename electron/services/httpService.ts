@@ -124,6 +124,60 @@ const ChatLabType = {
   OTHER: 99
 } as const
 
+const imageTokenCache = new Map<string, { imagePath: string; expires: number }>()
+const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
+const IMAGE_TOKEN_MAX = 200
+let imageTokenLastCleanup = 0
+const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
+
+export function registerImageToken(imagePath: string): string {
+  const now = Date.now()
+
+  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
+    imageTokenLastCleanup = now
+    for (const [token, entry] of imageTokenCache) {
+      if (entry.expires < now) {
+        imageTokenCache.delete(token)
+      }
+    }
+  }
+
+  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
+    const oldest = imageTokenCache.keys().next().value
+    if (oldest) imageTokenCache.delete(oldest)
+  }
+
+  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
+  let token = ''
+  do {
+    token = ''
+    for (let i = 0; i < 16; i++) {
+      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
+    }
+  } while (imageTokenCache.has(token))
+
+  imageTokenCache.set(token, { imagePath, expires: now + IMAGE_TOKEN_TTL_MS })
+  return token
+}
+
+export function getImagePathByToken(token: string): string | null {
+  const entry = imageTokenCache.get(token)
+  if (!entry) return null
+  if (Date.now() > entry.expires) {
+    imageTokenCache.delete(token)
+    return null
+  }
+  if (!fs.existsSync(entry.imagePath)) {
+    imageTokenCache.delete(token)
+    return null
+  }
+  return entry.imagePath
+}
+
+export function getImageTokenCount(): number {
+  return imageTokenCache.size
+}
+
 class HttpService {
   private server: http.Server | null = null
   private configService: ConfigService
@@ -462,6 +516,32 @@ class HttpService {
 
         const url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
         const pathname = url.pathname
+
+        if (pathname === '/api/image' && req.method === 'GET') {
+            const token = url.searchParams.get('token') || ''
+            if (!/^[a-z0-9]{16}$/.test(token)) {
+                this.sendError(res, 400, 'Invalid token format')
+                return
+            }
+            const filePath = getImagePathByToken(token)
+            if (!filePath) {
+                this.sendError(res, 404, 'Image not found or expired')
+                return
+            }
+            const ext = path.extname(filePath).toLowerCase()
+            const mimeMap: Record<string, string> = {
+                '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+                '.png': 'image/png', '.gif': 'image/gif',
+                '.webp': 'image/webp', '.bmp': 'image/bmp'
+            }
+            res.writeHead(200, {
+                'Content-Type': mimeMap[ext] || 'application/octet-stream',
+                'Cache-Control': 'no-cache, max-age=0',
+                'X-Content-Type-Options': 'nosniff'
+            })
+            fs.createReadStream(filePath).pipe(res)
+            return
+        }
 
         try {
             const bodyParams = await this.parseBody(req)
@@ -2935,7 +3015,8 @@ class HttpService {
                 'messageSendEnabled', 'messageSendMode',
                 'notificationEnabled', 'notificationFilterMode',
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
-                'logEnabled', 'bots'
+                'logEnabled', 'bots',
+                'imageTransferMode', 'imageServerBaseUrl'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {
