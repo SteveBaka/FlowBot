@@ -3,7 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
-import { registerImageToken } from './httpService'
+import { registerImageToken, registerImageTokenWithMeta, isThumbnailFilePath } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -636,7 +636,12 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
 
           if (mode === 'url' && baseUrl) {
-            const token = registerImageToken(data.imagePath)
+            const isThumb = isThumbnailFilePath(data.imagePath)
+            const token = registerImageTokenWithMeta(data.imagePath, {
+              isThumb,
+              sessionId: isThumb ? data.sessionId : undefined,
+              imageMd5: isThumb ? data.imageBaseMd5 : undefined,
+            })
             const imageUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${token}`
             messageSegments.push({ type: 'image', data: { file: imageUrl } })
           } else {

@@ -124,13 +124,26 @@ const ChatLabType = {
   OTHER: 99
 } as const
 
-const imageTokenCache = new Map<string, { imagePath: string; expires: number }>()
+interface ImageTokenEntry {
+  imagePath: string
+  expires: number
+  isThumb: boolean
+  sessionId?: string
+  imageMd5?: string
+  imageDatName?: string
+}
+
+const imageTokenCache = new Map<string, ImageTokenEntry>()
 const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
 const IMAGE_TOKEN_MAX = 200
 let imageTokenLastCleanup = 0
 const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
 
 export function registerImageToken(imagePath: string): string {
+  return registerImageTokenWithMeta(imagePath, { isThumb: isThumbnailFilePath(imagePath) })
+}
+
+export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }): string {
   const now = Date.now()
 
   if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
@@ -144,7 +157,9 @@ export function registerImageToken(imagePath: string): string {
 
   if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
     const oldest = imageTokenCache.keys().next().value
-    if (oldest) imageTokenCache.delete(oldest)
+    if (oldest) {
+      imageTokenCache.delete(oldest)
+    }
   }
 
   const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
@@ -156,8 +171,21 @@ export function registerImageToken(imagePath: string): string {
     }
   } while (imageTokenCache.has(token))
 
-  imageTokenCache.set(token, { imagePath, expires: now + IMAGE_TOKEN_TTL_MS })
+  imageTokenCache.set(token, {
+    imagePath,
+    expires: now + IMAGE_TOKEN_TTL_MS,
+    isThumb: meta.isThumb,
+    sessionId: meta.sessionId,
+    imageMd5: meta.imageMd5,
+    imageDatName: meta.imageDatName,
+  })
+
   return token
+}
+
+export function isThumbnailFilePath(filePath: string): boolean {
+  const base = path.basename(filePath)
+  return base.includes('_t.') || base.includes('_thumb') || /_t\.[a-z]+$/.test(base)
 }
 
 export function getImagePathByToken(token: string): string | null {
@@ -176,6 +204,41 @@ export function getImagePathByToken(token: string): string | null {
 
 export function getImageTokenCount(): number {
   return imageTokenCache.size
+}
+
+export function isThumbToken(token: string): boolean {
+  return imageTokenCache.get(token)?.isThumb ?? false
+}
+
+export async function upgradeTokenOnAccess(token: string): Promise<string | null> {
+  const entry = imageTokenCache.get(token)
+  if (!entry || !entry.isThumb || !entry.sessionId || !entry.imageMd5) return null
+  if (Date.now() > entry.expires) return null
+
+  try {
+    const { imageDecryptService } = require('./imageDecryptService')
+    const hdDatPath = imageDecryptService.findHdDatForUpgrade(entry.sessionId, entry.imageMd5)
+    if (!hdDatPath) return null
+    const ready = await imageDecryptService.waitForFullDatReady(hdDatPath, 2000)
+    if (!ready) return null
+    const result = await imageDecryptService.decryptImage({
+      sessionId: entry.sessionId,
+      imageMd5: entry.imageMd5,
+      createTime: Number(entry.expires - IMAGE_TOKEN_TTL_MS),
+      preferFilePath: true,
+      suppressEvents: true,
+      preferHd: true,
+    })
+    if (result?.success && result.localPath && !result.isThumb) {
+      entry.imagePath = result.localPath
+      entry.isThumb = false
+      console.log(`[TokenUpgrade] Upgraded to HD on access: ${token}`)
+      return result.localPath
+    }
+  } catch (e) {
+    console.warn('[TokenUpgrade] failed:', e)
+  }
+  return null
 }
 
 class HttpService {
@@ -523,10 +586,17 @@ class HttpService {
                 this.sendError(res, 400, 'Invalid token format')
                 return
             }
-            const filePath = getImagePathByToken(token)
+            const entry = imageTokenCache.get(token)
+            let filePath = getImagePathByToken(token)
             if (!filePath) {
                 this.sendError(res, 404, 'Image not found or expired')
                 return
+            }
+            if (entry?.isThumb) {
+                const upgraded = await upgradeTokenOnAccess(token)
+                if (upgraded && upgraded !== filePath) {
+                    filePath = upgraded
+                }
             }
             const ext = path.extname(filePath).toLowerCase()
             const mimeMap: Record<string, string> = {

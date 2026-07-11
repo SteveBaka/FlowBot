@@ -44,6 +44,7 @@ RUN apt-get update && apt-get install -y \
     xclip xdotool x11-utils x11-xserver-utils \
     dbus dbus-x11 \
     fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk \
+    ffmpeg \
     supervisor wget xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 

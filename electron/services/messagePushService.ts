@@ -42,6 +42,8 @@ interface MessagePushPayload {
   content: string | null
   timestamp: number
   imagePath?: string
+  imagePathHd?: string
+  imageBaseMd5?: string
   imageDecryptFailed?: boolean
   senderIdAlias?: string
 }
@@ -752,7 +754,7 @@ class MessagePushService {
     const imageMd5 = String(message.imageMd5 || '').trim()
     const imageDatName = String(message.imageDatName || '').trim()
     if (!imageMd5 && !imageDatName) return undefined
-    const payload = {
+    const basePayload = {
       sessionId,
       imageMd5,
       imageDatName,
@@ -761,21 +763,53 @@ class MessagePushService {
       suppressEvents: true
     }
     let lastError: unknown = undefined
+    let thumbPath: string | undefined = undefined
     for (let attempt = 0; attempt <= this.imageDecryptMaxRetries; attempt++) {
       if (attempt > 0) {
         await new Promise((resolve) => setTimeout(resolve, this.imageDecryptRetryDelayMs))
       }
+      const isLastAttempt = attempt >= this.imageDecryptMaxRetries
+      const preferHd = attempt >= 1
+      const payload = { ...basePayload, preferHd }
       try {
         const result = await imageDecryptService.decryptImage(payload)
+        console.log(`[DIAG][MsgPush] attempt=${attempt} preferHd=${preferHd} result.success=${result?.success} isThumb=${result?.isThumb} localPath=${result?.localPath} error=${result?.error}`)
         if (result?.success && result.localPath) {
-          return result.localPath
+          if (!result.isThumb) {
+            return result.localPath
+          }
+          if (!thumbPath) {
+            thumbPath = result.localPath
+          }
+          if (isLastAttempt) {
+            return thumbPath
+          }
+          if (preferHd && imageMd5) {
+            const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
+            console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat search: found=${!!hdDat} path=${hdDat}`)
+            if (hdDat) {
+              const ready = await imageDecryptService.waitForFullDatReady(hdDat, 1500)
+              console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat ready=${ready}`)
+              if (ready) {
+                const hdResult = await imageDecryptService.decryptImageDirect(hdDat, sessionId)
+                console.log(`[DIAG][MsgPush] attempt=${attempt} decryptImageDirect: result=${hdResult}`)
+                if (hdResult) return hdResult
+              }
+            }
+          }
+          continue
         }
         lastError = result?.error || 'decrypt_failed'
+        console.log(`[DIAG][MsgPush] attempt=${attempt} failed: ${lastError}`)
       } catch (e) {
         lastError = e
+        console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
       }
     }
-    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)}`)
+    if (thumbPath) {
+      return thumbPath
+    }
+    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
     return undefined
   }
 
@@ -799,6 +833,7 @@ class MessagePushService {
     const rawid = this.getMessageRawId(message)
 
     const createTime = Number(message.createTime || 0)
+    const imageMd5 = String(message.imageMd5 || '').trim()
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
 
@@ -826,6 +861,7 @@ class MessagePushService {
         content,
         timestamp: createTime,
         imagePath,
+        imageBaseMd5: imageMd5 || undefined,
         imageDecryptFailed,
         senderIdAlias
       }
@@ -847,6 +883,7 @@ class MessagePushService {
       content,
       timestamp: createTime,
       imagePath,
+      imageBaseMd5: imageMd5 || undefined,
       imageDecryptFailed,
       senderIdAlias
     }

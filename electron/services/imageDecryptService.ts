@@ -1,6 +1,7 @@
 ﻿import { app, BrowserWindow } from 'electron'
 import { basename, dirname, extname, join } from 'path'
 import { pathToFileURL } from 'url'
+import { createHash } from 'crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, appendFileSync } from 'fs'
 import { writeFile, rm, readdir } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
@@ -65,6 +66,7 @@ type CachedImagePayload = {
   imageDatName?: string
   createTime?: number
   preferFilePath?: boolean
+  preferHd?: boolean
   hardlinkOnly?: boolean
   disableUpdateCheck?: boolean
   allowCacheIndex?: boolean
@@ -386,7 +388,7 @@ export class ImageDecryptService {
           payload.sessionId,
           payload.createTime,
           {
-            allowThumbnail: true,
+            allowThumbnail: !payload.preferHd,
             skipResolvedCache: false,
             hardlinkOnly: payload.hardlinkOnly === true,
             allowDatNameScanFallback: payload.allowCacheIndex !== false
@@ -415,20 +417,23 @@ export class ImageDecryptService {
         return { success: true, localPath, isThumb }
       }
 
-      const preferHdCache = Boolean(payload.force && !fallbackToThumbnail)
+      const preferHdCache = Boolean((payload.force && !fallbackToThumbnail) || payload.preferHd)
       const existingFast = this.findCachedOutputByDatPath(datPath, payload.sessionId, preferHdCache)
       if (existingFast) {
         this.logInfo('找到已解密文件(按DAT快速命中)', { existing: existingFast, isHd: this.isHdPath(existingFast) })
         const isHd = this.isHdPath(existingFast)
-        if (!(payload.force && !isHd)) {
+        const existingIsThumb = this.isThumbnailPath(existingFast)
+        if (!(payload.force && !isHd) && !(payload.preferHd && existingIsThumb)) {
           this.cacheResolvedPaths(cacheKey, payload.imageMd5, payload.imageDatName, existingFast)
           const localPath = this.resolveLocalPathForPayload(existingFast, payload.preferFilePath)
-          const isThumb = this.isThumbnailPath(existingFast)
+          const isThumb = existingIsThumb
           this.emitCacheResolved(payload, cacheKey, this.resolveEmitPath(existingFast, payload.preferFilePath))
           this.emitDecryptProgress(payload, cacheKey, 'done', 100, 'done')
           return { success: true, localPath, isThumb }
         }
       }
+
+      await this.waitForFullDatReady(datPath, 2000)
 
       // 优先使用当前 wxid 对应的密钥，找不到则回退到全局配置
       const imageKeys = this.getConfiguredImageKeys()
@@ -458,20 +463,37 @@ export class ImageDecryptService {
       this.emitDecryptProgress(payload, cacheKey, 'decrypting', 58, 'running')
       const nativeResult = this.tryDecryptDatWithNative(datPath, xorKey, aesKeyForNative)
       if (!nativeResult) {
+        this.logError('[DIAG] native decrypt returned null', undefined, {
+          datPath, fileSize: existsSync(datPath) ? statSync(datPath).size : -1, xorKey
+        })
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', 'Rust原生解密不可用')
         return { success: false, error: 'Rust原生解密不可用或解密失败，请检查 native 模块与密钥配置', failureKind: 'not_found' }
       }
       let decrypted: Buffer = nativeResult.data
+      this.logInfo('[DIAG] native decrypt OK', { datPath, nativeSize: decrypted.length, nativeExt: nativeResult.ext, isWxgf: nativeResult.isWxgf })
       this.emitDecryptProgress(payload, cacheKey, 'decrypting', 78, 'running')
 
       // 统一走原有 wxgf/ffmpeg 流程，确保行为与历史版本一致
       const wxgfResult = await this.unwrapWxgf(decrypted)
       decrypted = wxgfResult.data
+      if (wxgfResult.isWxgf) {
+        this.logInfo('[DIAG] wxgf still flagged as wxgf after unwrap (ffmpeg failed?)', { datPath, resultSize: decrypted.length })
+      }
 
       const detectedExt = this.detectImageExtension(decrypted)
 
-      // 如果解密产物无法识别为图片，归类为“解密失败”。
       if (!detectedExt) {
+        if (!this.isThumbnailPath(datPath)) {
+          const thumbFall = await this.tryDecryptThumbFallback(datPath, payload, cacheKey, xorKey, aesKeyForNative)
+          if (thumbFall) return thumbFall
+        }
+        this.logError('[DIAG] detectImageExtension failed', undefined, {
+          datPath, decryptedSize: decrypted.length,
+          first16hex: decrypted.subarray(0, 16).toString('hex'),
+          isWxgf: wxgfResult?.isWxgf,
+          nativeResultExt: nativeResult?.ext,
+          preferHd: payload.preferHd
+        })
         this.emitDecryptProgress(payload, cacheKey, 'failed', 100, 'error', '解密后不是有效图片')
         return {
           success: false,
@@ -931,10 +953,40 @@ export class ImageDecryptService {
     if (hdInImg) return hdInImg
 
     if (!allowThumbnail) {
-      // 高清优先仅认 img/image/msgimg 路径中的 H 变体；
-      // 若该范围没有，则交由 allowThumbnail=true 的回退分支按 base.dat/_t 继续挑选。
+      const baseDatInImg = this.pickLargestDatPath(
+        imgCandidates.filter((item) => this.isBaseDatPath(item, baseMd5))
+      )
+      if (baseDatInImg) return baseDatInImg
+      const baseDatAny = this.pickLargestDatPath(
+        candidates.filter((item) => this.isBaseDatPath(item, baseMd5))
+      )
+      if (baseDatAny) return baseDatAny
+      const hdExists = candidates.some((item) => {
+        if (item.includes('_t.dat') || item.includes('_thumb.dat')) return false
+        const base = item.replace(/\.dat$/, '').replace(/_hd$/i, '').replace(/_h$/i, '')
+        return base === baseMd5 || item.startsWith(baseMd5)
+      })
+      if (!hdExists) {
+        this.logInfo('[DIAG] selectBestDatPathByBase: no HD exists, fallback to thumb', { baseMd5 })
+        const thumbDatInImg = this.pickLargestDatPath(
+          imgCandidates.filter((item) => this.isTVariantDat(item))
+        )
+        if (thumbDatInImg) return thumbDatInImg
+        const thumbDatAny = this.pickLargestDatPath(
+          candidates.filter((item) => this.isTVariantDat(item))
+        )
+        if (thumbDatAny) return thumbDatAny
+      } else {
+        this.logInfo('[DIAG] selectBestDatPathByBase: HD exists but not found by md5', { baseMd5, candidateCount: candidates.length })
+      }
+      this.logInfo('[DIAG] selectBestDatPathByBase: fell through to null', {
+        baseMd5, allowThumbnail, candidates: candidates.length, imgCandidates: imgCandidates.length
+      })
       return null
     }
+    this.logInfo('[DIAG] selectBestDatPathByBase: full search', {
+      baseMd5, allowThumbnail, candidates: candidates.length
+    })
 
     // 无 H 时，优先尝试原始无后缀 DAT（{md5}.dat）。
     const baseDatInImg = this.pickLargestDatPath(
@@ -1224,6 +1276,147 @@ export class ImageDecryptService {
     const accountDir = this.configService.getAccountDir(dbPath, wxid)
     if (!accountDir) return false
     return await wcdbService.open(accountDir, decryptKey)
+  }
+
+  private async tryDecryptThumbFallback(
+    datPath: string,
+    payload: DecryptImagePayload,
+    cacheKey: string,
+    xorKey: number,
+    aesKey?: string
+  ): Promise<DecryptResult | null> {
+    try {
+      const thumbPath = this.findThumbDatPath(datPath)
+      if (!thumbPath || !existsSync(thumbPath)) return null
+      this.logInfo('[DIAG] thumb fallback: trying _t.dat', { fromDat: datPath, thumbPath })
+      const thumbResult = this.tryDecryptDatWithNative(thumbPath, xorKey, aesKey)
+      if (!thumbResult) return null
+      let thumbDecrypted = thumbResult.data
+      if (thumbResult.isWxgf) {
+        const wxgfRes = await this.unwrapWxgf(thumbDecrypted)
+        thumbDecrypted = wxgfRes.data
+      }
+      const thumbExt = this.detectImageExtension(thumbDecrypted)
+      if (!thumbExt) {
+        this.logInfo('[DIAG] thumb fallback: detectImageExtension also failed', { thumbPath })
+        return null
+      }
+      const outputPath = this.getCacheOutputPathFromDat(thumbPath, thumbExt, payload.sessionId)
+      await writeFile(outputPath, thumbDecrypted)
+      this.cacheResolvedPaths(cacheKey, payload.imageMd5, payload.imageDatName, outputPath)
+      this.logInfo('[DIAG] thumb fallback: success', { thumbPath, outputPath, size: thumbDecrypted.length })
+      return { success: true, localPath: outputPath, isThumb: true }
+    } catch (e) {
+      this.logError('[DIAG] thumb fallback error', e, { datPath })
+      return null
+    }
+  }
+
+  private findThumbDatPath(datPath: string): string | null {
+    if (datPath.includes('_t.dat')) return null
+    return datPath.replace(/\.dat$/, '_t.dat')
+  }
+
+  async waitForFullDatReady(datPath: string, timeoutMs = 2000): Promise<boolean> {
+    if (!existsSync(datPath)) return false
+    const stat = statSync(datPath)
+    if (stat.size < 100) return false
+    const stableMs = 300
+    const startTime = Date.now()
+    let lastSize = stat.size
+    while (Date.now() - startTime < timeoutMs) {
+      await new Promise((r) => setTimeout(r, 200))
+      if (!existsSync(datPath)) return false
+      const newStat = statSync(datPath)
+      if (newStat.size === lastSize) return true
+      lastSize = newStat.size
+    }
+    const finalStat = statSync(datPath)
+    return finalStat.size >= lastSize
+  }
+
+  getAttachDirForSession(sessionId: string): string | null {
+    try {
+      const dbPath = this.configService.get('dbPath')
+      if (!dbPath) return null
+      const baseDir = dirname(dbPath)
+      const md5 = createHash('md5').update(sessionId).digest('hex')
+      const now = new Date()
+      const ym = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+      const dir = join(baseDir, 'msg', 'attach', md5, ym, 'Img')
+      return existsSync(dir) ? dir : null
+    } catch {
+      return null
+    }
+  }
+
+  async decryptImageDirect(datPath: string, sessionId?: string): Promise<string | null> {
+    try {
+      if (!existsSync(datPath)) return null
+      const st = statSync(datPath)
+      if (st.size < 100) return null
+      const keys = this.getConfiguredImageKeys()
+      let xorKey: number
+      if (typeof keys.xorKey === 'number') {
+        xorKey = keys.xorKey
+      } else {
+        const trimmed = String(keys.xorKey ?? '').trim()
+        xorKey = trimmed.toLowerCase().startsWith('0x') ? parseInt(trimmed, 16) : parseInt(trimmed, 10)
+      }
+      if (Number.isNaN(xorKey) || (!xorKey && xorKey !== 0)) return null
+      const decrypted = this.tryDecryptDatWithNative(datPath, xorKey, keys.aesKey)
+      if (!decrypted) return null
+      let data = decrypted.data
+      if (decrypted.isWxgf) {
+        const wxgfResult = await this.unwrapWxgf(data)
+        data = wxgfResult.data
+      }
+      const ext = this.detectImageExtension(data)
+      if (!ext) return null
+      const cacheRoot = this.getCacheRoot()
+      const baseName = basename(datPath).replace(/\.dat$/, '')
+      const outputPath = join(cacheRoot, `${baseName}_direct${ext}`)
+      await writeFile(outputPath, data)
+      return outputPath
+    } catch {
+      return null
+    }
+  }
+
+  findHdDatForUpgrade(sessionId: string, imageMd5: string): string | null {
+    const attachDir = this.getAttachDirForSession(sessionId)
+    if (!attachDir) {
+      this.logInfo('[DIAG] findHdDatForUpgrade: attachDir not found', { sessionId })
+      return null
+    }
+    try {
+      const files = readdirSync(attachDir)
+      const allDatFiles = files.filter(f => f.endsWith('.dat'))
+      const fullDatFiles = allDatFiles.filter(f => !f.includes('_t.dat') && !f.includes('_thumb.dat'))
+      this.logInfo('[DIAG] findHdDatForUpgrade: dir scan', {
+        attachDir, imageMd5,
+        totalFiles: files.length,
+        allDatFiles: allDatFiles.length,
+        fullDatFiles: fullDatFiles.length,
+        datFileList: allDatFiles.slice(0, 10).map(f => `${f}(${statSync(join(attachDir, f)).size}B)`)
+      })
+      for (const f of files) {
+        if (!f.endsWith('.dat') || f.includes('_t.dat') || f.includes('_thumb.dat')) continue
+        const base = f.replace(/\.dat$/, '').replace(/_hd$/i, '').replace(/_h$/i, '')
+        if (base === imageMd5 || f.startsWith(imageMd5)) {
+          return join(attachDir, f)
+        }
+      }
+      for (const f of files) {
+        if (!f.endsWith('.dat') || f.includes('_t.dat') || f.includes('_thumb.dat')) continue
+        const full = join(attachDir, f)
+        const st = statSync(full)
+        if (st.size > 10000) return full
+      }
+    } catch (e) {
+      this.logError('[DIAG] findHdDatForUpgrade error', e, { sessionId, imageMd5 })
+    }
+    return null
   }
 
   private getRowValue(row: any, column: string): any {
