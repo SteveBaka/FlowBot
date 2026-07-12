@@ -25,9 +25,9 @@ interface SendMessageResult {
  * 发送单条消息
  */
 export async function sendMessage(options: SendMessageOptions): Promise<SendMessageResult> {
-  const { sessionId, content, imagePath } = options
+  const { sessionId, content } = options
   try {
-    const result = await (window as any).electronAPI.chat.sendMessage(sessionId, content, imagePath)
+    const result = await (window as any).electronAPI.chat.sendMessage(sessionId, content)
     return {
       success: result.success,
       error: result.error,

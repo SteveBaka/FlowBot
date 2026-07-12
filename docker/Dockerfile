@@ -1,11 +1,5 @@
 FROM ubuntu:22.04
 
-# apt-cacher-ng proxy (optional, pass --build-arg APT_PROXY=http://host:3142 to enable)
-ARG APT_PROXY=""
-RUN if [ -n "$APT_PROXY" ]; then \
-      printf 'Acquire::http::Proxy "%s";\n' "$APT_PROXY" > /etc/apt/apt.conf.d/01proxy; \
-    fi
-
 ENV DEBIAN_FRONTEND=noninteractive
 ENV DISPLAY=:99
 ENV NODE_ENV=production
@@ -44,7 +38,6 @@ RUN apt-get update && apt-get install -y \
     xclip xdotool x11-utils x11-xserver-utils \
     dbus dbus-x11 \
     fonts-wqy-zenhei fonts-wqy-microhei fonts-noto-cjk \
-    ffmpeg \
     supervisor wget xdg-utils \
     && rm -rf /var/lib/apt/lists/*
 

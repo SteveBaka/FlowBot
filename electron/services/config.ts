@@ -161,8 +161,6 @@ interface ConfigSchema {
   oneBotBroadcastIntervalMs: number
   oneBotDebounceMs: number
   oneBotBatchSize: number
-  imageTransferMode: 'base64' | 'url'
-  imageServerBaseUrl: string
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -307,8 +305,6 @@ export class ConfigService {
       oneBotBroadcastIntervalMs: 50,
       oneBotDebounceMs: 350,
       oneBotBatchSize: 50,
-      imageTransferMode: 'base64',
-      imageServerBaseUrl: '',
     }
 
     const storeOptions: any = {
