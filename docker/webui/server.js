@@ -284,33 +284,7 @@ const server = http.createServer(async (req, res) => {
   // Auth gate — protect all /api/* except auth + status + version
   // ═══════════════════════════════════════════════════════════════════════════════
 
-  if (p === '/api/image' && req.method === 'GET') {
-    var token = url.searchParams.get('token') || ''
-    if (!/^[a-z0-9]{16}$/.test(token)) {
-      json(res, { ok: false, error: 'Invalid token format' }, 400)
-      return
-    }
-    try {
-      var targetUrl = 'http://127.0.0.1:' + FLOW_PORT + '/api/image?token=' + token
-      var resp = await fetch(targetUrl)
-      if (!resp.ok) {
-        json(res, { ok: false, error: 'Image not found or expired' }, resp.status)
-        return
-      }
-      var contentType = resp.headers.get('content-type') || 'application/octet-stream'
-      res.writeHead(200, {
-        'Content-Type': contentType,
-        'Cache-Control': 'no-cache, max-age=0'
-      })
-      var buf = Buffer.from(await resp.arrayBuffer())
-      res.end(buf)
-    } catch (err) {
-      json(res, { ok: false, error: 'Image service unavailable' }, 502)
-    }
-    return
-  }
-
-  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image') {
+  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version') {
     if (!isAuthenticated(req)) {
       json(res, { ok: false, error: 'Unauthorized' }, 401)
       return

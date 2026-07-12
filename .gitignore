@@ -86,12 +86,9 @@ docs/REFACTOR-PLAN.md
 docs/WORKFLOW.md
 WORKFLOW.md
 flowbot-latest.tar.gz
+app.jpg
+temp_assets.json
 plan-sender.md
 docker-compose.build.yml
 docs/http-server-fall.md
 docs/LINUX-SENDER.md
-docs/IMAGE-TRANSFER-PLAN.md
-.gitignore
-docs/plan-image-sharefile.md
-docs/plan-image-hybrid.md
-flowbot-latest.tar

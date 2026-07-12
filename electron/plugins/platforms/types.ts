@@ -13,7 +13,6 @@ export interface SendTask {
   error?: string
   createdAt: number
   sentAt?: number
-  imagePath?: string
 }
 
 export interface SendProgress {

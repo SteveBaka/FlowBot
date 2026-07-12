@@ -124,123 +124,6 @@ const ChatLabType = {
   OTHER: 99
 } as const
 
-interface ImageTokenEntry {
-  imagePath: string
-  expires: number
-  isThumb: boolean
-  sessionId?: string
-  imageMd5?: string
-  imageDatName?: string
-}
-
-const imageTokenCache = new Map<string, ImageTokenEntry>()
-const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
-const IMAGE_TOKEN_MAX = 200
-let imageTokenLastCleanup = 0
-const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
-
-export function registerImageToken(imagePath: string): string {
-  return registerImageTokenWithMeta(imagePath, { isThumb: isThumbnailFilePath(imagePath) })
-}
-
-export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }): string {
-  const now = Date.now()
-
-  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
-    imageTokenLastCleanup = now
-    for (const [token, entry] of imageTokenCache) {
-      if (entry.expires < now) {
-        imageTokenCache.delete(token)
-      }
-    }
-  }
-
-  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
-    const oldest = imageTokenCache.keys().next().value
-    if (oldest) {
-      imageTokenCache.delete(oldest)
-    }
-  }
-
-  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
-  let token = ''
-  do {
-    token = ''
-    for (let i = 0; i < 16; i++) {
-      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
-    }
-  } while (imageTokenCache.has(token))
-
-  imageTokenCache.set(token, {
-    imagePath,
-    expires: now + IMAGE_TOKEN_TTL_MS,
-    isThumb: meta.isThumb,
-    sessionId: meta.sessionId,
-    imageMd5: meta.imageMd5,
-    imageDatName: meta.imageDatName,
-  })
-
-  return token
-}
-
-export function isThumbnailFilePath(filePath: string): boolean {
-  const base = path.basename(filePath)
-  return base.includes('_t.') || base.includes('_thumb') || /_t\.[a-z]+$/.test(base)
-}
-
-export function getImagePathByToken(token: string): string | null {
-  const entry = imageTokenCache.get(token)
-  if (!entry) return null
-  if (Date.now() > entry.expires) {
-    imageTokenCache.delete(token)
-    return null
-  }
-  if (!fs.existsSync(entry.imagePath)) {
-    imageTokenCache.delete(token)
-    return null
-  }
-  return entry.imagePath
-}
-
-export function getImageTokenCount(): number {
-  return imageTokenCache.size
-}
-
-export function isThumbToken(token: string): boolean {
-  return imageTokenCache.get(token)?.isThumb ?? false
-}
-
-export async function upgradeTokenOnAccess(token: string): Promise<string | null> {
-  const entry = imageTokenCache.get(token)
-  if (!entry || !entry.isThumb || !entry.sessionId || !entry.imageMd5) return null
-  if (Date.now() > entry.expires) return null
-
-  try {
-    const { imageDecryptService } = require('./imageDecryptService')
-    const hdDatPath = imageDecryptService.findHdDatForUpgrade(entry.sessionId, entry.imageMd5)
-    if (!hdDatPath) return null
-    const ready = await imageDecryptService.waitForFullDatReady(hdDatPath, 2000)
-    if (!ready) return null
-    const result = await imageDecryptService.decryptImage({
-      sessionId: entry.sessionId,
-      imageMd5: entry.imageMd5,
-      createTime: Number(entry.expires - IMAGE_TOKEN_TTL_MS),
-      preferFilePath: true,
-      suppressEvents: true,
-      preferHd: true,
-    })
-    if (result?.success && result.localPath && !result.isThumb) {
-      entry.imagePath = result.localPath
-      entry.isThumb = false
-      console.log(`[TokenUpgrade] Upgraded to HD on access: ${token}`)
-      return result.localPath
-    }
-  } catch (e) {
-    console.warn('[TokenUpgrade] failed:', e)
-  }
-  return null
-}
-
 class HttpService {
   private server: http.Server | null = null
   private configService: ConfigService
@@ -579,39 +462,6 @@ class HttpService {
 
         const url = new URL(req.url || '/', `http://${this.host}:${this.port}`)
         const pathname = url.pathname
-
-        if (pathname === '/api/image' && req.method === 'GET') {
-            const token = url.searchParams.get('token') || ''
-            if (!/^[a-z0-9]{16}$/.test(token)) {
-                this.sendError(res, 400, 'Invalid token format')
-                return
-            }
-            const entry = imageTokenCache.get(token)
-            let filePath = getImagePathByToken(token)
-            if (!filePath) {
-                this.sendError(res, 404, 'Image not found or expired')
-                return
-            }
-            if (entry?.isThumb) {
-                const upgraded = await upgradeTokenOnAccess(token)
-                if (upgraded && upgraded !== filePath) {
-                    filePath = upgraded
-                }
-            }
-            const ext = path.extname(filePath).toLowerCase()
-            const mimeMap: Record<string, string> = {
-                '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
-                '.png': 'image/png', '.gif': 'image/gif',
-                '.webp': 'image/webp', '.bmp': 'image/bmp'
-            }
-            res.writeHead(200, {
-                'Content-Type': mimeMap[ext] || 'application/octet-stream',
-                'Cache-Control': 'no-cache, max-age=0',
-                'X-Content-Type-Options': 'nosniff'
-            })
-            fs.createReadStream(filePath).pipe(res)
-            return
-        }
 
         try {
             const bodyParams = await this.parseBody(req)
@@ -3085,8 +2935,7 @@ class HttpService {
                 'messageSendEnabled', 'messageSendMode',
                 'notificationEnabled', 'notificationFilterMode',
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
-                'logEnabled', 'bots',
-                'imageTransferMode', 'imageServerBaseUrl'
+                'logEnabled', 'bots'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {

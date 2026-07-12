@@ -2,7 +2,6 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { imageDecryptService } from './imageDecryptService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { promises as fs } from 'fs'
 import path from 'path'
@@ -41,11 +40,6 @@ interface MessagePushPayload {
   groupName?: string
   content: string | null
   timestamp: number
-  imagePath?: string
-  imagePathHd?: string
-  imageBaseMd5?: string
-  imageDecryptFailed?: boolean
-  senderIdAlias?: string
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -74,8 +68,6 @@ class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
-  private readonly imageDecryptMaxRetries = 3
-  private readonly imageDecryptRetryDelayMs = 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -549,14 +541,10 @@ class MessagePushService {
       if (!payload) continue
       if (!this.shouldPushPayload(payload)) continue
 
-      if (!payload.imageDecryptFailed) {
-        httpService.broadcastMessagePush(payload)
-        broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
-        this.rememberMessageKey(messageKey)
-        this.bumpSessionBaseline(session.username, message)
-      } else {
-        console.warn(`[MessagePushService] Image decrypt failed, message not pushed: ${payload.sessionId}/${payload.rawid}`)
-      }
+      httpService.broadcastMessagePush(payload)
+      broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
+      this.rememberMessageKey(messageKey)
+      this.bumpSessionBaseline(session.username, message)
     }
 
     for (const message of fetchedMessages) {
@@ -749,79 +737,6 @@ class MessagePushService {
     return merged
   }
 
-  private async resolveAndDecryptImage(message: Message, sessionId: string): Promise<string | undefined> {
-    if (Number(message.localType || 0) !== 3) return undefined
-    const imageMd5 = String(message.imageMd5 || '').trim()
-    const imageDatName = String(message.imageDatName || '').trim()
-    if (!imageMd5 && !imageDatName) return undefined
-    const basePayload = {
-      sessionId,
-      imageMd5,
-      imageDatName,
-      createTime: Number(message.createTime || 0),
-      preferFilePath: true,
-      suppressEvents: true
-    }
-    let lastError: unknown = undefined
-    let thumbPath: string | undefined = undefined
-    for (let attempt = 0; attempt <= this.imageDecryptMaxRetries; attempt++) {
-      if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, this.imageDecryptRetryDelayMs))
-      }
-      const isLastAttempt = attempt >= this.imageDecryptMaxRetries
-      const preferHd = attempt >= 1
-      const payload = { ...basePayload, preferHd }
-      try {
-        const result = await imageDecryptService.decryptImage(payload)
-        console.log(`[DIAG][MsgPush] attempt=${attempt} preferHd=${preferHd} result.success=${result?.success} isThumb=${result?.isThumb} localPath=${result?.localPath} error=${result?.error}`)
-        if (result?.success && result.localPath) {
-          if (!result.isThumb) {
-            return result.localPath
-          }
-          if (!thumbPath) {
-            thumbPath = result.localPath
-          }
-          if (isLastAttempt) {
-            return thumbPath
-          }
-          if (preferHd && imageMd5) {
-            const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
-            console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat search: found=${!!hdDat} path=${hdDat}`)
-            if (hdDat) {
-              const ready = await imageDecryptService.waitForFullDatReady(hdDat, 1500)
-              console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat ready=${ready}`)
-              if (ready) {
-                const hdResult = await imageDecryptService.decryptImageDirect(hdDat, sessionId)
-                console.log(`[DIAG][MsgPush] attempt=${attempt} decryptImageDirect: result=${hdResult}`)
-                if (hdResult) return hdResult
-              }
-            }
-          }
-          continue
-        }
-        lastError = result?.error || 'decrypt_failed'
-        console.log(`[DIAG][MsgPush] attempt=${attempt} failed: ${lastError}`)
-      } catch (e) {
-        lastError = e
-        console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
-      }
-    }
-    if (thumbPath) {
-      return thumbPath
-    }
-    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
-    return undefined
-  }
-
-  private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
-    if (!senderWxid) return undefined
-    try {
-      const contact = await chatService.getContact(senderWxid)
-      if (contact?.alias) return contact.alias
-    } catch {}
-    return undefined
-  }
-
   private async buildPayload(session: ChatSession, message: Message): Promise<MessagePushPayload | null> {
     const sessionId = String(session.username || '').trim()
     const messageKey = String(message.messageKey || '').trim()
@@ -833,9 +748,6 @@ class MessagePushService {
     const rawid = this.getMessageRawId(message)
 
     const createTime = Number(message.createTime || 0)
-    const imageMd5 = String(message.imageMd5 || '').trim()
-    const imagePath = await this.resolveAndDecryptImage(message, sessionId)
-    const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -847,7 +759,6 @@ class MessagePushService {
       const myWxid = this.configService.getMyWxidCleaned()
       cacheGroup(sessionId, groupName, myWxid)
       scheduleGroupRefresh(sessionId)
-      const senderIdAlias = senderId ? await this.resolveSenderAlias(senderId) : undefined
       return {
         event: 'message.new',
         sessionId,
@@ -859,11 +770,7 @@ class MessagePushService {
         senderId,
         senderCard,
         content,
-        timestamp: createTime,
-        imagePath,
-        imageBaseMd5: imageMd5 || undefined,
-        imageDecryptFailed,
-        senderIdAlias
+        timestamp: createTime
       }
     }
 
@@ -872,7 +779,6 @@ class MessagePushService {
     const senderId = String(message.senderUsername || '').trim() || sessionId
     cachePrivate(senderId)
     schedulePrivateRefresh(senderId)
-    const senderIdAlias = await this.resolveSenderAlias(senderId)
     return {
       event: 'message.new',
       sessionId,
@@ -881,11 +787,7 @@ class MessagePushService {
       avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
       content,
-      timestamp: createTime,
-      imagePath,
-      imageBaseMd5: imageMd5 || undefined,
-      imageDecryptFailed,
-      senderIdAlias
+      timestamp: createTime
     }
   }
 

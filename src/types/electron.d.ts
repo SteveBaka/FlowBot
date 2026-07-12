@@ -481,7 +481,7 @@ export interface ElectronAPI {
   }
   chat: {
     connect: () => Promise<{ success: boolean; error?: string }>
-    sendMessage: (sessionId: string, content: string, imagePath?: string) => Promise<{ success: boolean; error?: string; method?: string }>
+    sendMessage: (sessionId: string, content: string) => Promise<{ success: boolean; error?: string; method?: string }>
     setSendMode: (mode: 'foreground' | 'background') => Promise<{ success: boolean }>
     sendBatch: (tasks: Array<{ sessionId: string; content: string }>) => Promise<{ total: number; sent: number; failed: number }>
     cancelSendQueue: () => Promise<{ cancelled: number }>
