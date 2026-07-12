@@ -574,9 +574,31 @@ input[type="number"] {
   max-width: 220px;
   width: 220px;
 }
+input[type="text"] {
+  max-width: 220px;
+  width: 220px;
+  height: 39px;
+}
+select {
+  max-width: 220px;
+  width: 220px;
+  height: 39px;
+}
 input:focus, textarea:focus, select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+input.input-error {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 15%, transparent) !important;
+}
+input.input-error:focus {
+  border-color: var(--danger) !important;
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 25%, transparent) !important;
+}
+input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 :root[data-theme="light"] input[type="text"],
 :root[data-theme="light"] input[type="password"],

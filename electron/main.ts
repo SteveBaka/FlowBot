@@ -4,8 +4,11 @@ import { Worker } from 'worker_threads'
 import { randomUUID } from 'crypto'
 import { join, dirname } from 'path'
 import { autoUpdater } from 'electron-updater'
-import { readFile, writeFile, mkdir, rm, readdir, copyFile } from 'fs/promises'
+import { readFile, writeFile, mkdir, rm, readdir, copyFile, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
+import * as http from 'http'
+import * as https from 'https'
+import { tmpdir } from 'os'
 import { ConfigService } from './services/config'
 import { dbPathService } from './services/dbPathService'
 import { wcdbService } from './services/wcdbService'
@@ -2419,18 +2422,16 @@ function registerIpcHandlers() {
     return chatService.connect()
   })
 
-  ipcMain.handle('chat:sendMessage', async (_, sessionId: string, content: string) => {
+  ipcMain.handle('chat:sendMessage', async (_, sessionId: string, content: string, imagePath?: string) => {
     const { getEnhancedMessageSender } = require('./plugins/enhancedMessageSender')
     const sender = getEnhancedMessageSender()
 
-    // 每次发送前从 config 同步模式（避免启动时未加载）
     try {
       const { getMessageSendMode } = require('./services/config')
       const mode = await getMessageSendMode()
       sender.setMode(mode)
     } catch {}
 
-    // 群聊(@chatroom)用群名搜索，个人用 wxid 搜索
     let searchName = sessionId
     if (sessionId.endsWith('@chatroom')) {
       try {
@@ -2441,7 +2442,7 @@ function registerIpcHandlers() {
       } catch {}
     }
 
-    const result = await sender.sendMessage(content, searchName)
+    const result = await sender.sendMessage(content, searchName, imagePath)
     return result
   })
 
@@ -4497,6 +4498,42 @@ app.whenReady().then(async () => {
 
   await httpService.autoStart()
 
+  async function prepareImageForSend(fileUrl: string): Promise<{ imagePath: string; cleanup: () => Promise<void> } | null> {
+    if (!fileUrl) return null
+    const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}.png`)
+    const cleanup = async () => { try { await unlink(tmpPath) } catch {} }
+    try {
+      if (fileUrl.startsWith('base64://')) {
+        const b64 = fileUrl.slice(9)
+        await writeFile(tmpPath, Buffer.from(b64, 'base64'))
+        return { imagePath: tmpPath, cleanup }
+      }
+      if (fileUrl.startsWith('file://')) {
+        const filePath = decodeURIComponent(fileUrl.slice(7))
+        await copyFile(filePath, tmpPath)
+        return { imagePath: tmpPath, cleanup }
+      }
+      if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://')) {
+        const mod = fileUrl.startsWith('https') ? https : http
+        await new Promise<void>((resolve, reject) => {
+          mod.get(fileUrl, (res) => {
+            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return }
+            const chunks: Buffer[] = []
+            res.on('data', (c: Buffer) => chunks.push(c))
+            res.on('end', async () => { await writeFile(tmpPath, Buffer.concat(chunks)); resolve() })
+            res.on('error', reject)
+          }).on('error', reject)
+        })
+        return { imagePath: tmpPath, cleanup }
+      }
+      return null
+    } catch (e) {
+      console.error('[App] prepareImageForSend failed:', e)
+      await cleanup()
+      return null
+    }
+  }
+
   // 启动 OneBot bot 管理器
   try {
     const { startBotManager, setBotMessageCallback } = require('./services/botManager')
@@ -4512,103 +4549,117 @@ app.whenReady().then(async () => {
           // OneBot v11 message 可以是字符串或 CQ segment 数组
           var rawMsg = params.message || params.text || params.content || ''
           var content = ''
+          var imageFileUrl: string | undefined
           if (typeof rawMsg === 'string') {
             content = rawMsg
           } else if (Array.isArray(rawMsg)) {
-            // 从 CQ segments 提取纯文本
             content = rawMsg
               .filter(function(s) { return s.type === 'text' })
               .map(function(s) { return s.data && s.data.text || '' })
               .join('')
+            var imgSeg = rawMsg.find(function(s: any) { return s.type === 'image' })
+            if (imgSeg && imgSeg.data && imgSeg.data.file) {
+              imageFileUrl = imgSeg.data.file
+            }
           } else if (rawMsg && typeof rawMsg === 'object') {
             content = String(rawMsg.text || rawMsg.content || '')
           } else {
             content = String(rawMsg)
           }
-          if (!content) {
+
+          var preparedImage: { imagePath: string; cleanup: () => Promise<void> } | null = null
+          if (imageFileUrl) {
+            preparedImage = await prepareImageForSend(imageFileUrl)
+          }
+
+          if (!content && !preparedImage) {
             console.warn('[App] Bot message empty, skipping')
             return
           }
 
-          if (msg.action === 'send_private_msg') {
-            var rawUserId = params.user_id || ''
-            var contactName = rawUserId
-            try {
-              var { resolvePrivateSearchName } = require('./services/botManager')
-              var resolvedName = resolvePrivateSearchName(rawUserId)
-              if (resolvedName) {
-                contactName = resolvedName
-              }
-            } catch {}
-            console.log('[App] Bot sending private msg to "' + contactName + '": ' + content.substring(0, 50))
-            var result = await sender.sendMessage(content, contactName)
-            console.log('[App] Bot sendMessage result:', result)
-          } else if (msg.action === 'send_group_msg') {
-            var rawGroupId = params.group_id || params.group_name || ''
-            var groupName = rawGroupId
-            try {
-              var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
-              var resolvedName = resolveGroupSearchName(rawGroupId)
-              if (resolvedName) {
-                groupName = resolvedName
-              } else {
-                var cached = getCachedGroupName(rawGroupId)
-                if (cached) {
-                  groupName = cached
-                } else {
-                  var contact = await chatService.getContact(rawGroupId)
-                  if (contact) {
-                    groupName = contact.remark || contact.nickName || rawGroupId
-                  }
-                  if ((!groupName || groupName === rawGroupId) && rawGroupId.includes('@chatroom')) {
-                    var avatarInfo = await chatService.getContactAvatar(rawGroupId)
-                    if (avatarInfo?.displayName && avatarInfo.displayName !== rawGroupId) {
-                      groupName = avatarInfo.displayName
-                    }
-                  }
+          try {
+            if (msg.action === 'send_private_msg') {
+              var rawUserId = params.user_id || ''
+              var contactName = rawUserId
+              try {
+                var { resolvePrivateSearchName } = require('./services/botManager')
+                var resolvedName = resolvePrivateSearchName(rawUserId)
+                if (resolvedName) {
+                  contactName = resolvedName
                 }
-              }
-            } catch {}
-            console.log('[App] Bot sending group msg to "' + groupName + '" (from ' + rawGroupId + '): ' + content.substring(0, 50))
-            var result = await sender.sendMessage(content, groupName)
-            console.log('[App] Bot sendMessage result:', result)
-          } else if (msg.action === 'send_msg') {
-            var rawTarget = params.group_id || params.user_id || params.target || ''
-            var target = rawTarget
-            if (params.group_id) {
+              } catch {}
+              console.log('[App] Bot sending private msg to "' + contactName + '"'+ (preparedImage ? ' [IMAGE]' : '') + ': ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath)
+              console.log('[App] Bot sendMessage result:', result)
+            } else if (msg.action === 'send_group_msg') {
+              var rawGroupId = params.group_id || params.group_name || ''
+              var groupName = rawGroupId
               try {
                 var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
-                var resolvedGroupName = resolveGroupSearchName(params.group_id)
-                if (resolvedGroupName) {
-                  target = resolvedGroupName
+                var resolvedName = resolveGroupSearchName(rawGroupId)
+                if (resolvedName) {
+                  groupName = resolvedName
                 } else {
-                  var cachedGroupName = getCachedGroupName(params.group_id)
-                  if (cachedGroupName) {
-                    target = cachedGroupName
+                  var cached = getCachedGroupName(rawGroupId)
+                  if (cached) {
+                    groupName = cached
                   } else {
-                    var gContact = await chatService.getContact(params.group_id)
-                    if (gContact) target = gContact.remark || gContact.nickName || rawTarget
-                    if ((!target || target === rawTarget) && params.group_id.includes('@chatroom')) {
-                      var gAvatarInfo = await chatService.getContactAvatar(params.group_id)
-                      if (gAvatarInfo?.displayName && gAvatarInfo.displayName !== rawTarget) {
-                        target = gAvatarInfo.displayName
+                    var contact = await chatService.getContact(rawGroupId)
+                    if (contact) {
+                      groupName = contact.remark || contact.nickName || rawGroupId
+                    }
+                    if ((!groupName || groupName === rawGroupId) && rawGroupId.includes('@chatroom')) {
+                      var avatarInfo = await chatService.getContactAvatar(rawGroupId)
+                      if (avatarInfo?.displayName && avatarInfo.displayName !== rawGroupId) {
+                        groupName = avatarInfo.displayName
                       }
                     }
                   }
                 }
               } catch {}
-            } else if (params.user_id) {
-              try {
-                var { resolvePrivateSearchName } = require('./services/botManager')
-                var resolvedUserName = resolvePrivateSearchName(params.user_id)
-                if (resolvedUserName) {
-                  target = resolvedUserName
-                }
-              } catch {}
+              console.log('[App] Bot sending group msg to "' + groupName + '"'+ (preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawGroupId + '): ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath)
+              console.log('[App] Bot sendMessage result:', result)
+            } else if (msg.action === 'send_msg') {
+              var rawTarget = params.group_id || params.user_id || params.target || ''
+              var target = rawTarget
+              if (params.group_id) {
+                try {
+                  var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
+                  var resolvedGroupName = resolveGroupSearchName(params.group_id)
+                  if (resolvedGroupName) {
+                    target = resolvedGroupName
+                  } else {
+                    var cachedGroupName = getCachedGroupName(params.group_id)
+                    if (cachedGroupName) {
+                      target = cachedGroupName
+                    } else {
+                      var gContact = await chatService.getContact(params.group_id)
+                      if (gContact) target = gContact.remark || gContact.nickName || rawTarget
+                      if ((!target || target === rawTarget) && params.group_id.includes('@chatroom')) {
+                        var gAvatarInfo = await chatService.getContactAvatar(params.group_id)
+                        if (gAvatarInfo?.displayName && gAvatarInfo.displayName !== rawTarget) {
+                          target = gAvatarInfo.displayName
+                        }
+                      }
+                    }
+                  }
+                } catch {}
+              } else if (params.user_id) {
+                try {
+                  var { resolvePrivateSearchName } = require('./services/botManager')
+                  var resolvedUserName = resolvePrivateSearchName(params.user_id)
+                  if (resolvedUserName) {
+                    target = resolvedUserName
+                  }
+                } catch {}
+              }
+              console.log('[App] Bot sending msg to "' + target + '"'+ (preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawTarget + '): ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, target, preparedImage?.imagePath)
+              console.log('[App] Bot sendMessage result:', result)
             }
-            console.log('[App] Bot sending msg to "' + target + '" (from ' + rawTarget + '): ' + content.substring(0, 50))
-            var result = await sender.sendMessage(content, target)
-            console.log('[App] Bot sendMessage result:', result)
+          } finally {
+            if (preparedImage) { await preparedImage.cleanup() }
           }
         } catch (e) {
           console.error('[App] Bot message forwarding error:', e)
