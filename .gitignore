@@ -90,8 +90,8 @@ plan-sender.md
 docker-compose.build.yml
 docs/http-server-fall.md
 docs/LINUX-SENDER.md
+flowbot-latest.tar
 docs/IMAGE-TRANSFER-PLAN.md
 .gitignore
 docs/plan-image-sharefile.md
 docs/plan-image-hybrid.md
-flowbot-latest.tar
