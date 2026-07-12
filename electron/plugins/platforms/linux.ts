@@ -23,6 +23,7 @@ interface QueuedMessage {
   id: string
   content: string
   contactName: string
+  imagePath?: string
   resolve: (result: { success: boolean; error?: string; method: string }) => void
   retries: number
   createdAt: number
@@ -69,6 +70,31 @@ async function xclipGet(): Promise<string> {
     return stdout.trim()
   } catch {
     return ''
+  }
+}
+
+async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Promise<boolean> {
+  try {
+    await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t ${mime} -i "${imagePath.replace(/"/g, '\\"')}"`, {
+      timeout: 5000,
+      env: DISPLAY_ENV
+    })
+    return true
+  } catch (e) {
+    warn(`xclipSetImage failed (${mime}): ${e}`)
+    if (mime !== 'image/bmp') {
+      try {
+        await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t image/bmp -i "${imagePath.replace(/"/g, '\\"')}"`, {
+          timeout: 5000,
+          env: DISPLAY_ENV
+        })
+        log('Fell back to image/bmp')
+        return true
+      } catch (e2) {
+        warn(`xclipSetImage BMP fallback also failed: ${e2}`)
+      }
+    }
+    return false
   }
 }
 
@@ -223,12 +249,24 @@ export class LinuxSender implements IPlatformSender {
     await new Promise(r => setTimeout(r, INPUT_CLICK_DELAY_MS))
   }
 
-  private async pasteAndSend(content: string, wid: string): Promise<boolean> {
-    log(`Pasting message (${content.length} chars)...`)
-    await xclipSet(content)
-    await new Promise(r => setTimeout(r, 100))
-    await run(`xdotool key --window "${wid}" ctrl+v`)
-    await new Promise(r => setTimeout(r, 300))
+  private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
+    if (imagePath) {
+      log(`Pasting image: ${imagePath}`)
+      const ok = await xclipSetImage(imagePath)
+      if (!ok) {
+        warn('xclipSetImage failed, falling back to text')
+        await xclipSet(content)
+      }
+      await new Promise(r => setTimeout(r, 200))
+      await run(`xdotool key --window "${wid}" ctrl+v`)
+      await new Promise(r => setTimeout(r, 500))
+    } else {
+      log(`Pasting message (${content.length} chars)...`)
+      await xclipSet(content)
+      await new Promise(r => setTimeout(r, 100))
+      await run(`xdotool key --window "${wid}" ctrl+v`)
+      await new Promise(r => setTimeout(r, 300))
+    }
 
     log(`Pressing Enter to send...`)
     await run(`xdotool key --window "${wid}" Return`)
@@ -238,16 +276,16 @@ export class LinuxSender implements IPlatformSender {
     return true
   }
 
-  private async doSend(content: string, contactName: string): Promise<{ success: boolean; error?: string }> {
+  private async doSend(content: string, contactName: string, imagePath?: string): Promise<{ success: boolean; error?: string }> {
     const wid = await this.findWeChatWindow()
     if (!wid) {
       return { success: false, error: '找不到微信窗口' }
     }
 
-    return this.doSendWithWindow(content, contactName, wid)
+    return this.doSendWithWindow(content, contactName, wid, imagePath)
   }
 
-  private async doSendWithWindow(content: string, contactName: string, wid: string): Promise<{ success: boolean; error?: string }> {
+  private async doSendWithWindow(content: string, contactName: string, wid: string, imagePath?: string): Promise<{ success: boolean; error?: string }> {
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
     }
@@ -257,9 +295,11 @@ export class LinuxSender implements IPlatformSender {
       return { success: false, error: '搜索联系人失败' }
     }
 
-    await this.ensureFocusInInput(wid)
+    if (!imagePath) {
+      await this.ensureFocusInInput(wid)
+    }
 
-    if (!await this.pasteAndSend(content, wid)) {
+    if (!await this.pasteAndSend(content, wid, imagePath)) {
       return { success: false, error: '粘贴发送失败' }
     }
 
@@ -267,7 +307,7 @@ export class LinuxSender implements IPlatformSender {
     return { success: true }
   }
 
-  async sendMessage(content: string, contactName?: string): Promise<{
+  async sendMessage(content: string, contactName?: string, imagePath?: string): Promise<{
     success: boolean; error?: string; method: string
   }> {
     const str = String(content || '')
@@ -282,12 +322,13 @@ export class LinuxSender implements IPlatformSender {
         id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         content: str,
         contactName: name,
+        imagePath,
         resolve,
         retries: 0,
         createdAt: Date.now()
       }
       this.queue.push(item)
-      log(`Queued message ${item.id} for "${name}" (queue size: ${this.queue.length})`)
+      log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''} (queue size: ${this.queue.length})`)
       this.processQueue()
     })
   }
@@ -306,11 +347,11 @@ export class LinuxSender implements IPlatformSender {
         await new Promise(r => setTimeout(r, wait))
       }
 
-      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})`)
+      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}`)
 
       let result: { success: boolean; error?: string }
       try {
-        result = await this.doSend(item.content, item.contactName)
+        result = await this.doSend(item.content, item.contactName, item.imagePath)
       } catch (e: any) {
         result = { success: false, error: e?.message || 'Unknown error' }
       }

@@ -194,7 +194,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 聊天
   chat: {
     connect: () => ipcRenderer.invoke('chat:connect'),
-    sendMessage: (sessionId: string, content: string) => ipcRenderer.invoke('chat:sendMessage', sessionId, content),
+    sendMessage: (sessionId: string, content: string, imagePath?: string) => ipcRenderer.invoke('chat:sendMessage', sessionId, content, imagePath),
     setSendMode: (mode: 'foreground' | 'background') => ipcRenderer.invoke('chat:setSendMode', mode),
     sendBatch: (tasks: Array<{ sessionId: string; content: string }>) => ipcRenderer.invoke('chat:sendBatch', tasks),
     cancelSendQueue: () => ipcRenderer.invoke('chat:cancelSendQueue'),

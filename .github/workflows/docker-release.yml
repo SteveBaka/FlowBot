@@ -126,9 +126,9 @@ jobs:
         shell: bash
         run: |
           IMAGE_REF="${{ steps.image-name.outputs.full }}:latest"
-          TAG="v1.0"
+          TAG="v1.1"
           WEFLOW_VERSION=$(node -e "console.log(require('./package.json').version)")
-          RELEASE_TITLE="FlowBOT v1.0"
+          RELEASE_TITLE="FlowBOT v1.1"
 
           gh release create "$TAG" \
             --title "$RELEASE_TITLE" \
