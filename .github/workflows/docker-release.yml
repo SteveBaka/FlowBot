@@ -26,83 +26,36 @@ env:
 
 jobs:
   bump-version:
-    name: Bump Version
+    name: Resolve Version
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     outputs:
-      new_version: ${{ steps.bump.outputs.new_version }}
-      should_release: ${{ steps.bump.outputs.should_release }}
+      new_version: ${{ steps.version.outputs.new_version }}
+      should_release: ${{ steps.version.outputs.should_release }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Determine version bump
-        id: bump
+      - name: Read version from docker/VERSION
+        id: version
         shell: bash
         run: |
-          # 读取当前容器版本（从 docker/VERSION 获取）
           if [ -f "docker/VERSION" ]; then
             CURRENT=$(cat docker/VERSION | tr -d '[:space:]')
           else
             CURRENT="1.0.0"
           fi
 
-          # 手动指定版本优先
           OVERRIDE="${{ inputs.version_override }}"
-          FORCE="${{ inputs.force_release }}"
-
           if [ -n "$OVERRIDE" ]; then
             echo "Using manual version override: $OVERRIDE"
             echo "new_version=$OVERRIDE" >> $GITHUB_OUTPUT
-            echo "should_release=true" >> $GITHUB_OUTPUT
-            echo "bump_type=manual"
-            exit 0
-          fi
-
-          echo "Current container version: $CURRENT"
-          MAJOR=$(echo $CURRENT | cut -d. -f1)
-          MINOR=$(echo $CURRENT | cut -d. -f2)
-          PATCH=$(echo $CURRENT | cut -d. -f3)
-          [ -z "$MINOR" ] && MINOR=0
-          [ -z "$PATCH" ] && PATCH=0
-
-          # 检查最近 20 条 commit 决定 bump 类型
-          COMMITS=$(git log --oneline -20 --format="%s")
-
-          if echo "$COMMITS" | grep -qiE "BREAKING CHANGE|^[a-z]+(\(.+\))?!:"; then
-            NEW_VERSION="$((MAJOR+1)).0.0"
-            BUMP_TYPE="major"
-          elif echo "$COMMITS" | grep -qiE "^feat(\(.+\))?:|^feat:"; then
-            NEW_VERSION="${MAJOR}.$((MINOR+1)).0"
-            BUMP_TYPE="minor"
-          elif echo "$COMMITS" | grep -qiE "^fix(\(.+\))?:|^fix:"; then
-            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-            BUMP_TYPE="patch"
-          elif [ "$FORCE" = "true" ]; then
-            # 强制发布：自动 patch +1
-            NEW_VERSION="${MAJOR}.${MINOR}.$((PATCH+1))"
-            BUMP_TYPE="patch (forced)"
           else
-            # 无关键 commit，不触发 release
-            echo "should_release=false" >> $GITHUB_OUTPUT
-            echo "No version-triggering commits found. Skipping release."
-            exit 0
+            echo "Using version from docker/VERSION: $CURRENT"
+            echo "new_version=$CURRENT" >> $GITHUB_OUTPUT
           fi
-
-          # 回写新版本到 docker/VERSION
-          echo "$NEW_VERSION" > docker/VERSION
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docker/VERSION
-          git commit -m "chore(release): bump container version to $NEW_VERSION"
-          git push
-
-          echo "new_version=$NEW_VERSION" >> $GITHUB_OUTPUT
           echo "should_release=true" >> $GITHUB_OUTPUT
-          echo "bump_type=$BUMP_TYPE"
-          echo "Bumping container $CURRENT → $NEW_VERSION ($BUMP_TYPE)"
 
   build-electron:
     name: Build Electron App (Linux)
