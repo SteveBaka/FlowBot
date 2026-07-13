@@ -880,6 +880,7 @@ class MessagePushService {
       rawid,
       avatarUrl,
       sourceName: session.displayName || contactInfo?.displayName || sessionId,
+      senderId,
       content,
       timestamp: createTime,
       imagePath,

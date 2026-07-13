@@ -157,13 +157,13 @@ export function resolveGroupSearchName(numericId: number | string): string | und
 export function resolvePrivateSearchName(numericId: number | string): string | undefined {
   const infoByWxid = privateByWxid.get(String(numericId))
   if (infoByWxid) {
-    return infoByWxid.remark || infoByWxid.nickName || infoByWxid.alias || undefined
+    return infoByWxid.alias || infoByWxid.remark || infoByWxid.nickName || infoByWxid.wxid
   }
   const id = typeof numericId === 'string' ? parseInt(numericId, 10) : numericId
   if (!Number.isFinite(id)) return undefined
   const info = privateByNumeric.get(id)
   if (info) {
-    return info.remark || info.nickName || info.alias || undefined
+    return info.alias || info.remark || info.nickName || info.wxid
   }
   return undefined
 }
@@ -172,16 +172,18 @@ export function getGroup(wxid: string): GroupInfo | undefined {
   return groupByWxid.get(wxid)
 }
 
-export function getPrivate(wxid: string): PrivateInfo | undefined {
-  return privateByWxid.get(wxid)
-}
-
-export function getGroupByNumeric(numericId: number): GroupInfo | undefined {
-  return groupByNumeric.get(numericId)
+export function getPrivateNameByNumeric(numericId: number): string | undefined {
+  const info = privateByNumeric.get(numericId)
+  if (!info) return undefined
+  return info.remark || info.nickName || info.alias || info.wxid
 }
 
 export function getPrivateByNumeric(numericId: number): PrivateInfo | undefined {
   return privateByNumeric.get(numericId)
+}
+
+export function getGroupByNumeric(numericId: number): GroupInfo | undefined {
+  return groupByNumeric.get(numericId)
 }
 
 export function scheduleGroupRefresh(wxid: string): void {
@@ -624,8 +626,11 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
     if (entry.server && entry.status === 'running') {
       try {
         const selfId = String(wxidToNumeric(currentSelfWxid || botDisplayName || entry.name || entry.id))
-        const effectiveSenderId = data.senderIdAlias || data.senderId || (isGroup ? data.senderName : data.sessionId)
-        const senderUserId = String(effectiveSenderId)
+        const effectiveSenderId = isGroup
+          ? (data.senderIdAlias || data.senderId || data.senderName)
+          : (data.senderId || data.senderIdAlias || data.sessionId)
+        const senderUserId = String(wxidToNumeric(effectiveSenderId))
+        const originalSenderId = effectiveSenderId
         const senderNickname = data.senderName || data.sourceName || ''
         const senderCard = data.senderCard || senderNickname
 
@@ -693,7 +698,7 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           }
         }
         if (isGroup) {
-          baseMsg.group_id = data.sessionId
+          baseMsg.group_id = String(wxidToNumeric(data.sessionId))
           baseMsg.group_name = data.groupName || data.sessionId
         }
         entry.server.pushMessage(baseMsg)

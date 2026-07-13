@@ -1,0 +1,94 @@
+name-template: 'FlowBOT v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+
+categories:
+  - title: '🚀 新功能'
+    labels:
+      - 'feature'
+      - 'enhancement'
+  - title: '🐛 Bug 修复'
+    labels:
+      - 'fix'
+      - 'bugfix'
+      - 'bug'
+  - title: '🖼️ 图片传输'
+    labels:
+      - 'image'
+      - 'picture'
+  - title: '📡 OneBot 协议'
+    labels:
+      - 'onebot'
+      - 'protocol'
+  - title: '🧹 维护'
+    labels:
+      - 'chore'
+      - 'refactor'
+      - 'docs'
+      - 'style'
+  - title: '📦 依赖更新'
+    labels:
+      - 'dependencies'
+      - 'build'
+  - title: '🔒 安全'
+    labels:
+      - 'security'
+
+change-template: '- $TITLE (#$NUMBER) by @$AUTHOR'
+change-title-escapes: '\<*_&'
+
+template: |
+  ## FlowBOT v$RESOLVED_VERSION
+
+  **WeFlow Version:** $WEFLOW_VERSION
+  **Built:** $DATE
+  **Commit:** $COMMIT
+
+  $CHANGES
+
+  ---
+
+  ### Docker Pull
+  ```bash
+  docker pull $IMAGE_REF
+  ```
+
+  ### Quick Start
+  ```bash
+  docker run -d --name flowbot \
+    --cap-add=SYS_PTRACE \
+    -e TZ=Asia/Shanghai \
+    -e VNC_PASSWORD=your_password \
+    -p 7100:7100 \
+    -p 7300:7300 \
+    -p 7600:7600 \
+    $IMAGE_REF
+  ```
+
+  ### Ports
+  - **7100** - OneBot v11 API
+  - **7300** - FlowBOT WebUI
+  - **7600** - noVNC virtual desktop
+
+version-resolver:
+  major:
+    labels:
+      - 'major'
+      - 'breaking'
+  minor:
+    labels:
+      - 'minor'
+      - 'feature'
+      - 'enhancement'
+  patch:
+    labels:
+      - 'patch'
+      - 'fix'
+      - 'bug'
+      - 'chore'
+      - 'docs'
+      - 'dependencies'
+  default: patch
+
+replacers:
+  - search: '/(feat|fix|chore|docs|refactor|build|ci|style|perf|test)(\(.+\))?:/i'
+    replace: ''

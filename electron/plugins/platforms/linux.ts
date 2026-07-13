@@ -252,13 +252,15 @@ export class LinuxSender implements IPlatformSender {
   private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
     if (imagePath) {
       log(`Pasting image: ${imagePath}`)
-      const ok = await xclipSetImage(imagePath)
+      const mime = this.detectImageMime(imagePath)
+      const ok = await xclipSetImage(imagePath, mime)
       if (!ok) {
         warn('xclipSetImage failed, falling back to text')
         await xclipSet(content)
       }
       await new Promise(r => setTimeout(r, 200))
       await run(`xdotool key --window "${wid}" ctrl+v`)
+      log('Image pasted to clipboard successfully')
       await new Promise(r => setTimeout(r, 500))
     } else {
       log(`Pasting message (${content.length} chars)...`)
@@ -285,6 +287,15 @@ export class LinuxSender implements IPlatformSender {
     return this.doSendWithWindow(content, contactName, wid, imagePath)
   }
 
+  private detectImageMime(imagePath: string): string {
+    const ext = imagePath.toLowerCase().split('.').pop() || 'png'
+    if (ext === 'jpg' || ext === 'jpeg') return 'image/jpeg'
+    if (ext === 'gif') return 'image/gif'
+    if (ext === 'bmp') return 'image/bmp'
+    if (ext === 'webp') return 'image/webp'
+    return 'image/png'
+  }
+
   private async doSendWithWindow(content: string, contactName: string, wid: string, imagePath?: string): Promise<{ success: boolean; error?: string }> {
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
@@ -295,15 +306,14 @@ export class LinuxSender implements IPlatformSender {
       return { success: false, error: '搜索联系人失败' }
     }
 
-    if (!imagePath) {
-      await this.ensureFocusInInput(wid)
-    }
+    await this.ensureFocusInInput(wid)
 
     if (!await this.pasteAndSend(content, wid, imagePath)) {
       return { success: false, error: '粘贴发送失败' }
     }
 
     this.lastSendTime = Date.now()
+    log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"`)
     return { success: true }
   }
 
@@ -358,6 +368,7 @@ export class LinuxSender implements IPlatformSender {
 
       if (result.success) {
         log(`Message ${item.id} sent successfully`)
+        log(`Message ${item.id} (${item.imagePath ? 'image' : 'text'}) sent successfully`)
         item.resolve({ success: true, method: this.currentMode })
         this.queue.shift()
       } else {

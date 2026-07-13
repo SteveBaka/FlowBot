@@ -4498,38 +4498,114 @@ app.whenReady().then(async () => {
 
   await httpService.autoStart()
 
-  async function prepareImageForSend(fileUrl: string): Promise<{ imagePath: string; cleanup: () => Promise<void> } | null> {
+  // ─── 图片文件 TTL 清理 ──────────────────────────────────────────────
+  interface PendingCleanup {
+    imagePath: string
+    expiresAt: number
+  }
+
+  const pendingImageCleanups: PendingCleanup[] = []
+  const IMAGE_CLEANUP_TTL_MS = 60 * 1000  // 1 分钟
+  let imageCleanupTimer: NodeJS.Timeout | null = null
+
+  /** 调度图片文件清理：新增待清理项 + 启动/重置定时器 */
+  function scheduleImageCleanup(imagePath: string): void {
+    pendingImageCleanups.push({
+      imagePath,
+      expiresAt: Date.now() + IMAGE_CLEANUP_TTL_MS
+    })
+
+    if (imageCleanupTimer) clearInterval(imageCleanupTimer)
+    imageCleanupTimer = setInterval(flushImageCleanups, 10_000)  // 每 10s 扫描一次
+  }
+
+  /** 执行已过期的清理项 */
+  function flushImageCleanups(): void {
+    const now = Date.now()
+    while (pendingImageCleanups.length > 0 && pendingImageCleanups[0].expiresAt <= now) {
+      const item = pendingImageCleanups.shift()!
+      unlink(item.imagePath)
+        .then(() => console.log(`[ImageCleanup] Deleted: ${item.imagePath.split('/').pop()}`))
+        .catch(e => console.warn('[ImageCleanup] Failed:', e))
+    }
+    if (pendingImageCleanups.length === 0 && imageCleanupTimer) {
+      clearInterval(imageCleanupTimer)
+      imageCleanupTimer = null
+    }
+  }
+
+  /** 应用启动时清理旧的 weflow_ob_* 文件 */
+  async function cleanupStaleImageFiles(): Promise<void> {
+    try {
+      const tmpDir = tmpdir()
+      const files = await readdir(tmpDir)
+      const staleFiles = files.filter(f => f.startsWith('weflow_ob_'))
+      if (staleFiles.length === 0) return
+
+      let deleted = 0
+      for (const f of staleFiles) {
+        try {
+          await unlink(join(tmpDir, f))
+          deleted++
+        } catch {}
+      }
+      console.log(`[StartupCleanup] Removed ${deleted} stale image files`)
+    } catch (e) {
+      console.warn('[StartupCleanup] Failed:', e)
+    }
+  }
+
+  async function prepareImageForSend(fileUrl: string): Promise<{ imagePath: string; mime: string } | null> {
     if (!fileUrl) return null
-    const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}.png`)
-    const cleanup = async () => { try { await unlink(tmpPath) } catch {} }
     try {
       if (fileUrl.startsWith('base64://')) {
         const b64 = fileUrl.slice(9)
+        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}.png`)
         await writeFile(tmpPath, Buffer.from(b64, 'base64'))
-        return { imagePath: tmpPath, cleanup }
+        return { imagePath: tmpPath, mime: 'image/png' }
       }
       if (fileUrl.startsWith('file://')) {
         const filePath = decodeURIComponent(fileUrl.slice(7))
+        const ext = extname(filePath).toLowerCase() || '.png'
+        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}${ext}`)
         await copyFile(filePath, tmpPath)
-        return { imagePath: tmpPath, cleanup }
+        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.gif' ? 'image/gif' : ext === '.bmp' ? 'image/bmp' : ext === '.webp' ? 'image/webp' : 'image/png'
+        return { imagePath: tmpPath, mime }
       }
       if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://')) {
         const mod = fileUrl.startsWith('https') ? https : http
-        await new Promise<void>((resolve, reject) => {
+        const result = await new Promise<{ data: Buffer; contentType: string | undefined }>((resolve, reject) => {
           mod.get(fileUrl, (res) => {
             if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return }
+            const contentType = res.headers['content-type']
             const chunks: Buffer[] = []
             res.on('data', (c: Buffer) => chunks.push(c))
-            res.on('end', async () => { await writeFile(tmpPath, Buffer.concat(chunks)); resolve() })
+            res.on('end', () => resolve({ data: Buffer.concat(chunks), contentType }))
             res.on('error', reject)
           }).on('error', reject)
         })
-        return { imagePath: tmpPath, cleanup }
+        let ext = '.png'
+        let mime = 'image/png'
+        if (result.contentType) {
+          const ct = result.contentType.toLowerCase().split(';')[0].trim()
+          if (ct === 'image/jpeg') { ext = '.jpg'; mime = 'image/jpeg' }
+          else if (ct === 'image/gif') { ext = '.gif'; mime = 'image/gif' }
+          else if (ct === 'image/bmp') { ext = '.bmp'; mime = 'image/bmp' }
+          else if (ct === 'image/webp') { ext = '.webp'; mime = 'image/webp' }
+        } else {
+          const header = result.data.subarray(0, 4)
+          if (header[0] === 0xFF && header[1] === 0xD8) { ext = '.jpg'; mime = 'image/jpeg' }
+          else if (header[0] === 0x47 && header[1] === 0x49) { ext = '.gif'; mime = 'image/gif' }
+          else if (header[0] === 0x42 && header[1] === 0x4D) { ext = '.bmp'; mime = 'image/bmp' }
+          else if (header[0] === 0x52 && header[1] === 0x49) { ext = '.webp'; mime = 'image/webp' }
+        }
+        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}${ext}`)
+        await writeFile(tmpPath, result.data)
+        return { imagePath: tmpPath, mime }
       }
       return null
     } catch (e) {
       console.error('[App] prepareImageForSend failed:', e)
-      await cleanup()
       return null
     }
   }
@@ -4567,7 +4643,7 @@ app.whenReady().then(async () => {
             content = String(rawMsg)
           }
 
-          var preparedImage: { imagePath: string; cleanup: () => Promise<void> } | null = null
+          var preparedImage: { imagePath: string; mime: string } | null = null
           if (imageFileUrl) {
             preparedImage = await prepareImageForSend(imageFileUrl)
           }
@@ -4659,7 +4735,7 @@ app.whenReady().then(async () => {
               console.log('[App] Bot sendMessage result:', result)
             }
           } finally {
-            if (preparedImage) { await preparedImage.cleanup() }
+            if (preparedImage) { scheduleImageCleanup(preparedImage.imagePath) }
           }
         } catch (e) {
           console.error('[App] Bot message forwarding error:', e)
@@ -4674,6 +4750,7 @@ app.whenReady().then(async () => {
       const { preloadIdentity } = require('./services/botManager')
       await startBotManager(rawBots, (key: string) => configService.get(key as any), selfDisplayName, myWxid)
       await preloadIdentity(myWxid)
+      await cleanupStaleImageFiles()
       console.log('[App] Bot manager started')
     }
   } catch (e) {
