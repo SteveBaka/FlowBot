@@ -201,7 +201,8 @@ var HomePage = {
         cards.system.uptime = sys.containerUptime || (sys.uptime || '').replace('up ', '') || '-'
         cards.system.cpuModel = sys.cpuModel || '-'
         cards.system.color = 'green'
-        cards.version = sys.version || '4.6.1'
+        cards.flowbotVersion = sys.version || '-'
+        cards.version = sys.weflowVersion || '-'
         cards.wechatVersion = sys.wechatVersion || '4.1.1.7'
       } else {
         cards.system.cpu = 0
@@ -210,7 +211,8 @@ var HomePage = {
         cards.system.uptime = '-'
         cards.system.cpuModel = '-'
         cards.system.color = 'red'
-        cards.version = '4.6.1'
+        cards.flowbotVersion = '-'
+        cards.version = '-'
         cards.wechatVersion = '4.1.1.7'
       }
       cards.system.loading = false
@@ -291,6 +293,7 @@ var HomePage = {
 
     '<div class="stat-card version-card">' +
     '<div class="stat-header"><span class="stat-dot" style="background:#3498db"></span><span class="stat-label">版本信息</span></div>' +
+    '<div class="version-row"><span class="version-label">FlowBot</span><span class="version-val">{{ cards.flowbotVersion }}</span></div>' +
     '<div class="version-row"><span class="version-label">WeFlow</span><span class="version-val">{{ cards.version }}</span></div>' +
     '<div class="version-row"><span class="version-label">微信</span><span class="version-val">{{ cards.wechatVersion }}</span></div>' +
     '</div>' +
@@ -703,7 +706,7 @@ var SettingsPage = {
 var AboutPage = {
   setup: function () {
     var info = reactive({
-      version: '-', protocol: 'OneBot v11.0',
+      flowbotVersion: '-', version: '-', protocol: 'OneBot v11.0',
       node: '-', uptime: '-', memory: '-', disk: '-',
       cpuModel: '-', wechatVersion: '-'
     })
@@ -712,7 +715,8 @@ var AboutPage = {
       var s = await api('/api/system')
       if (!s.error && s.system) {
         var sys = s.system
-        info.version = sys.version || '-'
+        info.flowbotVersion = sys.version || '-'
+        info.version = sys.weflowVersion || '-'
         info.wechatVersion = sys.wechatVersion || '-'
         info.node = sys.node ? sys.node.replace('v', '') || '-' : '-'
         info.uptime = sys.containerUptime || (sys.uptime || '').replace('up ', '') || '-'
@@ -734,7 +738,7 @@ var AboutPage = {
 
     '<div class="card" style="text-align:center">' +
     '<div class="about-logo">W</div>' +
-    '<h2 style="border:none;padding:0">FlowBOT</h2>' +
+    '<h2 style="border:none;padding:0">FlowBOT | {{ info.flowbotVersion }}</h2>' +
     '<p class="text-muted">基于 WeFlow & OneBot v11 制作的聊天机器人</p>' +
     '<div class="about-info">' +
     '<div class="info-row"><span>WeFlow 版本</span><span>{{ info.version }}</span></div>' +

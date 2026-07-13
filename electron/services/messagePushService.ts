@@ -46,6 +46,7 @@ interface MessagePushPayload {
   imageBaseMd5?: string
   imageDecryptFailed?: boolean
   senderIdAlias?: string
+  emojiUrl?: string
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -836,6 +837,7 @@ class MessagePushService {
     const imageMd5 = String(message.imageMd5 || '').trim()
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
+    const emojiUrl = Number(message.localType || 0) === 47 ? String(message.emojiCdnUrl || '').trim() || undefined : undefined
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -863,7 +865,8 @@ class MessagePushService {
         imagePath,
         imageBaseMd5: imageMd5 || undefined,
         imageDecryptFailed,
-        senderIdAlias
+        senderIdAlias,
+        emojiUrl
       }
     }
 
@@ -886,7 +889,8 @@ class MessagePushService {
       imagePath,
       imageBaseMd5: imageMd5 || undefined,
       imageDecryptFailed,
-      senderIdAlias
+      senderIdAlias,
+      emojiUrl
     }
   }
 

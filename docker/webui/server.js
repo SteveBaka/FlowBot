@@ -8,6 +8,14 @@ const PORT = process.env.WEBUI_PORT || 7300
 const ONEBOT_PORT = process.env.ONEBOT_PORT || 7100
 const FLOW_PORT = process.env.FLOW_API_PORT || 5031
 const CONFIG_DIR = process.env.WEFLOW_CONFIG_DIR || '/opt/weflow/data'
+
+const CONTAINER_VERSION = (() => {
+  try {
+    return fs.readFileSync('/opt/weflow/VERSION', 'utf8').trim()
+  } catch {
+    return '0.0.0'
+  }
+})()
 const CONFIG_FILE = path.join(CONFIG_DIR, 'webui-config.json')
 
 const MIME = {
@@ -339,7 +347,7 @@ const server = http.createServer(async (req, res) => {
 
   if (p === '/api/version') {
     json(res, {
-      app: 'FlowBOT', version: '4.6.1', protocol: 'v11.0',
+      app: 'FlowBOT', version: CONTAINER_VERSION, protocol: 'v11.0',
       onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT), flow_port: Number(FLOW_PORT)
     })
     return
@@ -622,7 +630,7 @@ const server = http.createServer(async (req, res) => {
     const cpuCores = shell("nproc")
     const cpuModel = shell("cat /proc/cpuinfo | grep 'model name' | head -1 | sed 's/model name.*: //'")
     const nodeVer = shell('node --version')
-    const appVersion = process.env.APP_VERSION || '4.6.1'
+    const appVersion = process.env.APP_VERSION || CONTAINER_VERSION
     const wechatVersion = shell("/opt/wechat/wechat --version 2>/dev/null || dpkg -l wechat 2>/dev/null | awk '/^ii/{print $3}' || echo '4.1.1.7'").split('\n')[0].trim() || '4.1.1.7'
     const containerStart = shell("stat -c %Y /proc/1 2>/dev/null || echo '0'")
     const now = Math.floor(Date.now() / 1000)
@@ -635,6 +643,11 @@ const server = http.createServer(async (req, res) => {
     if (days > 0) containerUptime += days + '天'
     if (hours > 0) containerUptime += hours + 'h'
     containerUptime += mins + 'm'
+    var weflowVersion = '-'
+    try {
+      const wf = await proxyRequest(`http://127.0.0.1:${FLOW_PORT}/api/v1/app-version`)
+      if (wf.data && wf.data.version) weflowVersion = wf.data.version
+    } catch { }
     json(res, {
       ok: true,
       system: {
@@ -647,7 +660,8 @@ const server = http.createServer(async (req, res) => {
         cpuModel,
         node: nodeVer,
         version: appVersion,
-        wechatVersion
+        wechatVersion,
+        weflowVersion
       }
     })
     return

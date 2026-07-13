@@ -656,6 +656,8 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           }
         } else if (data.imagePath) {
           messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
+        } else if (data.emojiUrl) {
+          messageSegments.push({ type: 'image', data: { file: data.emojiUrl } })
         }
 
         if (isGroup && data.content) {
@@ -674,7 +676,7 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           } else {
             messageSegments.push({ type: 'text', data: { text: data.content || '' } })
           }
-        } else if (!data.imagePath) {
+        } else if (!data.imagePath && !data.emojiUrl) {
           messageSegments.push({ type: 'text', data: { text: data.content || '' } })
         }
 

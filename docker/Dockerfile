@@ -70,6 +70,9 @@ RUN chmod +x ./weflow *.so *.node 2>/dev/null; chmod +x swiftshader/*.so 2>/dev/
 # Copy WebUI Vue SPA + server (port 7300, proxies to WeFlow API)
 COPY docker/webui/ /opt/weflow-webui/
 
+# Copy container version marker
+COPY docker/VERSION /opt/weflow/VERSION
+
 # Copy startup script
 COPY docker/start.sh /opt/start.sh
 COPY docker/pinyin.py /opt/pinyin.py

@@ -622,7 +622,7 @@ class HttpService {
                 }
             }
 
-            if (pathname !== '/health' && pathname !== '/api/v1/health') {
+            if (pathname !== '/health' && pathname !== '/api/v1/health' && pathname !== '/api/v1/app-version') {
                 if (!this.verifyToken(req, url, bodyParams)) {
                     this.sendError(res, 401, 'Unauthorized: Invalid or missing access_token')
                     return
@@ -631,6 +631,15 @@ class HttpService {
 
             if (pathname === '/health' || pathname === '/api/v1/health') {
                 this.sendJson(res, { status: 'ok' })
+            } else if (pathname === '/api/v1/app-version') {
+                let appVersion = 'unknown'
+                try {
+                    const { app } = require('electron')
+                    appVersion = app.getVersion()
+                } catch {
+                    appVersion = process.env.npm_package_version || 'unknown'
+                }
+                this.sendJson(res, { version: appVersion })
             } else if (pathname === '/api/v1/push/messages') {
                 this.handleMessagePushStream(req, res, url)
             } else if (pathname === '/api/v1/messages') {
