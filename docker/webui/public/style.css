@@ -686,22 +686,32 @@ textarea {
 }
 .btn-danger:hover { opacity: 0.85; }
 .btn-secondary {
-  background: rgba(255,255,255,0.08) !important;
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-  border: 1px solid rgba(255,255,255,0.2) !important;
-  color: #000;
+  background: #FF6B9D;
+  color: #fff;
+  border: 1px solid #FF6B9D;
 }
 .btn-secondary svg { stroke: #fff; fill: none; }
 :root[data-theme="light"] .btn-secondary {
-  background: rgba(255,255,255,0.7) !important;
-  border: 1px solid rgba(0,0,0,0.1) !important;
-  color: #000;
+  background: var(--accent);
+  color: #fff;
+  border: 1px solid var(--accent);
+  box-shadow: 0 12px 24px rgba(233, 30, 140, 0.22);
 }
-:root[data-theme="light"] .btn-secondary svg { stroke: #000; }
+:root[data-theme="light"] .btn-secondary svg { stroke: #fff; }
 .btn-secondary:hover {
-  border-color: var(--accent);
-  color: var(--accent);
+  opacity: 0.85;
+}
+.btn-danger-secondary {
+  background: #FF4757;
+  color: #fff;
+  border: 1px solid #FF4757;
+}
+.btn-danger-secondary:hover {
+  opacity: 0.85;
+}
+:root[data-theme="light"] .btn-danger-secondary {
+  background: #FF4757;
+  border: 1px solid #FF4757;
 }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
 

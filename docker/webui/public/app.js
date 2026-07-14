@@ -592,6 +592,17 @@ var SettingsPage = {
       baseUrl: ''
     })
     var baseUrlError = ref(false)
+    var flowbot = reactive({
+      enabled: true,
+      prefix: '#flowbot',
+      template: 'FlowBot 状态\n版本: {version}\n平台: {platform}\n运行时长: {uptime}',
+      allowGroups: true,
+      allowPrivate: true
+    })
+    var showTplModal = ref(false)
+    var tplText = ref('')
+    var tplRestoreConfirm = ref(false)
+    var liveVars = reactive({ version: '-', platform: '-', uptime: '-', weflowVersion: '-' })
 
     async function loadConfig() {
       var d = await api('/api/v1/mgmt/config')
@@ -601,6 +612,13 @@ var SettingsPage = {
         wf.httpToken = (d.httpApiToken && d.httpApiToken !== '[encrypted]') ? d.httpApiToken : ''
         imgTransfer.mode = d.imageTransferMode || 'base64'
         imgTransfer.baseUrl = d.imageServerBaseUrl || ''
+        if (d.flowbotCommand) {
+          flowbot.enabled = d.flowbotCommand.enabled !== false
+          flowbot.prefix = d.flowbotCommand.prefix || '#flowbot'
+          flowbot.template = d.flowbotCommand.template || 'FlowBot 状态\n版本: {version}\n平台: {platform}\n运行时长: {uptime}'
+          flowbot.allowGroups = d.flowbotCommand.allowGroups !== false
+          flowbot.allowPrivate = d.flowbotCommand.allowPrivate !== false
+        }
       }
     }
 
@@ -636,7 +654,15 @@ var SettingsPage = {
           httpApiPort: Number(wf.httpPort),
           httpApiToken: wf.httpToken || undefined,
           imageTransferMode: imgTransfer.mode,
-          imageServerBaseUrl: trimmedUrl
+          imageServerBaseUrl: trimmedUrl,
+          flowbotCommand: {
+            enabled: flowbot.enabled,
+            prefix: flowbot.prefix || '#flowbot',
+            template: flowbot.template || 'FlowBot 状态\n版本: {version}\n平台: {platform}\n运行时长: {uptime}',
+            allowGroups: flowbot.allowGroups !== false,
+            allowPrivate: flowbot.allowPrivate !== false,
+            allowedSessions: []
+          }
         })
       })
       if (d.success) toast('配置已保存')
@@ -649,8 +675,60 @@ var SettingsPage = {
       else toast('重启失败: ' + (d.error || ''), 'error')
     }
 
+    async function refreshLiveVars() {
+      try {
+        var sv = await api('/api/system')
+        if (sv.system) {
+          liveVars.version = sv.system.version || '-'
+          liveVars.uptime = sv.system.containerUptime || '-'
+          liveVars.weflowVersion = sv.system.weflowVersion || '-'
+          try { liveVars.platform = sv.system.platform || (typeof process !== 'undefined' && process.platform) || 'linux' } catch { liveVars.platform = 'linux' }
+        }
+      } catch {}
+    }
+
+    async function openTplEditor() {
+      tplText.value = flowbot.template
+      tplRestoreConfirm.value = false
+      showTplModal.value = true
+      await refreshLiveVars()
+    }
+
+    function insertVar(v) {
+      var el = document.getElementById('flowbot-tpl-textarea')
+      if (!el) { tplText.value += v; return }
+      var start = el.selectionStart || tplText.value.length
+      var end = el.selectionEnd || tplText.value.length
+      var text = tplText.value
+      tplText.value = text.substring(0, start) + v + text.substring(end)
+      setTimeout(function () {
+        el.focus()
+        el.selectionStart = el.selectionStart + v.length
+        el.selectionEnd = el.selectionStart
+      }, 0)
+    }
+
+    function confirmResetTpl() {
+      tplRestoreConfirm.value = true
+    }
+
+    function resetTpl() {
+      tplText.value = 'FlowBot 状态\n版本: {version}\n平台: {platform}\n运行时长: {uptime}'
+      tplRestoreConfirm.value = false
+    }
+
+    function cancelTplEditor() {
+      showTplModal.value = false
+    }
+
+    function saveTpl() {
+      flowbot.template = tplText.value
+      showTplModal.value = false
+      toast('模板已编辑，请点击「保存配置」持久化', 'info')
+    }
+
     onMounted(loadConfig)
-    return { wf: wf, showHttpToken: showHttpToken, imgTransfer: imgTransfer, baseUrlError: baseUrlError, saveConfig: saveConfig, restart: restart }
+    return { wf: wf, showHttpToken: showHttpToken, imgTransfer: imgTransfer, baseUrlError: baseUrlError, saveConfig: saveConfig, restart: restart, flowbot: flowbot, showTplModal: showTplModal, tplText: tplText, tplRestoreConfirm: tplRestoreConfirm, liveVars: liveVars, openTplEditor: openTplEditor, refreshLiveVars: refreshLiveVars, insertVar: insertVar, confirmResetTpl: confirmResetTpl, resetTpl: resetTpl, cancelTplEditor: cancelTplEditor, saveTpl: saveTpl }
   },
   template: '<div>' +
     '<div class="page-header">' +
@@ -694,12 +772,52 @@ var SettingsPage = {
     '</div>' +
     '</div>' +
 
+    '<div class="card"><h2>状态信息命令</h2>' +
+    '<div class="form-row"><label>启用命令</label><toggle-switch v-model="flowbot.enabled" /></div>' +
+    '<div class="form-row" style="align-items:flex-start">' +
+    '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
+    '<label style="margin-bottom:0">触发命令</label>' +
+    '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">建议前缀为"#"达到最佳效果</span>' +
+    '</div>' +
+    '<input type="text" v-model="flowbot.prefix" placeholder="#flowbot">' +
+    '</div>' +
+    '<div class="form-row"><label>允许群聊</label><toggle-switch v-model="flowbot.allowGroups" /></div>' +
+    '<div class="form-row"><label>允许私聊</label><toggle-switch v-model="flowbot.allowPrivate" /></div>' +
+    '<div class="form-row"><label>响应模板</label><button class="btn btn-secondary btn-sm" @click="openTplEditor">编辑模板</button></div>' +
+    '</div>' +
+
     '<div class="card"><h2>重启服务</h2>' +
     '<div class="restart-module">' +
     '<button class="btn btn-restart-weflow" @click="restart(\'weflow\')">重启 WeFlow</button>' +
     '<button class="btn btn-restart-wechat" @click="restart(\'wechat\')">重启 微信</button>' +
+    '</div></div>' +
+
+    '<transition name="modal-zoom">' +
+    '<div v-if="showTplModal" class="modal-overlay" @click.self="cancelTplEditor">' +
+    '<div class="modal">' +
+    '<h3>编辑响应模板</h3>' +
+    '<p class="text-muted" style="margin:0 0 12px;font-size:13px">点击变量按钮插入到文本框光标位置：</p>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">' +
+    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{version}\')">FlowBot版本：{version}</button>' +
+    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{platform}\')">系统平台：{platform}</button>' +
+    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{uptime}\')">运行时长：{uptime}</button>' +
+    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{weflowVersion}\')">WeFlow版本：{weflowVersion}</button>' +
     '</div>' +
+    '<textarea id="flowbot-tpl-textarea" v-model="tplText" style="width:100%;min-height:160px;font-family:monospace;font-size:13px"></textarea>' +
+    '<div v-if="tplRestoreConfirm" style="margin-top:8px;padding:10px;background:var(--accent-glow);border-radius:8px;display:flex;align-items:center;justify-content:space-between">' +
+    '<span style="font-size:13px;color:var(--text)">确认恢复为默认模板？当前编辑内容将丢失。</span>' +
+    '<div style="display:flex;gap:6px">' +
+    '<button class="btn btn-danger-secondary btn-sm" @click="tplRestoreConfirm=false">取消</button>' +
+    '<button class="btn btn-primary btn-sm" style="background:var(--danger)" @click="resetTpl">确认恢复</button>' +
+    '</div></div>' +
+    '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
+    '<button v-if="!tplRestoreConfirm" class="btn btn-danger-secondary btn-sm" @click="confirmResetTpl">恢复默认</button>' +
+    '<div style="flex:1"></div>' +
+    '<button class="btn btn-danger-secondary" @click="cancelTplEditor">取消</button>' +
+    '<button class="btn btn-primary" @click="saveTpl">保存模板</button>' +
     '</div>' +
+    '</div></div></transition>' +
+
     '</div>'
 }
 

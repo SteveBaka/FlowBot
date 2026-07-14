@@ -3,7 +3,8 @@ import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
 import { imageDecryptService } from './imageDecryptService'
-import { broadcastToAllBots, cacheGroup, cachePrivate, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
+import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
+import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
 import { promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
@@ -550,6 +551,33 @@ class MessagePushService {
       if (!payload) continue
       if (!this.shouldPushPayload(payload)) continue
 
+      const cmd = this.matchCommand(payload.content)
+      if (cmd) {
+        const isGroup = payload.sessionType === 'group'
+        if ((isGroup && cmd.allowGroups) || (!isGroup && cmd.allowPrivate)) {
+          if (cmd.allowedSessions.length === 0 || cmd.allowedSessions.includes(payload.sessionId)) {
+            try {
+              const rendered = await this.renderStatusMessage(cmd.template)
+              const sender = getEnhancedMessageSender()
+              let contactName: string | undefined
+              if (isGroup) {
+                const numericId = numericIdOf(payload.sessionId)
+                contactName = resolveGroupSearchName(numericId) || getCachedGroupName(payload.sessionId) || payload.groupName || session.displayName
+              } else {
+                const numericId = numericIdOf(payload.sessionId)
+                contactName = resolvePrivateSearchName(numericId) || payload.sourceName || session.displayName
+              }
+              await sender.sendMessage(rendered, contactName || undefined)
+            } catch (e) {
+              console.warn(`[MessagePushService] Command reply failed: ${payload.sessionId}`, e)
+            }
+            this.rememberMessageKey(messageKey)
+            this.bumpSessionBaseline(session.username, message)
+            continue
+          }
+        }
+      }
+
       if (!payload.imageDecryptFailed) {
         httpService.broadcastMessagePush(payload)
         broadcastToAllBots('messages:batch', payload, selfInfo.wxid, selfInfo.displayName)
@@ -837,7 +865,7 @@ class MessagePushService {
     const imageMd5 = String(message.imageMd5 || '').trim()
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
-    const emojiUrl = Number(message.localType || 0) === 47 ? String(message.emojiCdnUrl || '').trim() || undefined : undefined
+    const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1496,10 +1524,52 @@ class MessagePushService {
       case 48:
         return '[位置]'
       case 49:
+        if (message.emojiCdnUrl) return '[表情]'
         return cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
       default:
         return cleanOfficialPrefix(normalizeTextContent(message.parsedContent || message.rawContent) || null)
     }
+  }
+
+  private matchCommand(content: string) {
+    const cfg = this.configService.get('flowbotCommand') as any
+    if (!cfg || !cfg.enabled || !cfg.prefix) return null
+    const text = String(content || '').trim()
+    if (text === cfg.prefix) return cfg
+    if (!text.startsWith(cfg.prefix)) return null
+    const nextChar = text.charAt(cfg.prefix.length)
+    if (nextChar !== '' && !/\s/.test(nextChar)) return null
+    return cfg
+  }
+
+  private async renderStatusMessage(template: string): Promise<string> {
+    let version = 'unknown'
+    try {
+      const buf = await fs.readFile('/opt/weflow/VERSION', 'utf8')
+      version = String(buf).trim() || version
+    } catch { }
+
+    let uptimeStr = '-'
+    try {
+      const uptimeSec = Math.floor(process.uptime())
+      const days = Math.floor(uptimeSec / 86400)
+      const hours = Math.floor((uptimeSec % 86400) / 3600)
+      const mins = Math.floor((uptimeSec % 3600) / 60)
+      if (days > 0) uptimeStr = `${days}天 ${hours}h ${mins}m`
+      else if (hours > 0) uptimeStr = `${hours}h ${mins}m`
+      else uptimeStr = `${mins}m`
+    } catch { }
+
+    const platform = process.platform
+    const nodeVersion = process.version
+    const electronVersion = process.versions?.electron || '-'
+
+    return String(template)
+      .replace(/\{version\}/g, version)
+      .replace(/\{platform\}/g, platform)
+      .replace(/\{uptime\}/g, uptimeStr)
+      .replace(/\{nodeVersion\}/g, nodeVersion)
+      .replace(/\{electronVersion\}/g, electronVersion)
   }
 
   private async resolveGroupSourceName(chatroomId: string, message: Message, session: ChatSession): Promise<string> {

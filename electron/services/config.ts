@@ -163,6 +163,14 @@ interface ConfigSchema {
   oneBotBatchSize: number
   imageTransferMode: 'base64' | 'url'
   imageServerBaseUrl: string
+  flowbotCommand: {
+    enabled: boolean
+    prefix: string
+    template: string
+    allowGroups: boolean
+    allowPrivate: boolean
+    allowedSessions: string[]
+  }
 }
 
 // 需要 safeStorage 加密的字段（普通模式）
@@ -309,6 +317,14 @@ export class ConfigService {
       oneBotBatchSize: 50,
       imageTransferMode: 'base64',
       imageServerBaseUrl: '',
+      flowbotCommand: {
+        enabled: true,
+        prefix: '#flowbot',
+        template: 'FlowBot 状态\n版本: {version}\n平台: {platform}\n运行时长: {uptime}',
+        allowGroups: true,
+        allowPrivate: true,
+        allowedSessions: []
+      }
     }
 
     const storeOptions: any = {

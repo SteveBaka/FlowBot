@@ -34,7 +34,7 @@ const privateByWxid = new Map<string, PrivateInfo>()
 const privateByNumeric = new Map<number, PrivateInfo>()
 const privateByName = new Map<string, string>()
 
-function numericIdOf(wxid: string): number {
+export function numericIdOf(wxid: string): number {
   let hash = 5381
   for (let i = 0; i < wxid.length; i++) {
     hash = ((hash << 5) + hash) + wxid.charCodeAt(i)
@@ -43,7 +43,7 @@ function numericIdOf(wxid: string): number {
   return Math.abs(hash)
 }
 
-function wxidToNumeric(wxid: string): number {
+export function wxidToNumeric(wxid: string): number {
   return numericIdOf(wxid)
 }
 

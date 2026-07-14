@@ -3095,7 +3095,8 @@ class HttpService {
                 'notificationEnabled', 'notificationFilterMode',
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
                 'logEnabled', 'bots',
-                'imageTransferMode', 'imageServerBaseUrl'
+                'imageTransferMode', 'imageServerBaseUrl',
+                'flowbotCommand'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {

@@ -5138,6 +5138,11 @@ class ChatService {
         // 引用消息（appmsg type=57）的 quotedContent/quotedSender
         if (type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
         if (type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        if (type49Info.xmlType === '8') {
+          const emojiInfo = this.parseEmojiInfo(content)
+          if (emojiInfo.cdnUrl) emojiCdnUrl = emojiInfo.cdnUrl
+          if (emojiInfo.md5) emojiMd5 = emojiInfo.md5
+        }
       } else if (localType === 244813135921 || (content && content.includes('<type>57</type>'))) {
         const quoteInfo = this.parseQuoteMessage(content)
         quotedContent = quoteInfo.content

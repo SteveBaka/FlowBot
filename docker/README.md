@@ -34,14 +34,14 @@ docker compose up -d
 或手动 docker run：
 
 ```bash
-docker run -d --name FlowBOT \
+docker run -d --name flowbot \
   --cap-add=SYS_PTRACE \
   --restart=always \
   -e TZ=Asia/Shanghai \
   -e VNC_PASSWORD=your_password_here \
-  -v /path/to/FlowBOT/data:/opt/weflow/data \
-  -v /path/to/FlowBOT/config:/root/.config \
-  -v /path/to/FlowBOT/xwechat_files:/root/xwechat_files \
+  -v /your_folder_here/FlowBOT/data:/opt/weflow/data \
+  -v /your_folder_here/FlowBOT/config:/root/.config \
+  -v /your_folder_here/FlowBOT/xwechat_files:/root/xwechat_files \
   -p 7100:7100 \
   -p 7300:7300 \
   -p 7600:7600 \

@@ -32,12 +32,13 @@ jobs:
     outputs:
       new_version: ${{ steps.version.outputs.new_version }}
       should_release: ${{ steps.version.outputs.should_release }}
+      weflow_version: ${{ steps.version.outputs.weflow_version }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
-      - name: Read version from docker/VERSION
+      - name: Read version
         id: version
         shell: bash
         run: |
@@ -56,6 +57,9 @@ jobs:
             echo "new_version=$CURRENT" >> $GITHUB_OUTPUT
           fi
           echo "should_release=true" >> $GITHUB_OUTPUT
+
+          WEFLOW_VERSION=$(node -e "console.log(require('./package.json').version)")
+          echo "weflow_version=${WEFLOW_VERSION}" >> $GITHUB_OUTPUT
 
   build-electron:
     name: Build Electron App (Linux)
@@ -173,6 +177,7 @@ jobs:
           config-name: release-drafter.yml
           tag: v${{ needs.bump-version.outputs.new_version }}
           version: ${{ needs.bump-version.outputs.new_version }}
+          publish: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -182,3 +187,21 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release upload "${{ steps.release_drafter.outputs.tag_name }}" flowbot-docker.tar.gz --clobber
+
+      - name: Update release body with variables
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          TAG="${{ steps.release_drafter.outputs.tag_name }}"
+          WEFLOW_VERSION=${{ needs.bump-version.outputs.weflow_version }}
+          IMAGE_REF="${{ steps.image-name.outputs.full }}:v${{ needs.bump-version.outputs.new_version }}"
+
+          gh release view "$TAG" --json body --jq '.body' \
+            | sed "s/\$WEFLOW_VERSION/${WEFLOW_VERSION}/g" \
+            | sed "s|\$DATE|${{ steps.date.outputs.date }}|g" \
+            | sed "s|\$COMMIT|${{ github.sha }}|g" \
+            | sed "s|\$IMAGE_REF|${IMAGE_REF}|g" \
+            > /tmp/release_body.md
+
+          gh release edit "$TAG" --notes-file /tmp/release_body.md
