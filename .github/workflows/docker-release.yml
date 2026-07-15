@@ -143,6 +143,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
@@ -152,6 +158,8 @@ jobs:
           tags: |
             ${{ steps.image-name.outputs.full }}:latest
             ${{ steps.image-name.outputs.full }}:v${{ needs.bump-version.outputs.new_version }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/flowbot:latest
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/flowbot:v${{ needs.bump-version.outputs.new_version }}
           labels: |
             org.opencontainers.image.title=FlowBOT
             org.opencontainers.image.description=WeChat Linux container with OneBot v11 bridge

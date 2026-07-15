@@ -1564,12 +1564,19 @@ class MessagePushService {
     const nodeVersion = process.version
     const electronVersion = process.versions?.electron || '-'
 
+    let weflowVersion = 'unknown'
+    try {
+      const { app } = require('electron')
+      weflowVersion = app.getVersion()
+    } catch { }
+
     return String(template)
       .replace(/\{version\}/g, version)
       .replace(/\{platform\}/g, platform)
       .replace(/\{uptime\}/g, uptimeStr)
       .replace(/\{nodeVersion\}/g, nodeVersion)
       .replace(/\{electronVersion\}/g, electronVersion)
+      .replace(/\{weflowVersion\}/g, weflowVersion)
   }
 
   private async resolveGroupSourceName(chatroomId: string, message: Message, session: ChatSession): Promise<string> {
