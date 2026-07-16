@@ -5120,8 +5120,8 @@ class ChatService {
         if (lngStr) { const v = parseFloat(lngStr); if (Number.isFinite(v)) locationLng = v }
         locationLabel = this.extractXmlAttribute(content, 'location', 'label') || this.extractXmlValue(content, 'label') || undefined
         locationPoiname = this.extractXmlAttribute(content, 'location', 'poiname') || this.extractXmlValue(content, 'poiname') || undefined
-      } else if ((localType === 49 || localType === 8589934592049) && content) {
-        // Type 49 消息（链接、文件、小程序、转账等），8589934592049 也是转账类型
+      } else if (((Number(localType) & 0xFF) === 49) && content) {
+        // Type 49 消息（链接、文件、小程序、转账、表情等），兼容高位 flag 变体（如 34359738417）
         const type49Info = this.parseType49Message(content)
         xmlType = type49Info.xmlType
         linkTitle = type49Info.linkTitle
@@ -5508,8 +5508,9 @@ class ChatService {
       }
 
       // 提取 md5
+      let md5: string | undefined
       const md5Match = /md5\s*=\s*['"]([a-fA-F0-9]+)['"]/i.exec(content) || /md5\s*=\s*([a-fA-F0-9]+)/i.exec(content)
-      const md5 = md5Match ? md5Match[1] : undefined
+      md5 = md5Match ? md5Match[1] : undefined
 
       // 提取 encrypturl
       let encryptUrl: string | undefined
@@ -5526,6 +5527,58 @@ class ChatService {
       // 提取 aeskey
       const aesKeyMatch = /aeskey\s*=\s*['"]([a-zA-Z0-9]+)['"]/i.exec(content) || /aeskey\s*=\s*([a-zA-Z0-9]+)/i.exec(content)
       const aesKey = aesKeyMatch ? aesKeyMatch[1] : undefined
+
+      if (!cdnUrl) {
+        const emojiinfoMatch = /<emojiinfo>([A-Za-z0-9+/=]+)<\/emojiinfo>/i.exec(content)
+        if (emojiinfoMatch) {
+          try {
+            const raw = Buffer.from(emojiinfoMatch[1], 'base64')
+            let pos = 0
+            const len = raw.length
+            while (pos < len) {
+              if (raw[pos] === 0x0a) {
+                const fieldLen = raw[pos + 1]
+                if (fieldLen === undefined || pos + 2 + fieldLen > len) break
+                if (fieldLen > 50 && pos + 2 < len && raw[pos + 2] === 0x68 && raw[pos + 3] === 0x74) {
+                  const urlBytes = raw.subarray(pos + 2, pos + 2 + fieldLen)
+                  const url = Buffer.from(urlBytes).toString('utf-8').replace(/[\x00-\x1f].*$/, '').trim()
+                  if ((url.includes('tc.qq.com') || url.includes('qpic.cn')) && url.includes('http')) {
+                    cdnUrl = url
+                    break
+                  }
+                }
+                pos += 2 + fieldLen
+              } else if (raw[pos] === 0x12) {
+                let fieldLen = raw[pos + 1] & 0x7f
+                let consumed = 2
+                if (raw[pos + 1] & 0x80) {
+                  fieldLen |= (raw[pos + 2] & 0x7f) << 7
+                  consumed = 3
+                  if (raw[pos + 2] & 0x80) {
+                    fieldLen |= (raw[pos + 3] & 0x7f) << 14
+                    consumed = 4
+                  }
+                }
+                if (fieldLen > 50 && pos + consumed < len && raw[pos + consumed] === 0x68 && raw[pos + consumed + 1] === 0x74) {
+                  const urlBytes = raw.subarray(pos + consumed, pos + consumed + fieldLen)
+                  const url = Buffer.from(urlBytes).toString('utf-8').replace(/[\x00-\x1f].*$/, '').trim()
+                  if ((url.includes('tc.qq.com') || url.includes('qpic.cn')) && url.includes('http')) {
+                    cdnUrl = url
+                    break
+                  }
+                }
+                pos += consumed + fieldLen
+              } else {
+                pos++
+              }
+            }
+            if (!md5 && cdnUrl) {
+              const md5M = /m=([0-9a-f]{32})/i.exec(cdnUrl)
+              if (md5M) md5 = md5M[1]
+            }
+          } catch (e) {}
+        }
+      }
 
       return { cdnUrl, md5, thumbUrl, encryptUrl, aesKey }
     } catch (e) {

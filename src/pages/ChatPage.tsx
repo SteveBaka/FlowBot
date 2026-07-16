@@ -9308,13 +9308,31 @@ function MessageBubble({
   aiMessageInsightContextCount?: number;
 }) {
   const isSystem = isSystemMessage(message.localType)
-  const isEmoji = message.localType === 47
+  const localTypeNum = Number(message.localType || 0)
+  const isType49 = (localTypeNum & 0xFF) === 49
+  // 兼容 type-49 高位变体（如 34359738417）与 xmlType 字段缺失场景：
+  // 优先 message.xmlType，其次从 raw XML 的 <appmsg><type> 解析。
+  const resolvedXmlType = (() => {
+    const direct = String((message as any).xmlType || '').trim()
+    if (direct) return direct
+    const raw = String(message.rawContent || message.content || message.parsedContent || '')
+    const appmsgInner = /<appmsg[\s\S]*?>([\s\S]*?)<\/appmsg>/i.exec(raw)?.[1] || raw
+    const cleaned = appmsgInner
+      .replace(/<refermsg[\s\S]*?<\/refermsg>/gi, '')
+      .replace(/<patMsg[\s\S]*?<\/patMsg>/gi, '')
+    return /<type>\s*(\d+)\s*<\/type>/i.exec(cleaned)?.[1] || ''
+  })()
+  const hasEmojiAsset = Boolean(message.emojiCdnUrl || message.emojiLocalPath)
+  const isEmoji =
+    localTypeNum === 47 ||
+    (isType49 && resolvedXmlType === '8') ||
+    // 后端已解析出表情资源时，直接按表情渲染，避免 appmsg 通用路径回落成 [消息]
+    (hasEmojiAsset && (isType49 || resolvedXmlType === '8' || /<emojiinfo>/i.test(String(message.rawContent || message.content || ''))))
   const isImage = message.localType === 3
   const isVideo = message.localType === 43
   const isVoice = message.localType === 34
   const isCard = message.localType === 42
   const isCall = message.localType === 50
-  const isType49 = message.localType === 49
   const isSent = message.isSend === 1
   const [senderAvatarUrl, setSenderAvatarUrl] = useState<string | undefined>(undefined)
   const [senderName, setSenderName] = useState<string | undefined>(undefined)
@@ -11099,6 +11117,53 @@ function MessageBubble({
       )
     }
 
+    // 表情包消息（优先于通用 appmsg 卡片，避免 type=8 回落成 [消息]）
+    if (isEmoji) {
+      if ((!message.emojiCdnUrl && !message.emojiLocalPath) || emojiError) {
+        return (
+          <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+            <div className="emoji-unavailable">
+              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M8 15s1.5 2 4 2 4-2 4-2" />
+                <line x1="9" y1="9" x2="9.01" y2="9" />
+                <line x1="15" y1="9" x2="15.01" y2="9" />
+              </svg>
+              <span>表情包未缓存</span>
+            </div>
+          </div>
+        )
+      }
+
+      if (emojiLoading || !emojiLocalPath) {
+        return (
+          <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+            <div className="emoji-loading">
+              <Loader2 size={20} className="spin" />
+            </div>
+          </div>
+        )
+      }
+
+      return (
+        <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+          <img
+            src={emojiLocalPath}
+            alt="表情"
+            className="emoji-image"
+            onLoad={() => {
+              setEmojiError(false)
+              stabilizeEmojiScrollAfterResize()
+            }}
+            onError={() => {
+              emojiResizeBaselineRef.current = null
+              setEmojiError(true)
+            }}
+          />
+        </div>
+      )
+    }
+
     // 链接消息 (AppMessage)
     const appMsgRichPreview = (() => {
       const rawXml = appMsgRawXml
@@ -11106,6 +11171,8 @@ function MessageBubble({
       const q = queryAppMsgText
 
       const xmlType = message.xmlType || q('appmsg > type') || q('type')
+      // type=8 的 appmsg 表情已在上方 isEmoji 分支处理
+      if (xmlType === '8') return null
 
       // type 62: 拍一拍（按普通文本渲染，支持 [烟花] 这类 emoji 占位符）
       if (xmlType === '62') {
@@ -11509,6 +11576,44 @@ function MessageBubble({
       const desc = q('des')
       const url = q('url')
       const appMsgType = message.xmlType || q('appmsg > type') || q('type')
+      // type=8 表情：不走链接兜底，避免显示 [消息]
+      if (appMsgType === '8' || resolvedXmlType === '8' || hasEmojiAsset) {
+        if ((!message.emojiCdnUrl && !message.emojiLocalPath) || emojiError) {
+          return (
+            <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+              <div className="emoji-unavailable">
+                <span>表情包未缓存</span>
+              </div>
+            </div>
+          )
+        }
+        if (emojiLoading || !emojiLocalPath) {
+          return (
+            <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+              <div className="emoji-loading">
+                <Loader2 size={20} className="spin" />
+              </div>
+            </div>
+          )
+        }
+        return (
+          <div className="emoji-message-wrapper" ref={emojiContainerRef}>
+            <img
+              src={emojiLocalPath}
+              alt="表情"
+              className="emoji-image"
+              onLoad={() => {
+                setEmojiError(false)
+                stabilizeEmojiScrollAfterResize()
+              }}
+              onError={() => {
+                emojiResizeBaselineRef.current = null
+                setEmojiError(true)
+              }}
+            />
+          </div>
+        )
+      }
       const textAnnouncement = q('textannouncement')
       const parsedDoc: Document | null = appMsgDoc
 
@@ -11780,57 +11885,6 @@ function MessageBubble({
           </div>
         )
       }
-    }
-
-    // 表情包消息
-    if (isEmoji) {
-      // ... (keep existing emoji logic)
-      // 没有 cdnUrl 或加载失败，显示占位符
-      if ((!message.emojiCdnUrl && !message.emojiLocalPath) || emojiError) {
-        return (
-          <div className="emoji-message-wrapper" ref={emojiContainerRef}>
-            <div className="emoji-unavailable">
-              <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M8 15s1.5 2 4 2 4-2 4-2" />
-                <line x1="9" y1="9" x2="9.01" y2="9" />
-                <line x1="15" y1="9" x2="15.01" y2="9" />
-              </svg>
-              <span>表情包未缓存</span>
-            </div>
-          </div>
-        )
-      }
-
-      // 显示加载中
-      if (emojiLoading || !emojiLocalPath) {
-        return (
-          <div className="emoji-message-wrapper" ref={emojiContainerRef}>
-            <div className="emoji-loading">
-              <Loader2 size={20} className="spin" />
-            </div>
-          </div>
-        )
-      }
-
-      // 显示表情图片
-      return (
-        <div className="emoji-message-wrapper" ref={emojiContainerRef}>
-          <img
-            src={emojiLocalPath}
-            alt="表情"
-            className="emoji-image"
-            onLoad={() => {
-              setEmojiError(false)
-              stabilizeEmojiScrollAfterResize()
-            }}
-            onError={() => {
-              emojiResizeBaselineRef.current = null
-              setEmojiError(true)
-            }}
-          />
-        </div>
-      )
     }
 
     // 解析引用消息（Links / App Messages）

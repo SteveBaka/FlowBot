@@ -1508,22 +1508,23 @@ class MessagePushService {
       if (!value) return value
       return value.replace(/^\s*\[视频号\]\s*/u, '').trim() || value
     }
-    switch (Number(message.localType || 0)) {
-      case 1:
+    const lt = Number(message.localType || 0)
+    switch (true) {
+      case lt === 1:
         return cleanOfficialPrefix(normalizeTextContent(message.parsedContent || message.rawContent))
-      case 3:
+      case lt === 3:
         return '[图片]'
-      case 34:
+      case lt === 34:
         return '[语音]'
-      case 43:
+      case lt === 43:
         return '[视频]'
-      case 47:
+      case lt === 47:
         return '[表情]'
-      case 42:
+      case lt === 42:
         return cleanOfficialPrefix(message.cardNickname || '[名片]')
-      case 48:
+      case lt === 48:
         return '[位置]'
-      case 49:
+      case (lt & 0xFF) === 49:
         if (message.emojiCdnUrl) return '[表情]'
         return cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
       default:
