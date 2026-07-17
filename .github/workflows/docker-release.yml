@@ -117,7 +117,7 @@ jobs:
       - name: Check out git repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Download linux-unpacked artifact
         uses: actions/download-artifact@v4
@@ -205,11 +205,32 @@ jobs:
           WEFLOW_VERSION=${{ needs.bump-version.outputs.weflow_version }}
           IMAGE_REF="${{ steps.image-name.outputs.full }}:v${{ needs.bump-version.outputs.new_version }}"
 
+          # Generate changelog from commits since last tag
+          PREV_TAG=$(gh release list --limit 2 --json tagName --jq '.[1].tagName // ""' 2>/dev/null || true)
+          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
+            git log "$PREV_TAG..HEAD" --oneline --no-merges --format="- %s" > /tmp/changelog.md
+          else
+            echo "首次发布" > /tmp/changelog.md
+          fi
+
+          # Fetch and patch release body
           gh release view "$TAG" --json body --jq '.body' \
             | sed "s/\$WEFLOW_VERSION/${WEFLOW_VERSION}/g" \
             | sed "s|\$DATE|${{ steps.date.outputs.date }}|g" \
             | sed "s|\$COMMIT|${{ github.sha }}|g" \
             | sed "s|\$IMAGE_REF|${IMAGE_REF}|g" \
             > /tmp/release_body.md
+
+          # Replace release-drafter's "No changes" with actual commit changelog
+          python3 << 'PYEOF'
+import re
+with open('/tmp/release_body.md') as f:
+    body = f.read()
+with open('/tmp/changelog.md') as f:
+    changelog = f.read().strip()
+body = re.sub(r'No changes', changelog, body)
+with open('/tmp/release_body.md', 'w') as f:
+    f.write(body)
+PYEOF
 
           gh release edit "$TAG" --notes-file /tmp/release_body.md
