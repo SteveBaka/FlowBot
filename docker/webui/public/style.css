@@ -367,6 +367,8 @@ body {
   border-color: rgba(255, 107, 157, 0.2);
   color: var(--text);
 }
+.nav-btn.active,
+.nav-btn.router-link-active,
 .nav-btn.router-link-exact-active {
   color: var(--accent);
   background: var(--accent-glow);
@@ -416,6 +418,8 @@ body {
   color: var(--text);
   border-color: var(--border);
 }
+.nav-btn-sm.active,
+.nav-btn-sm.router-link-active,
 .nav-btn-sm.router-link-exact-active {
   color: var(--accent);
   background: var(--accent-glow);
@@ -1325,3 +1329,122 @@ textarea {
 :root[data-theme="light"] .btn-restart-weflow:hover { background: #1f6da0; }
 :root[data-theme="light"] .btn-restart-wechat { background: #1e8449; }
 :root[data-theme="light"] .btn-restart-wechat:hover { background: #196f3d; }
+
+/* ═══ 消息推送过滤页面（FilterPage）═══ */
+.filter-search-input {
+  flex: 1;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+}
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.select-all-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 14px;
+  margin-top: 12px;
+  background: transparent;
+}
+.select-all-bar .spacer { flex: 1; }
+.select-all-bar .checkbox-label,
+.select-all-bar .selected-count {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+}
+.selected-count {
+  font-size: 0.9em;
+  opacity: 0.7;
+}
+.filter-loading {
+  padding: 24px;
+  text-align: center;
+  opacity: 0.6;
+}
+.filter-empty {
+  padding: 24px;
+  text-align: center;
+  opacity: 0.6;
+}
+.session-list {
+  max-height: 58vh;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 6px;
+}
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  margin-bottom: 6px;
+  border: 1px solid #E91D8C;
+  border-radius: 12px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.session-row:last-child { margin-bottom: 0; }
+.session-row:hover { background: rgba(128, 128, 128, 0.1); }
+/* 选中态：保留 #E91D8C 圆角边框 + 主题色背景 */
+.session-row.selected {
+  background: var(--accent-glow);
+  color: var(--accent);
+}
+.session-row input[type="checkbox"] {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
+.session-info {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+.session-name {
+  display: block;
+  font-weight: 500;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-id {
+  display: block;
+  font-size: 0.8em;
+  opacity: 0.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-type {
+  flex-shrink: 0;
+  font-size: 0.75em;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #E91D8C;
+  white-space: nowrap;
+}
+/* 群聊/私聊/公众号：不同背景色做区分，统一 #E91D8C 描边 */
+.session-type.group { background: #2e7d32; color: #fff; }
+.session-type.private { background: #7b1fa2; color: #fff; }
+.session-type.official { background: #616161; color: #fff; }
+.session-time {
+  flex-shrink: 0;
+  font-size: 0.78em;
+  opacity: 0.6;
+  white-space: nowrap;
+}
+:root[data-theme="light"] .session-type.group { background: #a5d6a7; color: #1b5e20; }
+:root[data-theme="light"] .session-type.private { background: #ce93d8; color: #4a148c; }
+:root[data-theme="light"] .session-type.official { background: #e0e0e0; color: #424242; }

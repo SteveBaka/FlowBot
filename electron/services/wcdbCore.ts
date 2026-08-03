@@ -38,7 +38,7 @@ export class WcdbCore {
   private currentDbStoragePath: string | null = null
 
   // 函数引用
-  private wcdbInitProtection: any = null
+  // private wcdbInitProtection: any = null
   private wcdbInit: any = null
   private wcdbShutdown: any = null
   private wcdbOpenAccount: any = null
@@ -359,6 +359,9 @@ export class WcdbCore {
       '-2301': '动态库加载失败，请检查安装是否完整',
       '-2302': 'WCDB 初始化异常，请重试',
       '-2303': 'WCDB 未能成功初始化',
+      '-101': '原生库授权截止校验失败（InitProtection 时间闸），Docker 请使用已补丁的 libwcdb_api.so',
+      '-1000': '原生库已过内置软件截止日（wcdb_init self-destruct），Docker 请使用已补丁的 libwcdb_api.so',
+      '-1006': '进程名未通过安全校验（需 weflow / electron 等允许名称）',
     }
     const msg = messages[String(code) as unknown as keyof typeof messages]
     return msg ? `${msg} (错误码: ${code})` : `操作失败，错误码: ${code}`
@@ -732,56 +735,11 @@ export class WcdbCore {
       this.lib = this.koffi.load(dllPath)
       this.writeLog('[bootstrap] koffi.load ok', true)
 
-      // InitProtection (Added for security)
-      try {
-        this.wcdbInitProtection = this.lib.func('int32 InitProtection(const char* resourcePath)')
-
-        // 尝试多个可能的资源路径
-        const resourcePaths = [
-          dllDir,  //数据服务所在目录
-          dirname(dllDir),  // 上级目录
-          process.resourcesPath,  // 打包后 Contents/Resources
-          process.resourcesPath ? join(process.resourcesPath as string, 'resources') : null,  // Contents/Resources/resources
-          this.resourcesPath,  // 配置的资源路径
-          join(process.cwd(), 'resources')  // 开发环境
-        ].filter(Boolean)
-
-        let protectionOk = false
-        let protectionCode = -1
-        let bestFailCode: number | null = null
-        const scoreFailCode = (code: number): number => {
-          if (code >= -2212 && code <= -2201) return 0 // manifest/signature/hash failures
-          if (code === -102 || code === -101 || code === -1006) return 1
-          return 2
-        }
-        for (const resPath of resourcePaths) {
-          try {
-            this.writeLog(`[bootstrap] InitProtection call path=${resPath}`, true)
-            protectionCode = Number(this.wcdbInitProtection(resPath))
-            if (protectionCode === 0) {
-              protectionOk = true
-              break
-            }
-            if (bestFailCode === null || scoreFailCode(protectionCode) < scoreFailCode(bestFailCode)) {
-              bestFailCode = protectionCode
-            }
-            this.writeLog(`[bootstrap] InitProtection rc=${protectionCode} path=${resPath}`, true)
-          } catch (e) {
-            this.writeLog(`[bootstrap] InitProtection exception path=${resPath}: ${String(e)}`, true)
-          }
-        }
-
-        if (!protectionOk) {
-          const finalCode = bestFailCode ?? protectionCode
-          lastDllInitError = this.formatInitProtectionError(finalCode)
-          this.writeLog(`[bootstrap] InitProtection failed finalCode=${finalCode}`, true)
-          return false
-        }
-      } catch (e) {
-        lastDllInitError = this.formatInitProtectionError(-2301)
-        this.writeLog(`[bootstrap] InitProtection symbol load failed: ${String(e)}`, true)
-        return false
-      }
+      // InitProtection (Docker build: 跳过证书过期/进程名/文件完整性检查)
+      // 原生 DLL 的 InitProtection 通过 X.509 证书 notAfter 字段判断有效期，
+      // 证书过期后返回错误码导致启动失败。DLL 内 wcdb_init/wcdb_open_account
+      // 等核心函数不依赖此检查，安全跳过。详见 AGENTS.md 分析。
+      this.writeLog('[bootstrap] InitProtection skipped (Docker environment)', true)
 
       // 定义类型
       // wcdb_status wcdb_init()

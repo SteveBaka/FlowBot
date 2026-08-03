@@ -1055,10 +1055,173 @@ var LoginPage = {
     '</div></div>'
 }
 
+var FilterPage = {
+  components: { ToggleSwitch: ToggleSwitch },
+  setup: function () {
+    var pushEnabled = ref(true)
+    var mode = ref('all')
+    var list = ref([])              // 已选会话 ID（黑名单=屏蔽，白名单=放行）
+    var sessions = ref([])          // 全部会话
+    var search = ref('')
+    var loading = ref(true)
+    var saving = ref(false)
+    var showOfficial = ref(false)
+
+    function typeLabel(t) {
+      if (t === 'group') return '群聊'
+      if (t === 'channel') return '公众号'
+      if (t === 'official') return '公众号'
+      return '私聊'
+    }
+
+    function typeClass(t) {
+      if (t === 'group') return 'group'
+      if (t === 'channel' || t === 'official') return 'official'
+      return 'private'
+    }
+
+    function formatTime(ts) {
+      if (!ts) return ''
+      var d = new Date(ts * 1000)
+      function pad(n) { return n < 10 ? '0' + n : '' + n }
+      return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+        ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes())
+    }
+
+    var selectedSet = computed(function () {
+      var s = {}
+      list.value.forEach(function (id) { s[id] = true })
+      return s
+    })
+
+    var filteredSessions = computed(function () {
+      var arr = sessions.value
+      if (!showOfficial.value) {
+        arr = arr.filter(function (s) {
+          return !(s.username || '').toLowerCase().startsWith('gh_')
+        })
+      }
+      if (search.value) {
+        var kw = search.value.toLowerCase()
+        arr = arr.filter(function (s) {
+          return (s.username || '').toLowerCase().indexOf(kw) !== -1 ||
+                 (s.displayName || '').toLowerCase().indexOf(kw) !== -1
+        })
+      }
+      return arr
+    })
+
+    var allSelected = computed(function () {
+      var f = filteredSessions.value
+      if (f.length === 0) return false
+      return f.every(function (s) { return !!selectedSet.value[s.username] })
+    })
+
+    function toggleAll() {
+      var next = !allSelected.value
+      var current = list.value.slice()
+      var currentSet = {}
+      current.forEach(function (id) { currentSet[id] = true })
+      filteredSessions.value.forEach(function (s) {
+        if (next) currentSet[s.username] = true
+        else delete currentSet[s.username]
+      })
+      list.value = Object.keys(currentSet)
+    }
+
+    function toggleOne(username) {
+      var current = list.value.slice()
+      var idx = current.indexOf(username)
+      if (idx === -1) current.push(username)
+      else current.splice(idx, 1)
+      list.value = current
+    }
+
+    async function load() {
+      loading.value = true
+      var f = await api('/api/weflow/filter')
+      if (!f.error && f.filter) {
+        pushEnabled.value = f.filter.pushEnabled !== false
+        mode.value = f.filter.mode || 'all'
+        list.value = (f.filter.list || []).slice()
+      }
+      var s = await api('/api/weflow/sessions?limit=1000')
+      if (!s.error && s.sessions) {
+        sessions.value = s.sessions
+      } else {
+        toast('会话列表加载失败: ' + (s.error || '未知错误'), 'error')
+      }
+      loading.value = false
+    }
+
+    async function save() {
+      saving.value = true
+      var d = await api('/api/weflow/filter', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pushEnabled: pushEnabled.value,
+          mode: mode.value,
+          list: list.value
+        })
+      })
+      saving.value = false
+      if (!d.error && d.ok) toast('过滤设置已保存')
+      else toast('保存失败: ' + (d.error || '未知错误'), 'error')
+    }
+
+    onMounted(load)
+    return {
+      pushEnabled: pushEnabled, mode: mode, list: list, sessions: sessions,
+      search: search, loading: loading, saving: saving, showOfficial: showOfficial,
+      selectedSet: selectedSet, filteredSessions: filteredSessions,
+      allSelected: allSelected, toggleAll: toggleAll, toggleOne: toggleOne,
+      typeLabel: typeLabel, typeClass: typeClass, formatTime: formatTime, save: save
+    }
+  },
+  template: '<div>' +
+    '<h1 class="page-title">消息推送过滤</h1>' +
+    '<div class="card">' +
+    '<div class="form-row"><label>启用消息推送</label>' +
+    '<toggle-switch v-model="pushEnabled" /></div>' +
+    '<div class="form-row"><label>过滤模式</label>' +
+    '<select v-model="mode">' +
+    '<option value="all">推送全部消息</option>' +
+    '<option value="whitelist">仅推送选中的会话</option>' +
+    '<option value="blacklist">不推送选中的会话</option>' +
+    '</select></div>' +
+    '<div class="form-row">' +
+    '<input type="text" v-model="search" placeholder="搜索会话名称或 ID..." class="filter-search-input" />' +
+    '</div>' +
+    '<div class="select-all-bar">' +
+    '<label class="checkbox-label"><input type="checkbox" :checked="allSelected" @change="toggleAll" /> 全选</label>' +
+    '<label class="checkbox-label"><input type="checkbox" v-model="showOfficial" /> 显示公众号</label>' +
+    '<span class="selected-count">已选择 {{ list.length }} 个会话</span>' +
+    '<span class="spacer"></span>' +
+    '<button class="btn btn-primary" @click="save" :disabled="saving">{{ saving ? \'保存中...\' : \'保存设置\' }}</button>' +
+    '</div>' +
+    '<div v-if="loading" class="filter-loading">加载中...</div>' +
+    '<div v-else class="session-list">' +
+    '<div v-for="s in filteredSessions" :key="s.username" class="session-row" ' +
+    ':class="{ selected: !!selectedSet[s.username] }" @click="toggleOne(s.username)">' +
+    '<input type="checkbox" :checked="!!selectedSet[s.username]" @click.stop="toggleOne(s.username)" />' +
+    '<div class="session-info">' +
+    '<span class="session-name">{{ s.displayName || s.username }}</span>' +
+    '<span class="session-id">{{ s.username }}</span>' +
+    '</div>' +
+    '<span class="session-type" :class="typeClass(s.sessionType || s.type)">{{ typeLabel(s.sessionType || s.type) }}</span>' +
+    '<span class="session-time">{{ formatTime(s.lastTimestamp) }}</span>' +
+    '</div>' +
+    '<div v-if="filteredSessions.length === 0" class="filter-empty">没有匹配的会话</div>' +
+    '</div>' +
+    '</div></div>'
+}
+
 var routes = [
   { path: '/', component: HomePage, meta: { title: '首页' } },
   { path: '/bot', component: BotPage, meta: { title: 'Bot 配置' } },
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
+  { path: '/filter', component: FilterPage, meta: { title: '消息过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
   { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } },
@@ -1085,6 +1248,7 @@ var App = {
       { path: '/', label: '首页', icon: '<svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>' },
       { path: '/bot', label: 'Bot 配置', icon: '<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>' },
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
+      { path: '/filter', label: '消息过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
@@ -1176,10 +1340,11 @@ var App = {
     '<div class="sidebar-module module-nav">' +
     '<nav class="nav-main">' +
     '<router-link v-for="item in navItems" :key="item.path" :to="item.path" ' +
-    'class="nav-btn" @click="onNavClick">' +
+    'custom v-slot="{ href, navigate, isActive }">' +
+    '<a :href="href" :class="[\'nav-btn\', { active: isActive }]" @click="navigate; onNavClick()">' +
     '<span class="nav-icon" v-html="item.icon"></span>' +
     '<span class="nav-label">{{ item.label }}</span>' +
-    '</router-link></nav>' +
+    '</a></router-link></nav>' +
     '</div>' +
 
     '<div class="sidebar-module module-bottom" style="margin-top:auto;padding:14px">' +

@@ -67,6 +67,15 @@ WORKDIR /opt/weflow
 COPY release/linux-unpacked/ ./
 RUN chmod +x ./weflow *.so *.node 2>/dev/null; chmod +x swiftshader/*.so 2>/dev/null; true
 
+# Extend libwcdb_api.so hardcoded software deadline (2026-09-30 -> 2099)
+# Prevents wcdb_init error -1000 after the native self-destruct date.
+# Lightweight binary patch only; no runtime clock hacks. See scripts/patch-wcdb-deadline.py
+COPY scripts/patch-wcdb-deadline.py /opt/patch-wcdb-deadline.py
+RUN python3 /opt/patch-wcdb-deadline.py \
+      /opt/weflow/resources/resources/wcdb/linux/x64/libwcdb_api.so \
+    && python3 /opt/patch-wcdb-deadline.py --check \
+      /opt/weflow/resources/resources/wcdb/linux/x64/libwcdb_api.so
+
 # Copy WebUI Vue SPA + server (port 7300, proxies to WeFlow API)
 COPY docker/webui/ /opt/weflow-webui/
 

@@ -440,6 +440,62 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
+  // 消息推送过滤配置 — 直接读写 WeFlow config 中的过滤键
+  // GET: 返回 messagePushEnabled / messagePushFilterMode / messagePushFilterList
+  // POST: 仅合并这三个键（非破坏性），其余 WeFlow 配置不变
+  if (p === '/api/weflow/filter' && req.method === 'GET') {
+    try {
+      const cfg = loadWeFlowConfig()
+      json(res, {
+        ok: true,
+        filter: {
+          pushEnabled: cfg.messagePushEnabled !== false,
+          mode: cfg.messagePushFilterMode || 'all',
+          list: Array.isArray(cfg.messagePushFilterList) ? cfg.messagePushFilterList : []
+        }
+      })
+    } catch (err) {
+      json(res, { ok: false, error: String(err) }, 500)
+    }
+    return
+  }
+
+  if (p === '/api/weflow/filter' && req.method === 'POST') {
+    try {
+      const d = await body(req)
+      const patch = {}
+      if (d && typeof d.pushEnabled === 'boolean') patch.messagePushEnabled = d.pushEnabled
+      if (d && typeof d.mode === 'string' && ['all', 'whitelist', 'blacklist'].indexOf(d.mode) !== -1) {
+        patch.messagePushFilterMode = d.mode
+      }
+      if (d && Array.isArray(d.list)) {
+        patch.messagePushFilterList = d.list
+          .map(function (s) { return String(s || '').trim() })
+          .filter(Boolean)
+      }
+      if (Object.keys(patch).length === 0) {
+        json(res, { ok: false, error: 'no valid fields' }, 400)
+        return
+      }
+      // 通过 WeFlow HTTP API 写入（store.set），保证运行中的 WeFlow 内存立即生效，
+      // 而不是只改磁盘文件（electron-store 不监听外部文件变化）
+      const token = readApiToken()
+      const result = await proxyRequest(`http://127.0.0.1:${FLOW_PORT}/api/v1/mgmt/config`, {
+        method: 'POST',
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        body: patch
+      })
+      if (result.status >= 200 && result.status < 300 && result.data && result.data.success !== false) {
+        json(res, { ok: true, updated: result.data.updated || Object.keys(patch) })
+      } else {
+        json(res, { ok: false, error: (result.data && result.data.error) || ('HTTP ' + result.status) }, result.status)
+      }
+    } catch (err) {
+      json(res, { ok: false, error: String(err) }, 502)
+    }
+    return
+  }
+
   if (p === '/api/weflow/health' && req.method === 'GET') {
     try {
       const result = await proxyRequest(`http://127.0.0.1:${FLOW_PORT}/health`)

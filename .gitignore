@@ -97,3 +97,7 @@ docs/plan-image-sharefile.md
 docs/plan-image-hybrid.md
 docs/EMOJI-XMLTYPE8-ANALYSIS.md
 docs/LINUX-SEND-HOOK-PLAN.md
+docs/WCDB-DEADLINE-DOCKER.md
+*.deadline-orig
+docs/message-filter-and-official-block.md
+docs/unified-port-message-api.md
