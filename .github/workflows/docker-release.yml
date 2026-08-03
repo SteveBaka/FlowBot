@@ -222,15 +222,15 @@ jobs:
             > /tmp/release_body.md
 
           # Replace release-drafter's "No changes" with actual commit changelog
-          python3 << 'PYEOF'
-import re
-with open('/tmp/release_body.md') as f:
-    body = f.read()
-with open('/tmp/changelog.md') as f:
-    changelog = f.read().strip()
-body = re.sub(r'No changes', changelog, body)
-with open('/tmp/release_body.md', 'w') as f:
-    f.write(body)
-PYEOF
+          python3 -c "
+          import re
+          with open('/tmp/release_body.md') as f:
+              body = f.read()
+          with open('/tmp/changelog.md') as f:
+              changelog = f.read().strip()
+          body = re.sub(r'No changes', changelog, body)
+          with open('/tmp/release_body.md', 'w') as f:
+              f.write(body)
+          "
 
           gh release edit "$TAG" --notes-file /tmp/release_body.md
