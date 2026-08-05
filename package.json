@@ -39,7 +39,7 @@
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "^7.14.0",
+    "react-router-dom": "^7.18.0",
     "react-virtuoso": "^4.18.5",
     "remark-gfm": "^4.0.1",
     "sherpa-onnx-node": "^1.10.38",
@@ -60,7 +60,7 @@
     "sass-embedded": "^1.100.0",
     "sharp": "^0.34.5",
     "typescript": "^6.0.3",
-    "vite": "^8.0.10",
+    "vite": "^8.2.0",
     "vite-plugin-electron": "^0.28.8",
     "vite-plugin-electron-renderer": "^0.14.6"
   },
@@ -197,6 +197,7 @@
   "overrides": {
     "picomatch": "^4.0.4",
     "tar": "^7.5.13",
-    "immutable": "^5.1.5"
+    "immutable": "^5.1.5",
+    "js-yaml": "^4.3.0"
   }
 }
