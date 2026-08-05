@@ -58,7 +58,7 @@
     "esbuild": "^0.28.0",
     "sass": "^1.98.0",
     "sass-embedded": "^1.100.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.0",
     "typescript": "^6.0.3",
     "vite": "^8.2.0",
     "vite-plugin-electron": "^0.28.8",
