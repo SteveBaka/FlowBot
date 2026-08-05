@@ -101,3 +101,4 @@ docs/WCDB-DEADLINE-DOCKER.md
 *.deadline-orig
 docs/message-filter-and-official-block.md
 docs/unified-port-message-api.md
+docs/IDENTITY-DB.md

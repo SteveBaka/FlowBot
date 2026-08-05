@@ -44,6 +44,7 @@ docker run -d --name flowbot \
   -v /your_folder_here/FlowBOT/xwechat_files:/root/xwechat_files \
   -p 7100:7100 \
   -p 7300:7300 \
+  -p 7400:7400 \
   -p 7600:7600 \
   flowbot:latest
 ```
@@ -71,6 +72,20 @@ docker logs FlowBOT 2>&1
 3. 回到 WebUI → Bot 配置 → 添加Bot → 根据适配器的要求进行配置
 4. 配置完成后，OneBot API 即可使用
 
+## AstrBot 插件适配器（插件 API）
+
+在「Bot 配置」页选择 **HTTP** 模式，在「服务类型」下拉中选择 **插件 API（AstrBot 适配器）**（默认端口 **7400**），即可为 AstrBot 适配器提供统一消息 API：
+
+```
+HTTP API: http://你的IP:7400     鉴权: Authorization: Bearer <Bot Token>
+WS 推送:  ws://你的IP:7400/api/v1/ws/messages?token=<Bot Token>
+```
+
+- Bot Token 在添加时自动生成，适配器使用同一 Token
+- 在 WebUI 中关闭该 bot 即停用插件 API（不影响 WebUI / OneBot）
+- 适配器收到 WS `connected` 事件即表示通道正常
+- WebUI 首页「Bot 状态」与 Bot 卡片实时显示对端连接情况（已连接 N）
+
 ## Bot 配置流程
 
 1. 进入"Bot 配置"页面
@@ -80,7 +95,7 @@ docker logs FlowBOT 2>&1
 5. 填写名称、地址（默认 127.0.0.1）、端口（默认 7100）、Token（自动生成）
 6. 保存后，Bot 实例自动启动
 
-
+V1.4.0新增： Astrbot 插件[astrbot_plugin_flowbot_adapter](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter)，以获取实际账号。
 ## 构建镜像
 
 如果你没有预构建的镜像，可以自行构建：
@@ -89,6 +104,12 @@ docker logs FlowBOT 2>&1
 cd /path/to/WeFlow
 docker build -f docker/Dockerfile -t flowbot:latest .
 ```
+
+> 本地构建若 apt 无法直连 `archive.ubuntu.com`（如防火墙阻断 80 端口），可借助本地 apt-cacher-ng 代理：
+> ```bash
+> docker build --build-arg APT_PROXY=http://<apt-proxy-ip>:3142 -f docker/Dockerfile -t flowbot:latest .
+> ```
+> CI（GitHub Actions）构建默认使用官方源，无需该参数。
 
 > 首次构建约 5-10 分钟（下载微信 deb 包 + 安装系统依赖）。
 
@@ -120,7 +141,7 @@ FlowBOT/
 
 ```
 入站（外部 → 微信）:
-  AstrBot/NapCat
+  AstrBot
     │ HTTP POST /send_private_msg 或 WebSocket 帧
     ▼
   OneBotServer (:7100)
@@ -164,7 +185,8 @@ FlowBOT/
 |------|------|------|------|
 | **7300** | FlowBOT WebUI | 必须 | 浏览器管理配置、Bot 管理、日志查看 |
 | **7600** | noVNC 虚拟桌面 | 必须 | 浏览器操作微信 GUI（登录、搜索联系人） |
-| **7100** | OneBot v11 API | 必须 | 机器人框架（AstrBot/NapCat 等）双向对接 |
+| **7100** | OneBot v11 API | 可选 | 机器人框架（AstrBot 等）双向对接 |
+| **7400** | 插件 API | 可选 | AstrBot 适配器统一消息 API（Bot 配置中可开关） |
 | **5031** | WeFlow HTTP API | 可选 | RESTful 接口，容器内自动启用，外部按需映射 |
 
 ## 操作流程
@@ -183,6 +205,9 @@ start.sh 启动容器
   │     ├── 读取 bots 配置 → 启动 OneBotServer 实例
   │     └── 生成 API Token（写入 /opt/weflow/data/http-api-token.txt）
   ├── FlowBOT WebUI server.js       （:7300 Vue SPA + API 代理 → :5031）
+  │     ├── 插件 API 服务（:7400，按 mode=plugin bot 配置启停）
+  │     ├── SSE 消费 :5031/api/v1/push/messages → WS 推送 :7400
+  │     └── 图片 token 自建（/api/image）
   └── 所有服务就绪，输出 banner（含 WebUI 登录密码）
 ```
 
@@ -220,7 +245,7 @@ start.sh 启动容器
 外部访问:
   http://IP:7300  ──▶ FlowBOT WebUI 管理面板
   http://IP:7600  ──▶ noVNC 虚拟桌面（操作微信 GUI）
-  http://IP:7100  ──▶ OneBot v11 API（AstrBot/NapCat 等对接）
+  http://IP:7100  ──▶ OneBot v11 API（AstrBot 等对接）
   http://IP:5031  ──▶ WeFlow HTTP API（容器内通信，不建议外部访问）
 ```
 
@@ -240,5 +265,4 @@ start.sh 启动容器
 感谢以下开源项目的贡献：
 
 - [WeFlow](https://github.com/hicccc77/WeFlow) 为项目提供了基础的软件和消息协议支持，在此对作者表示衷心的感谢
-- [OneBot v11](https://github.com/botuniverse/onebot-11) 
-- [NapCat](https://github.com/NapNeko/NapCatQQ) 为OneBot协议的实现提供了重要的思路
+- [OneBot v11](https://github.com/botuniverse/onebot-11)

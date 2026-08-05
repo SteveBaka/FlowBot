@@ -853,6 +853,10 @@ class ChatService {
       const sessions: ChatSession[] = []
       const now = Date.now()
       const myWxid = this.configService.getMyWxidCleaned()
+      // 缓存缺失/过期会话集合：循环后批量回源 WCDB 刷新显示名（群名/备注/昵称/微信号）
+      const staleAvatarUsernames = new Set<string>()
+      // 群会话始终回源刷新显示名（群名改动即时一致）
+      const groupNameRefreshUsernames = new Set<string>()
 
       for (const row of rows) {
         const username =
@@ -911,10 +915,16 @@ class ChatService {
         let displayName = username
         let avatarUrl: string | undefined = undefined
         const cached = this.avatarCache.get(username)
-        if (cached) {
+        const isGroupSession = String(username).endsWith('@chatroom')
+        if (cached && Date.now() - cached.updatedAt < this.avatarCacheTtlMs) {
           displayName = cached.displayName || username
           avatarUrl = cached.avatarUrl
+        } else {
+          if (cached) avatarUrl = cached.avatarUrl
+          staleAvatarUsernames.add(username)
         }
+        // 群会话始终加入回源集合（群名改动频繁且需即时一致）
+        if (isGroupSession) groupNameRefreshUsernames.add(username)
 
         const nextSession: ChatSession = {
           username,
@@ -952,6 +962,31 @@ class ChatService {
       await this.addMissingOfficialSessions(sessions, myWxid)
       await this.applySyntheticUnreadCounts(sessions)
       sessions.sort((a, b) => Number(b.sortTimestamp || b.lastTimestamp || 0) - Number(a.sortTimestamp || a.lastTimestamp || 0))
+
+      // 批量回源刷新显示名：群会话始终刷新（即时一致），私聊仅缓存缺失/过期时刷新
+      const refreshUsernames = new Set<string>(staleAvatarUsernames)
+      for (const g of groupNameRefreshUsernames) refreshUsernames.add(g)
+      if (refreshUsernames.size > 0) {
+        try {
+          const namesResult = await wcdbService.getDisplayNames(Array.from(refreshUsernames))
+          if (namesResult.success && namesResult.map) {
+            for (const session of sessions) {
+              const freshName = namesResult.map[session.username]
+              if (freshName && freshName !== session.username) {
+                session.displayName = freshName
+                const prev = this.avatarCache.get(session.username)
+                this.avatarCache.set(session.username, {
+                  avatarUrl: prev ? prev.avatarUrl : undefined,
+                  displayName: freshName,
+                  updatedAt: Date.now()
+                })
+              }
+            }
+          }
+        } catch (e) {
+          console.error('ChatService: 刷新会话显示名失败:', e)
+        }
+      }
 
       // 不等待联系人信息加载，直接返回基础会话列表
       // 前端可以异步调用 enrichSessionsWithContacts 来补充信息
@@ -2059,14 +2094,17 @@ class ChatService {
     const isLiteMode = options?.lite === true
     const mode: 'lite' | 'full' = isLiteMode ? 'lite' : 'full'
     const cacheScope = this.getContactsCacheScope()
-    const cachedContacts = this.getContactsFromMemoryCache(mode, cacheScope)
-    if (cachedContacts) {
-      return { success: true, contacts: cachedContacts }
-    }
-    if (isLiteMode) {
-      const fullCachedContacts = this.getContactsFromMemoryCache('full', cacheScope)
-      if (fullCachedContacts) {
-        return { success: true, contacts: fullCachedContacts }
+    const forceRefresh = options?.forceRefresh === true
+    if (!forceRefresh) {
+      const cachedContacts = this.getContactsFromMemoryCache(mode, cacheScope)
+      if (cachedContacts) {
+        return { success: true, contacts: cachedContacts }
+      }
+      if (isLiteMode) {
+        const fullCachedContacts = this.getContactsFromMemoryCache('full', cacheScope)
+        if (fullCachedContacts) {
+          return { success: true, contacts: fullCachedContacts }
+        }
       }
     }
 

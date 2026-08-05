@@ -163,7 +163,8 @@ var HomePage = {
           cards.onebot.sub = bots.map(function (b) {
             var s = statusMap[b.id]
             var st = s ? (s.connectionStatus || s.status || 'stopped') : 'stopped'
-            var label = (b.mode === 'http' ? 'HTTP' : 'WS') + ':' + b.name
+            // 协议标签按 bot 实际类型适配：HTTP/插件API 显示 HTTP，WS 显示 WS
+            var label = (b.mode === 'http' || b.mode === 'plugin' ? 'HTTP' : 'WS') + ':' + b.name
             return { label: label, status: st }
           })
           var anyConnected = bots.some(function (b) {
@@ -239,7 +240,7 @@ var HomePage = {
     '</div>' +
 
     '<div class="stat-card">' +
-    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">OneBot 状态</span></div>' +
+    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">Bot 状态</span></div>' +
     '<div class="stat-value">{{ typeof cards.onebot.sub === \'object\' ? cards.onebot.status : cards.onebot.status }}</div>' +
     '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" style="margin-top:4px">' +
     '<div v-for="bs in cards.onebot.sub" :key="bs.label" style="font-size:13px;display:flex;align-items:center;gap:6px">' +
@@ -312,6 +313,7 @@ var BotPage = {
     var modalDirection = ref('server')
     var modalBotName = ref('')
     var modalUrl = ref('ws://127.0.0.1:6199/ws')
+    var modalPort = ref(7100)
     var modalToken = ref('')
     var editingBotId = ref(null)
 
@@ -320,10 +322,61 @@ var BotPage = {
       if (!d.error && d.bots) {
         try {
           var parsed = typeof d.bots === 'string' ? JSON.parse(d.bots) : d.bots
-          if (Array.isArray(parsed)) bots.value = parsed
+          if (Array.isArray(parsed)) {
+            // 先合并状态再赋值，确保首屏即可显示正确的连接状态
+            await mergeBotStatus(parsed)
+            bots.value = parsed
+          }
         } catch (e) {}
       }
     }
+
+    // 合并各 bot 的实时连接状态（含插件 API 对端连接情况）
+    async function mergeBotStatus(list) {
+      try {
+        var st = await api('/api/v1/mgmt/bots/status')
+        if (st && st.success && Array.isArray(st.bots)) {
+          var statusMap = {}
+          st.bots.forEach(function (b) { statusMap[b.id] = b })
+          list.forEach(function (b) {
+            var s = statusMap[b.id]
+            if (s) {
+              b.status = s.status
+              b.connectionStatus = s.connectionStatus
+              b.clientCount = s.clientCount
+              b.error = s.error
+            } else if (!b.status) {
+              // 状态接口未返回该 bot → 视为未运行，避免显示"未知"
+              b.status = 'stopped'
+              b.connectionStatus = 'disconnected'
+            }
+          })
+        }
+      } catch (e) {}
+    }
+
+    // 周期刷新连接状态（不重载配置，避免打断编辑）
+    setInterval(function () {
+      if (!bots.value.length) return
+      api('/api/v1/mgmt/bots/status').then(function (st) {
+        if (st && st.success && Array.isArray(st.bots)) {
+          var statusMap = {}
+          st.bots.forEach(function (b) { statusMap[b.id] = b })
+          bots.value.forEach(function (b) {
+            var s = statusMap[b.id]
+            if (s) {
+              b.status = s.status
+              b.connectionStatus = s.connectionStatus
+              b.clientCount = s.clientCount
+              b.error = s.error
+            } else if (!b.status) {
+              b.status = 'stopped'
+              b.connectionStatus = 'disconnected'
+            }
+          })
+        }
+      }).catch(function () {})
+    }, 5000)
 
     function openAddModal() {
       editingBotId.value = null
@@ -332,6 +385,7 @@ var BotPage = {
       modalDirection.value = 'server'
       modalBotName.value = 'Bot ' + (bots.value.length + 1)
       modalUrl.value = 'ws://127.0.0.1:6199/ws'
+      modalPort.value = 7100
       modalToken.value = generateToken()
       showModal.value = true
     }
@@ -340,7 +394,18 @@ var BotPage = {
 
     function selectMode(mode) {
       modalMode.value = mode
-      modalStep.value = mode === 'http' ? 3 : 2
+      if (mode === 'http') {
+        modalStep.value = 3
+        modalPort.value = 7100
+      } else if (mode === 'ws') {
+        modalStep.value = 2
+      }
+    }
+
+    // HTTP 服务类型切换：OneBot HTTP 服务端 / 插件 API（AstrBot 适配器）
+    function onHttpTypeChange() {
+      if (modalMode.value === 'plugin') modalPort.value = 7400
+      else if (modalMode.value === 'http') modalPort.value = 7100
     }
 
     function selectDirection(dir) {
@@ -364,9 +429,20 @@ var BotPage = {
     }
 
     async function addBot() {
-      var urlMatch = modalUrl.value.match(/^(wss?):\/\/([^:\/]+):?(\d+)(\/.*)?$/)
-      var address = urlMatch ? urlMatch[2] : '127.0.0.1'
-      var port = urlMatch ? parseInt(urlMatch[3]) : 6199
+      var isPortBased = modalMode.value === 'http' || modalMode.value === 'plugin'
+      var address = '127.0.0.1'
+      var port = 6199
+      var url = modalUrl.value
+      if (isPortBased) {
+        // HTTP/插件API 服务端：监听端口，无 URL
+        address = '0.0.0.0'
+        port = Number(modalPort.value) || 7100
+        url = ''
+      } else {
+        var urlMatch = modalUrl.value.match(/^(wss?):\/\/([^:\/]+):?(\d+)(\/.*)?$/)
+        address = urlMatch ? urlMatch[2] : '127.0.0.1'
+        port = urlMatch ? parseInt(urlMatch[3]) : 6199
+      }
       if (editingBotId.value) {
         bots.value = bots.value.map(function (b) {
           if (b.id === editingBotId.value) {
@@ -374,7 +450,7 @@ var BotPage = {
               name: modalBotName.value || b.name,
               mode: modalMode.value,
               direction: modalDirection.value,
-              url: modalUrl.value,
+              url: url,
               address: address,
               port: port,
               token: modalToken.value
@@ -390,7 +466,7 @@ var BotPage = {
           name: modalBotName.value || 'Bot ' + (bots.value.length + 1),
           mode: modalMode.value,
           direction: modalDirection.value,
-          url: modalUrl.value,
+          url: url,
           address: address,
           port: port,
           token: modalToken.value,
@@ -421,7 +497,13 @@ var BotPage = {
       modalMode.value = botItem.mode
       modalDirection.value = botItem.direction
       modalBotName.value = botItem.name
-      modalUrl.value = botItem.url || ('ws://' + botItem.address + ':' + botItem.port + '/ws')
+      if (botItem.mode === 'http' || botItem.mode === 'plugin') {
+        modalUrl.value = ''
+        modalPort.value = Number(botItem.port) || 7100
+      } else {
+        modalUrl.value = botItem.url || ('ws://' + botItem.address + ':' + botItem.port + '/ws')
+        modalPort.value = Number(botItem.port) || 6199
+      }
       modalToken.value = botItem.token
       modalStep.value = 3
       showModal.value = true
@@ -429,6 +511,21 @@ var BotPage = {
 
     async function testBot(botItem) {
       toast('正在测试连接...', 'info')
+      // 插件 API bot：由 WebUI server.js 管理，直接探测 bot 端口（不走 botManager）
+      if (botItem.mode === 'plugin') {
+        try {
+          var host = window.location.hostname || '127.0.0.1'
+          var port = Number(botItem.port) || 7400
+          var res = await fetch('http://' + host + ':' + port + '/api/v1/sessions', {
+            headers: botItem.token ? { Authorization: 'Bearer ' + botItem.token } : {}
+          })
+          if (res.ok) toast(botItem.name + ': 已连接（插件 API 运行中）', 'success')
+          else toast(botItem.name + ': 未连接（HTTP ' + res.status + '，检查 Token/端口）', 'error')
+        } catch (e) {
+          toast(botItem.name + ': 未连接（端口未监听）', 'error')
+        }
+        return
+      }
       var d = await api('/api/v1/mgmt/bots/status')
       if (d.success && d.bots) {
         var bot = d.bots.find(function(b) { return b.id === botItem.id })
@@ -451,8 +548,8 @@ var BotPage = {
       }
     }
 
-    function modeBadge(m) { return m === 'http' ? 'badge-http' : 'badge-ws' }
-    function modeLabel(m) { return m === 'http' ? 'HTTP' : 'WS' }
+    function modeBadge(m) { return m === 'http' ? 'badge-http' : (m === 'plugin' ? 'badge-plugin' : 'badge-ws') }
+    function modeLabel(m) { return m === 'http' ? 'HTTP' : (m === 'plugin' ? '插件API' : 'WS') }
     function dirBadge(d) { return d === 'server' ? 'badge-server' : 'badge-client' }
     function dirLabel(d) { return d === 'server' ? '服务端' : '客户端' }
 
@@ -461,10 +558,10 @@ var BotPage = {
       bots: bots, showModal: showModal, modalStep: modalStep,
       modalMode: modalMode, modalDirection: modalDirection,
       modalBotName: modalBotName, modalUrl: modalUrl,
-      modalToken: modalToken,
+      modalPort: modalPort, modalToken: modalToken,
       editingBotId: editingBotId,
       openAddModal: openAddModal, closeModal: closeModal,
-      selectMode: selectMode, selectDirection: selectDirection,
+      selectMode: selectMode, selectDirection: selectDirection, onHttpTypeChange: onHttpTypeChange,
       addBot: addBot, toggleBot: toggleBot, deleteBot: deleteBot,
       editBot: editBot, testBot: testBot,
       modeBadge: modeBadge, modeLabel: modeLabel,
@@ -474,7 +571,7 @@ var BotPage = {
   },
   template: '<div>' +
     '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">Bot 配置</h1><p class="subtitle">管理多个 OneBot v11 连接</p></div>' +
+    '<div><h1 class="page-title" style="margin:0">Bot 配置</h1><p class="subtitle">管理多个 OneBot v11 连接与插件 API</p></div>' +
     '<div class="header-actions"><button class="btn btn-secondary" @click="loadBots">刷新</button></div></div>' +
 
     '<div v-for="b in bots" :key="b.id" class="bot-card">' +
@@ -484,6 +581,10 @@ var BotPage = {
     '<span :class="[\'badge\', modeBadge(b.mode)]">{{ modeLabel(b.mode) }}</span>' +
     '<span :class="[\'badge\', dirBadge(b.direction)]">{{ dirLabel(b.direction) }}</span>' +
     '<span>{{ b.url || (b.address + ":" + b.port) }}</span>' +
+    '<span v-if="b.connectionStatus === \'connected\'" class="badge badge-server">已连接{{ b.clientCount ? " (" + b.clientCount + ")" : "" }}</span>' +
+    '<span v-else-if="b.connectionStatus === \'disconnected\'" class="badge badge-client">未连接</span>' +
+    '<span v-else-if="b.status === \'stopped\'" class="badge badge-client">未运行</span>' +
+    '<span v-else class="badge badge-client">未知</span>' +
     '</div></div>' +
     '<div class="bot-actions">' +
     '<button class="btn btn-secondary btn-sm" @click="editBot(b)" title="编辑 Bot"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>' +
@@ -505,7 +606,7 @@ var BotPage = {
     '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
     '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectMode(\'http\')">' +
     '<div style="font-size:28px;margin-bottom:8px">HTTP</div>' +
-    '<div style="font-size:12px;color:var(--text-muted)">HTTP 服务端</div></div>' +
+    '<div style="font-size:12px;color:var(--text-muted)">OneBot HTTP 服务端 / 插件 API</div></div>' +
     '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectMode(\'ws\')">' +
     '<div style="font-size:28px;margin-bottom:8px">WS</div>' +
     '<div style="font-size:12px;color:var(--text-muted)">WebSocket</div></div>' +
@@ -529,10 +630,19 @@ var BotPage = {
     '<div v-else-if="modalStep===3">' +
     '<h3>{{ editingBotId ? "编辑 Bot" : "配置 Bot" }}</h3>' +
     '<div class="form-group"><label>名称</label><input type="text" v-model="modalBotName" placeholder="Bot 1"></div>' +
-    '<div class="form-group"><label>URL *</label><input type="text" v-model="modalUrl" placeholder="ws://127.0.0.1:6199/ws"></div>' +
+    '<div v-if="modalMode === \'http\' || modalMode === \'plugin\'">' +
+    '<div class="form-group"><label>服务类型</label>' +
+    '<select v-model="modalMode" @change="onHttpTypeChange" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input,var(--bg-card));color:var(--text)">' +
+    '<option value="http">OneBot HTTP 服务端</option>' +
+    '<option value="plugin">插件 API（AstrBot 适配器）</option>' +
+    '</select></div>' +
+    '<div class="form-group"><label>监听端口 *</label><input type="number" v-model.number="modalPort" placeholder="7100" min="1" max="65535"></div>' +
+    '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">{{ modalMode === \'plugin\' ? \'插件 API：AstrBot 适配器统一消息服务端（HTTP+WS），Token 与适配器一致，关闭此 bot 即停用插件 API\' : \'OneBot HTTP 服务端：OneBot v11 协议端口，机器人框架按 OneBot 标准接入\' }}</div>' +
+    '</div>' +
+    '<div v-else class="form-group"><label>URL *</label><input type="text" v-model="modalUrl" placeholder="ws://127.0.0.1:6199/ws"></div>' +
     '<div class="form-group"><label>Token</label><input type="text" v-model="modalToken" placeholder="自动生成"></div>' +
     '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
-    '<button class="btn btn-secondary" @click="editingBotId ? closeModal() : (modalStep = modalMode===\'http\' ? 1 : 2)">{{ editingBotId ? "取消" : "返回" }}</button>' +
+    '<button class="btn btn-secondary" @click="editingBotId ? closeModal() : (modalStep = (modalMode===\'ws\' ? 2 : 1))">{{ editingBotId ? "取消" : "返回" }}</button>' +
     '<button class="btn btn-primary" @click="addBot">保存</button>' +
     '</div></div>' +
 

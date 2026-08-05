@@ -5,8 +5,9 @@
 import * as http from 'http'
 import * as fs from 'fs'
 import * as path from 'path'
+import * as os from 'os'
 import { URL } from 'url'
-import { timingSafeEqual } from 'crypto'
+import { timingSafeEqual, randomUUID, randomBytes } from 'crypto'
 import { logger } from './logger'
 import * as botManager from './botManager'
 import { chatService, Message } from './chatService'
@@ -18,6 +19,7 @@ import { groupAnalyticsService } from './groupAnalyticsService'
 import { snsService } from './snsService'
 import { getPluginManager } from '../plugins/pluginManager'
 import { SendOptions, MessageType } from '../plugins/plugin-interface'
+import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -257,6 +259,9 @@ class HttpService {
   private readonly messagePushReplayTtlMs = 10 * 60 * 1000
   private wsClients: Set<import('ws').WebSocket> = new Set()
   private wss: import('ws').WebSocketServer | null = null
+  // 上传媒体注册表：token -> { path, expires }（/api/v1/media/upload）
+  private mediaUploads = new Map<string, { path: string; expires: number }>()
+  private readonly mediaUploadTtlMs = 5 * 60 * 1000
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -272,6 +277,8 @@ class HttpService {
 
     this.port = port
     this.host = host
+
+    this.startMediaUploadCleanup()
 
     return new Promise((resolve) => {
       this.server = http.createServer((req, res) => this.handleRequest(req, res))
@@ -499,14 +506,23 @@ class HttpService {
      */
     private async parseBody(req: http.IncomingMessage): Promise<Record<string, any>> {
         if (req.method !== 'POST') return {}
-        const MAX_BODY_SIZE = 10 * 1024 * 1024 // 10MB
+        const MAX_BODY_SIZE = 20 * 1024 * 1024 // 20MB（图片 base64 跨设备传输）
         return new Promise((resolve) => {
             let body = ''
             let bodySize = 0
             req.on('data', chunk => {
+                if (bodySize > MAX_BODY_SIZE) {
+                    // 超限：标记后静默排空请求体（不销毁连接，以便能返回 413 响应）
+                    if (!(req as any).__bodyTooLarge) {
+                        ;(req as any).__bodyTooLarge = true
+                        resolve({})
+                    }
+                    return
+                }
                 bodySize += chunk.length
                 if (bodySize > MAX_BODY_SIZE) {
-                    req.destroy()
+                    ;(req as any).__bodyTooLarge = true
+                    req.resume()
                     resolve({})
                     return
                 }
@@ -616,6 +632,12 @@ class HttpService {
         try {
             const bodyParams = await this.parseBody(req)
 
+            // body 超过 20MB 上限：给客户端明确提示
+            if ((req as any).__bodyTooLarge) {
+                this.sendError(res, 413, '请求体过大（>20MB）')
+                return
+            }
+
             for (const [key, value] of Object.entries(bodyParams)) {
                 if (!url.searchParams.has(key)) {
                     url.searchParams.set(key, String(value))
@@ -703,6 +725,9 @@ class HttpService {
             } else if (pathname === '/api/v1/hooks/status') {
                 if (req.method !== 'GET') return this.sendMethodNotAllowed(res, 'GET')
                 await this.handleGetHookStatus(res)
+            } else if (pathname === '/api/v1/media/upload') {
+                if (req.method !== 'POST') return this.sendMethodNotAllowed(res, 'POST')
+                await this.handleMediaUpload(req, res, bodyParams)
             } else if (pathname.startsWith('/api/v1/media/')) {
                 this.handleMediaRequest(pathname, res)
             } else if (pathname === '/api/v1/mgmt/config' && req.method === 'GET') {
@@ -760,6 +785,19 @@ class HttpService {
     }, 25000)
   }
 
+  // 清理过期的上传媒体文件（/api/v1/media/upload 的 token 生命周期）
+  private startMediaUploadCleanup(): void {
+    setInterval(() => {
+      const now = Date.now()
+      for (const [token, entry] of this.mediaUploads) {
+        if (entry.expires < now) {
+          this.mediaUploads.delete(token)
+          try { if (fs.existsSync(entry.path)) fs.unlinkSync(entry.path) } catch {}
+        }
+      }
+    }, 60 * 1000)
+  }
+
   private handleMessagePushStream(req: http.IncomingMessage, res: http.ServerResponse, url: URL): void {
     if (this.configService.get('messagePushEnabled') !== true) {
       this.sendError(res, 403, 'Message push is disabled')
@@ -785,6 +823,65 @@ class HttpService {
     req.on('close', cleanup)
     res.on('close', cleanup)
     res.on('error', cleanup)
+  }
+
+  /**
+   * 媒体上传：POST /api/v1/media/upload
+   * 入参：image_base64（字节）或 image_url（直链，flowbot 拉取），可选 filename
+   * 返回：{ success, token, expires, path }，token 用于 messages/send 的 image_token
+   */
+  private async handleMediaUpload(req: http.IncomingMessage, res: http.ServerResponse, bodyParams: Record<string, any>): Promise<void> {
+    try {
+      const { image_base64, image_url, filename } = bodyParams
+      let buf: Buffer | null = null
+      if (image_base64) {
+        const raw = String(image_base64)
+        const b64 = raw.includes('base64,') ? raw.slice(raw.indexOf('base64,') + 7) : raw
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64.trim())) {
+          this.sendError(res, 400, '图片 base64 解码失败（含非法字符）')
+          return
+        }
+        buf = Buffer.from(b64, 'base64')
+      } else if (image_url) {
+        try {
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), 15000)
+          let resp: Response
+          try {
+            resp = await fetch(String(image_url), { signal: controller.signal })
+          } finally {
+            clearTimeout(timer)
+          }
+          if (!resp.ok) {
+            this.sendError(res, 400, `URL 下载失败: HTTP ${resp.status}`)
+            return
+          }
+          buf = Buffer.from(await resp.arrayBuffer())
+        } catch (error: any) {
+          this.sendError(res, 400, `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}`)
+          return
+        }
+      }
+      if (!buf || buf.length === 0) {
+        this.sendError(res, 400, 'image_base64 或 image_url 必须提供且有效')
+        return
+      }
+      if (buf.length > 20 * 1024 * 1024) {
+        this.sendError(res, 400, '文件过大（>20MB）')
+        return
+      }
+      const ext = this.detectImageExt(buf)
+      const token = randomBytes(8).toString('hex')
+      const dir = path.join(os.tmpdir(), 'weflow_uploads')
+      fs.mkdirSync(dir, { recursive: true })
+      const filePath = path.join(dir, `${token}${ext}`)
+      fs.writeFileSync(filePath, buf)
+      const expires = Date.now() + this.mediaUploadTtlMs
+      this.mediaUploads.set(token, { path: filePath, expires })
+      this.sendJson(res, { success: true, token, expires, path: filePath, filename: filename || `image${ext}` })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
   }
 
   private handleMediaRequest(pathname: string, res: http.ServerResponse): void {
@@ -1256,9 +1353,10 @@ class HttpService {
   private async handleContacts(url: URL, res: http.ServerResponse): Promise<void> {
     const keyword = (url.searchParams.get('keyword') || '').trim()
     const limit = this.parseIntParam(url.searchParams.get('limit'), 100, 1, 10000)
+    const forceRefresh = this.parseBooleanParam(url, ['forceRefresh'], false)
 
     try {
-      const contacts = await chatService.getContacts()
+      const contacts = await chatService.getContacts({ forceRefresh })
       if (!contacts.success || !contacts.contacts) {
         this.sendError(res, 500, contacts.error || 'Failed to get contacts')
         return
@@ -2657,29 +2755,15 @@ class HttpService {
     bodyParams: any
   ): Promise<void> {
     try {
-      const { session_id, content, type = 'text', at_users, reply_to, image_path } = bodyParams
+      const { session_id, content, type = 'text', at_users, reply_to, image_path, image_base64, image_url, image_token, media_path } = bodyParams
 
-      if (!session_id || !content) {
-        return this.sendError(res, 400, 'Missing required fields: session_id, content')
-      }
-
-      const pluginManager = getPluginManager()
-      const activePlugin = pluginManager.getActivePlugin()
-
-      if (!activePlugin) {
-        return this.sendError(res, 503, 'No active message hook plugin. Please install and activate a hook first.')
-      }
-
-      if (!activePlugin.capabilities.canSendMessage) {
-        return this.sendError(res, 503, 'Active plugin does not support sending messages')
+      if (!session_id) {
+        return this.sendError(res, 400, 'Missing required fields: session_id')
       }
 
       // 解析消息类型
       let messageType = MessageType.Text
-      switch (type.toLowerCase()) {
-        case 'text':
-          messageType = MessageType.Text
-          break
+      switch (String(type).toLowerCase()) {
         case 'image':
           messageType = MessageType.Image
           break
@@ -2699,30 +2783,249 @@ class HttpService {
           messageType = MessageType.Text
       }
 
-      const sendOptions: SendOptions = {
-        sessionId: session_id,
-        content,
-        type: messageType,
-        atUsers: at_users,
-        replyTo: reply_to,
-        imagePath: image_path,
+      const strContent = String(content || '')
+      const isImage = messageType === MessageType.Image
+      const hasMediaInput = Boolean(image_path || image_base64 || image_url || image_token || media_path)
+      if (!isImage && !strContent && !hasMediaInput) {
+        return this.sendError(res, 400, 'Missing required fields: content')
       }
 
-      const result = await pluginManager.sendMessage(sendOptions)
+      const pluginManager = getPluginManager()
+      const activePlugin = pluginManager.getActivePlugin()
+
+      // Windows / DLL 通道：优先走 active plugin（既有行为）
+      if (activePlugin && activePlugin.capabilities.canSendMessage) {
+        let preparedImagePath = image_path
+        if (!preparedImagePath && (image_base64 || image_url || image_token)) {
+          const prepared = await this.prepareImageInput(image_path, image_base64, image_url, image_token)
+          preparedImagePath = prepared.path || undefined
+        }
+
+        const sendOptions: SendOptions = {
+          sessionId: session_id,
+          content: strContent,
+          type: messageType,
+          atUsers: at_users,
+          replyTo: reply_to,
+          imagePath: preparedImagePath,
+        }
+
+        const result = await pluginManager.sendMessage(sendOptions)
+
+        if (result.success) {
+          this.sendJson(res, {
+            success: true,
+            message_id: result.messageId,
+            timestamp: result.timestamp,
+          })
+        } else {
+          this.sendError(res, 500, result.error || 'Failed to send message')
+        }
+        return
+      }
+
+      // Linux（Docker 容器）直连发送通道：wxid 精确定位 + 图片/文本
+      if (process.platform === 'linux') {
+        await this.sendViaLinuxSender(res, {
+          sessionId: session_id,
+          content: strContent,
+          type: messageType,
+          imagePath: image_path,
+          imageBase64: image_base64,
+          imageUrl: image_url,
+          imageToken: image_token,
+          mediaPath: media_path,
+        })
+        return
+      }
+
+      this.sendError(res, 503, 'No active message hook plugin. Please install and activate a hook first.')
+    } catch (error) {
+      console.error('[HttpService] Send message error:', error)
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /**
+   * Linux 直连发送：无 active plugin（Docker 容器）时使用 LinuxSender UI 自动化。
+   * session_id 支持原生 wxid 定位（wxid → Contact 表显示名 → GUI 搜索）。
+   */
+  private async sendViaLinuxSender(
+    res: http.ServerResponse,
+    params: {
+      sessionId: string
+      content: string
+      type: MessageType
+      imagePath?: string
+      imageBase64?: string
+      imageUrl?: string
+      imageToken?: string
+      mediaPath?: string
+    }
+  ): Promise<void> {
+    try {
+      const { sessionId, content, type, imagePath, imageBase64, imageUrl, imageToken } = params
+
+      // Linux UI 自动化仅支持文本/图片粘贴，其余类型给出明确错误
+      if (type !== MessageType.Text && type !== MessageType.Image) {
+        this.sendError(res, 400, `Message type not supported on Linux sender: ${type} (supported: text, image)`)
+        return
+      }
+
+      let targetImagePath: string | null = null
+      if (type === MessageType.Image) {
+        const prepared = await this.prepareImageInput(imagePath, imageBase64, imageUrl, imageToken)
+        targetImagePath = prepared.path
+        if (!targetImagePath) {
+          this.sendError(res, 400, prepared.error || 'Image message requires image_token, image_base64, image_url or image_path')
+          return
+        }
+      }
+
+      const displayName = await this.resolveSessionDisplayName(sessionId)
+      if (!displayName) {
+        this.sendError(res, 400, 'Unable to resolve session_id to a contact')
+        return
+      }
+
+      const sender = getEnhancedMessageSender()
+      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined)
+
+      if (targetImagePath) {
+        this.scheduleTempImageCleanup(targetImagePath)
+      }
 
       if (result.success) {
         this.sendJson(res, {
           success: true,
-          message_id: result.messageId,
-          timestamp: result.timestamp,
+          message_id: `local_${Date.now()}`,
+          timestamp: Date.now(),
         })
       } else {
         this.sendError(res, 500, result.error || 'Failed to send message')
       }
     } catch (error) {
-      console.error('[HttpService] Send message error:', error)
+      console.error('[HttpService] Linux send error:', error)
       this.sendError(res, 500, String(error))
     }
+  }
+
+  /**
+   * session_id → 显示名：wxid 形态查 WCDB Contact 表（remark → nickName → alias），否则原样返回。
+   */
+  private looksLikeWxid(id: string): boolean {
+    return /@chatroom$/i.test(id) || /@openim/i.test(id) || /^gh_/i.test(id) || /^wxid_/i.test(id) || /^weixin/i.test(id)
+  }
+
+  private async resolveSessionDisplayName(sessionId: string): Promise<string> {
+    const id = String(sessionId || '').trim()
+    if (!id) return ''
+    if (!this.looksLikeWxid(id)) return id
+
+    const isGroup = /@chatroom$/i.test(id)
+
+    try {
+      const contact = await chatService.getContact(id)
+      if (contact) {
+        if (isGroup) {
+          const name = contact.remark || contact.nickName || contact.alias
+          if (name && name !== id) return name
+        } else if (contact.alias) {
+          // 私聊：优先用自定义 wxid（微信号 alias）搜索，唯一不重名
+          return contact.alias
+        }
+      }
+    } catch {}
+
+    try {
+      const names = await this.getDisplayNames([id])
+      const name = names[id]
+      if (name && name !== id) return name
+    } catch {}
+    return id
+  }
+
+  /**
+   * 图片输入归一化（跨设备友好），优先级：image_token > image_base64 > image_url > image_path
+   * 返回 { path, error }：path 为可用的本地文件路径；失败时 error 说明原因。
+   */
+  private async prepareImageInput(
+    imagePath?: string,
+    imageBase64?: string,
+    imageUrl?: string,
+    imageToken?: string
+  ): Promise<{ path: string | null; error?: string }> {
+    // ④ image_token：上传接口返回的服务器端文件（跨设备推荐）
+    if (imageToken) {
+      const entry = this.mediaUploads.get(String(imageToken))
+      if (entry && entry.expires > Date.now() && fs.existsSync(entry.path)) {
+        return { path: entry.path }
+      }
+      return { path: null, error: '图片 token 无效或已过期' }
+    }
+    // ① image_base64：字节内联，跨设备最可靠
+    if (imageBase64) {
+      try {
+        const raw = String(imageBase64)
+        const b64 = raw.includes('base64,') ? raw.slice(raw.indexOf('base64,') + 7) : raw
+        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64.trim())) {
+          return { path: null, error: '图片 base64 解码失败（含非法字符）' }
+        }
+        const buf = Buffer.from(b64, 'base64')
+        if (buf.length > 0) {
+          const ext = this.detectImageExt(buf)
+          const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
+          fs.writeFileSync(tmpPath, buf)
+          return { path: tmpPath }
+        }
+      } catch {}
+      return { path: null, error: '图片 base64 解码失败' }
+    }
+    // ② image_url：直链拉取（需 flowbot 可达）
+    if (imageUrl) {
+      try {
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(), 15000)
+        let resp: Response
+        try {
+          resp = await fetch(String(imageUrl), { signal: controller.signal })
+        } finally {
+          clearTimeout(timer)
+        }
+        if (!resp.ok) return { path: null, error: `URL 下载失败: HTTP ${resp.status}` }
+        const buf = Buffer.from(await resp.arrayBuffer())
+        if (buf.length > 15 * 1024 * 1024) return { path: null, error: 'URL 图片过大（>15MB）' }
+        const ext = this.detectImageExt(buf)
+        const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
+        fs.writeFileSync(tmpPath, buf)
+        return { path: tmpPath }
+      } catch (error: any) {
+        return { path: null, error: `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}` }
+      }
+    }
+    // ③ image_path：仅同主机（flowbot 文件系统）有效
+    if (imagePath) {
+      const p = String(imagePath).trim()
+      if (fs.existsSync(p)) return { path: p }
+      return { path: null, error: '路径不可访问（跨主机请使用 image_token / image_base64 / image_url）' }
+    }
+    return { path: null, error: 'Image message requires image_token, image_base64, image_url or image_path' }
+  }
+
+  private detectImageExt(buf: Buffer): string {
+    if (!buf || buf.length < 12) return '.png'
+    if (buf[0] === 0xff && buf[1] === 0xd8) return '.jpg'
+    if (buf[0] === 0x89 && buf[1] === 0x50) return '.png'
+    if (buf[0] === 0x47 && buf[1] === 0x49) return '.gif'
+    if (buf[0] === 0x52 && buf[1] === 0x49) return '.webp'
+    if (buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp'
+    return '.png'
+  }
+
+  private scheduleTempImageCleanup(filePath: string): void {
+    setTimeout(() => {
+      try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath) } catch {}
+    }, 60 * 1000)
   }
 
   /**

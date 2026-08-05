@@ -186,6 +186,35 @@ export function getGroupByNumeric(numericId: number): GroupInfo | undefined {
   return groupByNumeric.get(numericId)
 }
 
+/**
+ * 统一数字 → wxid/显示名 反向解析（双通道共享身份层的一部分）。
+ * 同时检查群与私聊映射，返回权威 wxid 与显示名；未命中时返回 undefined。
+ */
+export function resolveIdentityByNumeric(numericId: number | string): { wxid?: string; displayName?: string; isGroup?: boolean } | undefined {
+  const id = typeof numericId === 'string' ? parseInt(numericId, 10) : numericId
+  if (!Number.isFinite(id)) return undefined
+
+  const group = groupByNumeric.get(id)
+  if (group) {
+    return {
+      wxid: group.wxid,
+      displayName: group.groupName && group.groupName !== group.wxid ? group.groupName : group.wxid,
+      isGroup: true
+    }
+  }
+
+  const priv = privateByNumeric.get(id)
+  if (priv) {
+    return {
+      wxid: priv.wxid,
+      displayName: priv.remark || priv.nickName || priv.alias || priv.wxid,
+      isGroup: false
+    }
+  }
+
+  return undefined
+}
+
 export function scheduleGroupRefresh(wxid: string): void {
   const info = groupByWxid.get(wxid)
   if (!info) return
@@ -687,6 +716,8 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           message_type: isGroup ? 'group' : 'private',
           sub_type: isGroup ? 'normal' : 'friend',
           message_id: Date.now(),
+          // 跨通道相关键：与插件 HTTP 通道共享，AstrBot 可据此对同一消息去重/对齐
+          rawid: data.rawid != null ? String(data.rawid) : undefined,
           user_id: senderUserId,
           message: messageSegments,
           raw_message: data.content || '',
