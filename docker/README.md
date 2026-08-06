@@ -6,6 +6,18 @@
 
 FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础之上，增加了[OneBot v11](https://github.com/botuniverse/onebot-11) 协议，旨在为 `WeFlow` Linux 客户端增加聊天协议转换，并提供 WebSocket/HTTP 支持及 WebUI 管理。 
 
+关于[WeFlow](https://github.com/hicccc77/WeFlow)的使用说明敬请移步至 WeFlow 的仓库，并且可以的话为原仓库点亮Star。
+<p align="center">
+  <a href="https://github.com/SteveBaka/FlowBot/stargazers"><img src="https://img.shields.io/github/stars/SteveBaka/FlowBot?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
+  <a href="https://github.com/SteveBaka/FlowBot/network/members"><img src="https://img.shields.io/github/forks/SteveBaka/FlowBot?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
+  <a href="https://github.com/SteveBaka/FlowBot/releases"><img src="https://img.shields.io/github/downloads/SteveBaka/FlowBot/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
+  <a href="https://t.me/ffffflowbot"><img src="https://img.shields.io/badge/Telegram-通知-60A5FA?style=flat&logo=telegram&logoColor=white&labelColor=2A3B4C&color=60A5FA" alt="Telegram Notification" style="height: 24px; vertical-align: middle;"></a>
+</p>
+
+<p align="center">
+  <img src="app.jpg" alt="WeFlow 应用预览" width="90%">
+</p>
+
 镜像内置 Linux 微信 v4.1.1.7  + WeFlow v4.5.1 (支持消息发送的修改版本) + noVNC 力求做到开箱即用的体验。
 
 > ⚠️免责声明：FlowBot 旨在提供了一个能够让用户**学习并研究**能够与AI机器人进行聊天的协议，请在使用中注意平台的用户协议和规范，使用风险自负。
@@ -16,7 +28,10 @@ FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础�
 |------|------|
 | 文字双向传输 | 微信 ↔ AstrBot 文字消息实时同步 |
 | 图片发送 | 微信图片推送到外部适配器（支持 base64 / URL 模式） |
-| 图片接收 | 外部适配器图片推送到微信（仅v1.2版本之后支持，暂不支持GIF动图） |
+| 图片接收 | 外部适配器图片推送到微信（仅v1.2版本之后支持） |
+| 表情解析 | 支持推送GIF以及多种表情推送到外部适配器 |
+
+> ⚠️由于兼容 *图片双向发送功能* ， Onebot 协议目前无法在 Astrbot 中显示真实的账号，如介意且不在意图片发送至微信的情况，可以选用 V1.2 前的版本。
 
 ## 快速开始
 
@@ -34,7 +49,7 @@ docker compose up -d
 或手动 docker run：
 
 ```bash
-docker run -d --name flowbot \
+docker run -d --name FlowBOT \
   --cap-add=SYS_PTRACE \
   --restart=always \
   -e TZ=Asia/Shanghai \
@@ -72,19 +87,16 @@ docker logs FlowBOT 2>&1
 3. 回到 WebUI → Bot 配置 → 添加Bot → 根据适配器的要求进行配置
 4. 配置完成后，OneBot API 即可使用
 
-## AstrBot 插件适配器（插件 API）
+### AstrBot 插件适配器（插件 API，端口 7400）
 
-在「Bot 配置」页选择 **HTTP** 模式，在「服务类型」下拉中选择 **插件 API（AstrBot 适配器）**（默认端口 **7400**），即可为 AstrBot 适配器提供统一消息 API：
+在「Bot 配置」页选择 **HTTP** 模式，在「服务类型」下拉中选择 **插件 API（AstrBot 适配器）**（默认端口 **7400**）：
 
 ```
 HTTP API: http://你的IP:7400     鉴权: Authorization: Bearer <Bot Token>
 WS 推送:  ws://你的IP:7400/api/v1/ws/messages?token=<Bot Token>
 ```
 
-- Bot Token 在添加时自动生成，适配器使用同一 Token
-- 在 WebUI 中关闭该 bot 即停用插件 API（不影响 WebUI / OneBot）
-- 适配器收到 WS `connected` 事件即表示通道正常
-- WebUI 首页「Bot 状态」与 Bot 卡片实时显示对端连接情况（已连接 N）
+关闭该 bot 即停用插件 API，不影响 WebUI(7300) / OneBot(7100)。
 
 ## Bot 配置流程
 
@@ -92,8 +104,9 @@ WS 推送:  ws://你的IP:7400/api/v1/ws/messages?token=<Bot Token>
 2. 点击"+ 添加 Bot"按钮
 3. 选择连接模式（HTTP / WebSocket）
 4. WebSocket 模式下选择方向（服务端 / 客户端）
-5. 填写名称、地址（默认 127.0.0.1）、端口（默认 7100）、Token（自动生成）
-6. 保存后，Bot 实例自动启动
+5. HTTP 模式下选择服务类型（OneBot HTTP 服务端 / 插件 API）
+6. 填写名称、端口、Token（自动生成）
+7. 保存后，Bot 实例自动启动
 
 V1.4.0新增： Astrbot 插件[astrbot_plugin_flowbot_adapter](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter)，以获取实际账号。
 ## 构建镜像
@@ -202,7 +215,7 @@ start.sh 启动容器
   ├── WeChat                        （/opt/wechat/wechat）
   ├── WeFlow Electron               （:5031 HTTP API + :7100 OneBot）
   │     ├── 自动启用 HTTP API (:5031)
-  │     ├── 读取 bots 配置 → 启动 OneBotServer 实例
+  │     ├── 读取 bots 配置 → 启动 OneBotServer 实例（mode=plugin 跳过）
   │     └── 生成 API Token（写入 /opt/weflow/data/http-api-token.txt）
   ├── FlowBOT WebUI server.js       （:7300 Vue SPA + API 代理 → :5031）
   │     ├── 插件 API 服务（:7400，按 mode=plugin bot 配置启停）
@@ -239,6 +252,7 @@ start.sh 启动容器
 │                 ┌────────▼────────┐                          │        │
 │                 │  FlowBOT WebUI  │◀─────────────────────────┘        │
 │                 │  :7300 (Vue)    │   voice_studio style             │
+│                 │  :7400 (插件API) │                                   │
 │                 └─────────────────┘                                  │
 └─────────────────────────────────────────────────────────────────────┘
 
@@ -246,6 +260,7 @@ start.sh 启动容器
   http://IP:7300  ──▶ FlowBOT WebUI 管理面板
   http://IP:7600  ──▶ noVNC 虚拟桌面（操作微信 GUI）
   http://IP:7100  ──▶ OneBot v11 API（AstrBot 等对接）
+  http://IP:7400  ──▶ 插件 API（AstrBot 适配器，Bot 配置中可开关）
   http://IP:5031  ──▶ WeFlow HTTP API（容器内通信，不建议外部访问）
 ```
 
@@ -265,4 +280,5 @@ start.sh 启动容器
 感谢以下开源项目的贡献：
 
 - [WeFlow](https://github.com/hicccc77/WeFlow) 为项目提供了基础的软件和消息协议支持，在此对作者表示衷心的感谢
+- [NapCat](https://github.com/NapNeko/NapCatQQ) 为OneBot协议的实现提供了重要的思路
 - [OneBot v11](https://github.com/botuniverse/onebot-11)

@@ -24,6 +24,7 @@ interface QueuedMessage {
   content: string
   contactName: string
   imagePath?: string
+  atMentions?: Array<{ wxid: string; name: string }>
   resolve: (result: { success: boolean; error?: string; method: string }) => void
   retries: number
   createdAt: number
@@ -278,13 +279,18 @@ export class LinuxSender implements IPlatformSender {
     return true
   }
 
-  private async doSend(content: string, contactName: string, imagePath?: string): Promise<{ success: boolean; error?: string }> {
+  private async doSend(
+    content: string,
+    contactName: string,
+    imagePath?: string,
+    atMentions?: Array<{ wxid: string; name: string }>
+  ): Promise<{ success: boolean; error?: string }> {
     const wid = await this.findWeChatWindow()
     if (!wid) {
       return { success: false, error: '找不到微信窗口' }
     }
 
-    return this.doSendWithWindow(content, contactName, wid, imagePath)
+    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions)
   }
 
   private detectImageMime(imagePath: string): string {
@@ -296,7 +302,13 @@ export class LinuxSender implements IPlatformSender {
     return 'image/png'
   }
 
-  private async doSendWithWindow(content: string, contactName: string, wid: string, imagePath?: string): Promise<{ success: boolean; error?: string }> {
+  private async doSendWithWindow(
+    content: string,
+    contactName: string,
+    wid: string,
+    imagePath?: string,
+    atMentions?: Array<{ wxid: string; name: string }>
+  ): Promise<{ success: boolean; error?: string }> {
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
     }
@@ -308,16 +320,53 @@ export class LinuxSender implements IPlatformSender {
 
     await this.ensureFocusInInput(wid)
 
+    // 真正渲染群内 @：输入 @ + 成员名 + 回车选中，再拼正文
+    if (atMentions && atMentions.length > 0) {
+      await this.typeAtMentions(atMentions, wid)
+    }
+
     if (!await this.pasteAndSend(content, wid, imagePath)) {
       return { success: false, error: '粘贴发送失败' }
     }
 
     this.lastSendTime = Date.now()
-    log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"`)
+    log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"${atMentions && atMentions.length ? ` with @(${atMentions.length})` : ''}`)
     return { success: true }
   }
 
-  async sendMessage(content: string, contactName?: string, imagePath?: string): Promise<{
+  // 群内 @ 渲染：在输入框输入 @ 唤起成员选择器，输入成员名，回车选中，最后补空格
+  private async typeAtMentions(atMentions: Array<{ wxid: string; name: string }>, wid: string): Promise<void> {
+    for (const m of atMentions) {
+      const name = String(m.name || m.wxid || '')
+      if (!name) continue
+      log(`Typing @ mention for "${name}" (${m.wxid})...`)
+      await run(`xdotool type --window "${wid}" --delay 40 "@"`)
+      await new Promise(r => setTimeout(r, 500))
+
+      if (this.containsNonAscii(name)) {
+        const pinyin = await this.toPinyin(name)
+        log(`  @ member "${name}" → pinyin "${pinyin}"`)
+        await run(`xdotool type --window "${wid}" --delay 40 "${pinyin.replace(/'/g, "'\\''")}"`)
+      } else {
+        await run(`xdotool type --window "${wid}" --delay 40 "${name.replace(/'/g, "'\\''")}"`)
+      }
+      await new Promise(r => setTimeout(r, 600))
+
+      log(`  Selecting first @ result for "${name}"...`)
+      await run(`xdotool key --window "${wid}" Return`)
+      await new Promise(r => setTimeout(r, 400))
+
+      await run(`xdotool type --window "${wid}" --delay 20 " "`)
+      await new Promise(r => setTimeout(r, 120))
+    }
+  }
+
+  async sendMessage(
+    content: string,
+    contactName?: string,
+    imagePath?: string,
+    atMentions?: Array<{ wxid: string; name: string }>
+  ): Promise<{
     success: boolean; error?: string; method: string
   }> {
     const str = String(content || '')
@@ -333,12 +382,13 @@ export class LinuxSender implements IPlatformSender {
         content: str,
         contactName: name,
         imagePath,
+        atMentions,
         resolve,
         retries: 0,
         createdAt: Date.now()
       }
       this.queue.push(item)
-      log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''} (queue size: ${this.queue.length})`)
+      log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''}${atMentions && atMentions.length ? ` [AT:${atMentions.length}]` : ''} (queue size: ${this.queue.length})`)
       this.processQueue()
     })
   }
@@ -361,7 +411,7 @@ export class LinuxSender implements IPlatformSender {
 
       let result: { success: boolean; error?: string }
       try {
-        result = await this.doSend(item.content, item.contactName, item.imagePath)
+        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions)
       } catch (e: any) {
         result = { success: false, error: e?.message || 'Unknown error' }
       }

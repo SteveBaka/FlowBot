@@ -88,6 +88,8 @@ class MessagePushService {
   private readonly pendingMessageTableNames = new Set<string>()
   private selfInfoCache: { wxid: string; displayName: string; updatedAt: number } | null = null
   private readonly selfInfoCacheTtlMs = 60 * 1000
+  private botGroupNicknameCache = new Map<string, { nickname: string; updatedAt: number }>()
+  private readonly botGroupNicknameTtlMs = 10 * 60 * 1000
 
   constructor() {
     this.configService = ConfigService.getInstance()
@@ -115,6 +117,36 @@ class MessagePushService {
     }
     this.selfInfoCache = { wxid, displayName, updatedAt: now }
     return { wxid, displayName }
+  }
+
+  /**
+   * 获取机器人在某群的群昵称（微信群 @ 用群昵称，如"机器人群昵称"），带缓存。
+   */
+  private async getBotGroupNickname(sessionId: string): Promise<string> {
+    const cached = this.botGroupNicknameCache.get(sessionId)
+    if (cached && Date.now() - cached.updatedAt < this.botGroupNicknameTtlMs) {
+      return cached.nickname
+    }
+    try {
+      const selfInfo = await this.getSelfInfo()
+      if (selfInfo.wxid && String(sessionId).endsWith('@chatroom')) {
+        const result = await wcdbService.getGroupNicknames(String(sessionId))
+        if (result.success && result.nicknames) {
+          const key = selfInfo.wxid.toLowerCase()
+          for (const [memberIdRaw, nicknameRaw] of Object.entries(result.nicknames)) {
+            if (String(memberIdRaw || '').trim().toLowerCase() === key) {
+              const nickname = String(nicknameRaw || '').trim()
+              if (nickname) {
+                this.botGroupNicknameCache.set(sessionId, { nickname, updatedAt: Date.now() })
+                return nickname
+              }
+            }
+          }
+        }
+      }
+    } catch {}
+    this.botGroupNicknameCache.set(sessionId, { nickname: '', updatedAt: Date.now() })
+    return ''
   }
 
   start(): void {
@@ -851,6 +883,37 @@ class MessagePushService {
     return undefined
   }
 
+  /**
+   * 从消息原始 XML 提取 @ 用户 wxid 列表（微信群 @ 信息在 <atuserlist><username>..</username></atuserlist>）
+   */
+  private extractMessageAtUsers(message: Message): string[] {
+    const raw = String(message.rawContent || message.content || '')
+    if (!raw || !raw.toLowerCase().includes('atuserlist')) return []
+    const ids: string[] = []
+    const xmlRe = /<username[^>]*>([\s\S]*?)<\/username>/gi
+    let m: RegExpExecArray | null
+    while ((m = xmlRe.exec(raw)) !== null) {
+      const id = String(m[1] || '').trim()
+      if (id) ids.push(id)
+    }
+    if (ids.length === 0) {
+      const jsonRe = /"atuserlist"\s*:\s*(\[[^\]]*\])/i
+      const jm = raw.match(jsonRe)
+      if (jm) {
+        try {
+          const arr = JSON.parse(jm[1])
+          if (Array.isArray(arr)) {
+            for (const a of arr) {
+              const id = String(a || '').trim()
+              if (id) ids.push(id)
+            }
+          }
+        } catch {}
+      }
+    }
+    return Array.from(new Set(ids))
+  }
+
   private async buildPayload(session: ChatSession, message: Message): Promise<MessagePushPayload | null> {
     const sessionId = String(session.username || '').trim()
     const messageKey = String(message.messageKey || '').trim()
@@ -878,11 +941,30 @@ class MessagePushService {
       cacheGroup(sessionId, groupName, myWxid)
       scheduleGroupRefresh(sessionId)
       const senderIdAlias = senderId ? await this.resolveSenderAlias(senderId) : undefined
+      let atUsers = this.extractMessageAtUsers(message)
+      const selfId = this.configService.getMyWxidCleaned()
+      // 兜底：微信群 @ 常为纯文本（"@机器人昵称 在做什么"），XML 无 atuserlist。
+      // 从内容文本匹配机器人的 wxid / 全局昵称 / 群昵称（与 OneBot 检测逻辑一致）
+      if ((!atUsers || atUsers.length === 0) && content && String(content).includes('@') && selfId) {
+        const selfInfo = await this.getSelfInfo()
+        const botNames = [selfId, selfInfo.displayName]
+        const groupNick = await this.getBotGroupNickname(sessionId)
+        if (groupNick) botNames.push(groupNick)
+        const escapedNames = botNames
+          .filter(Boolean)
+          .map((n: string) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        if (escapedNames.length > 0) {
+          const atRegex = new RegExp(`@(?:${escapedNames.join('|')})`, 'i')
+          if (atRegex.test(String(content))) atUsers = [selfId]
+        }
+      }
       return {
         event: 'message.new',
         sessionId,
         sessionType,
         rawid,
+        selfId,
+        atUsers,
         avatarUrl,
         groupName,
         sourceName,

@@ -750,7 +750,7 @@ var SettingsPage = {
             return
           }
         } catch (e) {
-          toast('地址格式无效，请填写完整的 URL（如 http://192.168.1.100:7300）', 'error')
+          toast('地址格式无效，请填写完整的 URL（如 http://你的IP:7400）', 'error')
           baseUrlError.value = true
           return
         }
@@ -872,11 +872,11 @@ var SettingsPage = {
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">对外可达地址</label>' +
     '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-    '外部服务（如 AstrBot）用于下载图片的完整地址。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7300' +
+    '外部服务（如 AstrBot）用于下载图片的完整地址。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7400（插件推送直链与 WebUI 图片传输共用）' +
     '</span>' +
     '</div>' +
     '<input type="text" v-model="imgTransfer.baseUrl" ' +
-    'placeholder="http://192.168.1.100:7300" ' +
+    'placeholder="http://你的IP:7400" ' +
     ':class="{ \'input-error\': baseUrlError }" ' +
     ':disabled="imgTransfer.mode === \'base64\'">' +
     '</div>' +
