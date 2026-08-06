@@ -5,6 +5,8 @@ const crypto = require('crypto')
 const { execSync } = require('child_process')
 
 const PORT = process.env.WEBUI_PORT || 7300
+// 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
+const serverStartTime = Date.now()
 const ONEBOT_PORT = process.env.ONEBOT_PORT || 7100
 const FLOW_PORT = process.env.FLOW_API_PORT || 5031
 const CONFIG_DIR = process.env.WEFLOW_CONFIG_DIR || '/opt/weflow/data'
@@ -214,7 +216,17 @@ function ensureApiToken() {
 // ─── 图片 token 自建注册表（插件通道图片直链）────────────────────────────────
 
 const imageTokens = new Map() // token -> { path, expires }
-const PUSH_IMAGE_BASE_URL = (process.env.PUSH_IMAGE_BASE_URL || '').replace(/\/+$/, '') || 'http://127.0.0.1:7400'
+
+// 推送图片直链基地址：优先读 WebUI 设置（WeFlow config imageServerBaseUrl，即设置页"对外可达地址"），
+// 其次 env PUSH_IMAGE_BASE_URL，最后默认 127.0.0.1:7400
+function getPushImageBaseUrl() {
+  try {
+    const cfg = loadWeFlowConfig()
+    const url = String(cfg.imageServerBaseUrl || '').trim()
+    if (url) return url.replace(/\/+$/, '')
+  } catch {}
+  return (process.env.PUSH_IMAGE_BASE_URL || '').replace(/\/+$/, '') || 'http://127.0.0.1:7400'
+}
 
 function registerImagePath(filePath) {
   if (!filePath || !fs.existsSync(filePath)) return null
@@ -367,6 +379,23 @@ const server = http.createServer(async (req, res) => {
       json(res, { ok: false, error: 'Invalid token format' }, 400)
       return
     }
+    // 优先服务插件通道自建 token（与 7400 统一，保证 7300/7400 双端口均可取图）
+    var localEntry = imageTokens.get(token)
+    if (localEntry && localEntry.expires > Date.now()) {
+      try {
+        var localStat = fs.statSync(localEntry.path)
+        res.writeHead(200, {
+          'Content-Type': mimeByExt(localEntry.path),
+          'Content-Length': localStat.size,
+          'Cache-Control': 'no-cache, max-age=0'
+        })
+        fs.createReadStream(localEntry.path).pipe(res)
+      } catch (err) {
+        json(res, { ok: false, error: 'Image not found or expired' }, 404)
+      }
+      return
+    }
+    // 未命中本地 token → 代理 WeFlow（OneBot / WebUI 图片直链）
     try {
       var targetUrl = 'http://127.0.0.1:' + FLOW_PORT + '/api/image?token=' + token
       var resp = await fetch(targetUrl)
@@ -992,8 +1021,10 @@ function handleWsSocket(socket, clientSet, onConnect) {
   socket.on('error', () => clientSet.delete(socket))
   clientSet.add(socket)
   if (onConnect) onConnect(socket)
-  // 重放：断线重连时补发最近的消息（插件侧按 message_id 去重）
+  // 重放：仅补发 60 秒内的消息（短断线续传）；重启/长断线后旧消息不再重放，避免重复回复
+  const replayCutoff = Date.now() - 60000
   for (const event of pushReplayBuffer) {
+    if (event.at && event.at < replayCutoff) continue
     try { socket.write(wsFrame(0x1, event.body)) } catch { break }
   }
   wsSend(socket, clientSet, { event: 'connected', data: { message: 'WeFlow push connected', timestamp: Date.now() } })
@@ -1243,11 +1274,91 @@ function initIdentityDb() {
     identityDb.exec('CREATE INDEX IF NOT EXISTS idx_contacts_custom ON contacts(custom_wxid)')
     identityDb.exec('CREATE INDEX IF NOT EXISTS idx_contacts_numeric ON contacts(numeric_id)')
     identityDb.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
+    identityDb.exec(
+      'CREATE TABLE IF NOT EXISTS group_nicknames (' +
+      'session_id TEXT NOT NULL, member_wxid TEXT NOT NULL, nickname TEXT, ' +
+      'updated_at INTEGER, PRIMARY KEY (session_id, member_wxid))'
+    )
     loadIdentityFromDb()
   } catch (e) {
     console.error('[IdentityDB] init error: ' + e.message)
   }
 }
+
+// ─── 机器人自身身份 + 群昵称（@ 信息链路在身份库中的读写）────────────────────────
+
+let selfWxid = '' // 从推送 payload.selfId 学习
+
+function getSelfWxid() {
+  if (selfWxid) return selfWxid
+  try {
+    const row = identityDb.prepare('SELECT value FROM meta WHERE key=?').get('self_wxid')
+    selfWxid = row ? String(row.value || '') : ''
+  } catch {}
+  return selfWxid
+}
+
+// 记录机器人自身 wxid：写入 meta + contacts 表（type='self'）
+function rememberSelfWxid(wxid) {
+  const id = String(wxid || '').trim()
+  if (!id) return
+  const known = getSelfWxid()
+  if (known === id) return
+  selfWxid = id
+  try {
+    identityDb.prepare('INSERT INTO meta (key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value')
+      .run('self_wxid', id)
+    identityDb.prepare(
+      'INSERT INTO contacts (real_wxid, type, updated_at, dirty) VALUES (?,?,?,0) ' +
+      'ON CONFLICT(real_wxid) DO UPDATE SET type=excluded.type, updated_at=excluded.updated_at, dirty=0'
+    ).run(id, 'self', Date.now())
+    syncBotGroupNicknames()
+  } catch (e) {
+    console.error('[IdentityDB] remember self error: ' + e.message)
+  }
+}
+
+// 同步各群成员群昵称 → group_nicknames 表（供 @ 链路 / 未来特性读身份库）
+async function syncBotGroupNicknames() {
+  const myWxid = getSelfWxid()
+  const internalToken = readApiToken()
+  const authHeaders = internalToken ? { Authorization: 'Bearer ' + internalToken } : {}
+  let groups = []
+  try {
+    const r = await fetch('http://127.0.0.1:' + FLOW_PORT + '/api/v1/sessions', { headers: authHeaders })
+    const j = await r.json()
+    groups = (j.sessions || []).filter(s => s && s.sessionType === 'group' && s.username)
+  } catch { return }
+  for (const g of groups) {
+    try {
+      const r = await fetch(
+        'http://127.0.0.1:' + FLOW_PORT + '/api/v1/group-members?chatroomId=' + encodeURIComponent(g.username),
+        { headers: authHeaders }
+      )
+      const j = await r.json()
+      const members = Array.isArray(j.members) ? j.members : []
+      if (members.length === 0) continue
+      identityDb.exec('BEGIN')
+      try {
+        for (const m of members) {
+          const mid = String(m.wxid || m.username || '').trim()
+          if (!mid) continue
+          const nick = String(m.groupNickname || m.nickname || m.displayName || '').trim()
+          identityDb.prepare(
+            'INSERT INTO group_nicknames (session_id, member_wxid, nickname, updated_at) VALUES (?,?,?,?) ' +
+            'ON CONFLICT(session_id, member_wxid) DO UPDATE SET nickname=excluded.nickname, updated_at=excluded.updated_at'
+          ).run(g.username, mid, nick || null, Date.now())
+        }
+        identityDb.exec('COMMIT')
+      } catch (e) {
+        try { identityDb.exec('ROLLBACK') } catch {}
+      }
+    } catch {}
+  }
+}
+
+// 每 30 分钟同步一次群昵称（与全量同步同频）
+setInterval(syncBotGroupNicknames, IDENTITY_SYNC_INTERVAL_MS)
 
 function loadIdentityFromDb() {
   try {
@@ -1396,7 +1507,7 @@ setInterval(fullSyncIdentityDb, IDENTITY_SYNC_INTERVAL_MS)
 
 function broadcastPushEvent(obj) {
   const body = JSON.stringify(obj)
-  pushReplayBuffer.push({ body })
+  pushReplayBuffer.push({ body, at: Date.now() })
   if (pushReplayBuffer.length > PUSH_REPLAY_LIMIT) pushReplayBuffer.splice(0, pushReplayBuffer.length - PUSH_REPLAY_LIMIT)
   for (const [, entry] of pluginApiServers) {
     for (const socket of entry.wssClients) {
@@ -1415,7 +1526,7 @@ function normalizePushPayload(p) {
   let imageUrl
   if (p.imagePath) {
     const token = registerImagePath(p.imagePath)
-    if (token) imageUrl = PUSH_IMAGE_BASE_URL + '/api/image?token=' + token
+    if (token) imageUrl = getPushImageBaseUrl() + '/api/image?token=' + token
   }
   // 自定义 wxid：私聊会话身份用微信号 alias
   const customWxid = isGroup ? null : getCustomWxid(realSessionId)
@@ -1427,6 +1538,8 @@ function normalizePushPayload(p) {
       message_id: p.rawid != null ? String(p.rawid) : undefined,
       session_id: sessionId,
       real_wxid: customWxid ? realSessionId : undefined,
+      self_id: p.selfId ? String(p.selfId) : undefined,
+      at_users: Array.isArray(p.atUsers) && p.atUsers.length ? p.atUsers.map(String) : undefined,
       session_type: p.sessionType || (isGroup ? 'group' : 'private'),
       sender_id: senderId,
       sender_name: p.senderCard || p.sourceName || p.groupName || p.senderId || undefined,
@@ -1450,6 +1563,15 @@ function handleSseBlock(block) {
   if (dataLines.length === 0) return
   try {
     const payload = JSON.parse(dataLines.join('\n'))
+    // 学习机器人自身 wxid 并写入身份库（@ 信息链路在身份库中的读写）
+    if (payload && payload.selfId) {
+      rememberSelfWxid(String(payload.selfId))
+    }
+    // 引导期/重放过滤：丢弃时间戳早于本进程启动前 5 秒的旧消息（重启后摒弃先前消息）
+    // 注意：payload.timestamp 为秒，serverStartTime 为毫秒，需换算
+    if (payload && typeof payload.timestamp === 'number' && payload.timestamp * 1000 < serverStartTime - 5000) {
+      return
+    }
     // 实时触达：私聊消息的会话/发送者即时写入身份库（为 OneBot 数字转换准备）
     if (payload && payload.sessionId) {
       const isGroup = String(payload.sessionId).endsWith('@chatroom')
@@ -1465,6 +1587,43 @@ function handleSseBlock(block) {
 
 let pushAbort = null
 let pushConsumerActive = false
+
+// ─── SSE 断点续传状态：重启后从上次事件续传，不重放旧消息 ──────────────────────
+
+const PUSH_STATE_FILE = path.join(CONFIG_DIR, 'push-state.json')
+let pushLastEventId = 0
+let pushStateSaveTimer = null
+
+function loadPushState() {
+  try {
+    if (fs.existsSync(PUSH_STATE_FILE)) {
+      const s = JSON.parse(fs.readFileSync(PUSH_STATE_FILE, 'utf-8'))
+      pushLastEventId = Number(s.lastEventId) > 0 ? Number(s.lastEventId) : 0
+    }
+  } catch {}
+}
+
+// 防抖持久化最后事件 id（重启后据此续传，避免重放旧消息导致重复回复）
+function persistPushStateDebounced() {
+  clearTimeout(pushStateSaveTimer)
+  pushStateSaveTimer = setTimeout(() => {
+    try {
+      fs.mkdirSync(CONFIG_DIR, { recursive: true })
+      fs.writeFileSync(PUSH_STATE_FILE, JSON.stringify({ lastEventId: pushLastEventId, updatedAt: Date.now() }))
+    } catch {}
+  }, 2000)
+}
+
+function parseSseEventId(block) {
+  const m = block.match(/^id:\s*(\d+)/m)
+  if (m) {
+    const id = Number(m[1])
+    if (Number.isFinite(id) && id > pushLastEventId) {
+      pushLastEventId = id
+      persistPushStateDebounced()
+    }
+  }
+}
 
 function refreshPushConsumer() {
   const active = pluginApiServers.size > 0
@@ -1487,7 +1646,10 @@ function startPushConsumer() {
     if (!pushConsumerActive) return
     const controller = new AbortController()
     pushAbort = controller
-    fetch('http://127.0.0.1:' + FLOW_PORT + '/api/v1/push/messages', { headers, signal: controller.signal })
+    // 携带上次事件 id 续传：重启后不重放已消费的旧消息
+    let pushUrl = 'http://127.0.0.1:' + FLOW_PORT + '/api/v1/push/messages'
+    if (pushLastEventId > 0) pushUrl += '?lastEventId=' + pushLastEventId
+    fetch(pushUrl, { headers, signal: controller.signal })
       .then(async (resp) => {
         if (!resp.ok) throw new Error('HTTP ' + resp.status)
         retry = 0
@@ -1502,6 +1664,7 @@ function startPushConsumer() {
           while ((idx = buffer.indexOf('\n\n')) !== -1) {
             const block = buffer.slice(0, idx)
             buffer = buffer.slice(idx + 2)
+            parseSseEventId(block)
             handleSseBlock(block)
           }
         }
@@ -1572,6 +1735,7 @@ setInterval(refreshPluginApiBots, 5000)
 
 server.listen(PORT, '0.0.0.0', () => {
   ensureApiToken()
+  loadPushState()
   console.log(`[WebUI] FlowBOT management panel running on http://0.0.0.0:${PORT}`)
   console.log(`[WebUI] WeFlow config path: ${discoverWeFlowConfigPath()}`)
   console.log(`[WebUI] Disclaimer accepted: ${isDisclaimerAccepted()}`)

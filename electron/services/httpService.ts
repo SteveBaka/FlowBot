@@ -2834,6 +2834,7 @@ class HttpService {
           imageBase64: image_base64,
           imageUrl: image_url,
           imageToken: image_token,
+          atUsers: at_users,
           mediaPath: media_path,
         })
         return
@@ -2860,11 +2861,12 @@ class HttpService {
       imageBase64?: string
       imageUrl?: string
       imageToken?: string
+      atUsers?: any[]
       mediaPath?: string
     }
   ): Promise<void> {
     try {
-      const { sessionId, content, type, imagePath, imageBase64, imageUrl, imageToken } = params
+      const { sessionId, content, type, imagePath, imageBase64, imageUrl, imageToken, atUsers } = params
 
       // Linux UI 自动化仅支持文本/图片粘贴，其余类型给出明确错误
       if (type !== MessageType.Text && type !== MessageType.Image) {
@@ -2888,8 +2890,21 @@ class HttpService {
         return
       }
 
+      // 群内 @：把 at_users（wxid）解析为显示名，供 LinuxSender 渲染 @ 选择器
+      let atMentions: Array<{ wxid: string; name: string }> | undefined
+      if (Array.isArray(atUsers) && atUsers.length > 0) {
+        const wxids = atUsers.filter((u: any) => u && String(u).trim() && String(u).trim() !== 'all')
+        if (wxids.length > 0) {
+          const names = await this.getDisplayNames(wxids)
+          atMentions = wxids.map((u: any) => {
+            const wxid = String(u).trim()
+            return { wxid, name: (names && names[wxid]) || wxid }
+          })
+        }
+      }
+
       const sender = getEnhancedMessageSender()
-      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined)
+      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined, atMentions)
 
       if (targetImagePath) {
         this.scheduleTempImageCleanup(targetImagePath)
