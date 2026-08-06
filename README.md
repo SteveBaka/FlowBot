@@ -7,6 +7,12 @@
 FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础之上，增加了[OneBot v11](https://github.com/botuniverse/onebot-11) 协议，旨在为 `WeFlow` Linux 客户端增加聊天协议转换，并提供 WebSocket/HTTP 支持及 WebUI 管理。 
 
 关于[WeFlow](https://github.com/hicccc77/WeFlow)的使用说明敬请移步至 WeFlow 的仓库，并且可以的话为原仓库点亮Star。
+<p align="center">
+  <a href="https://github.com/SteveBaka/FlowBot/stargazers"><img src="https://img.shields.io/github/stars/SteveBaka/FlowBot?style=flat&label=Stars&labelColor=2A3B4C&color=60A5FA" alt="Stargazers"></a>
+  <a href="https://github.com/SteveBaka/FlowBot/network/members"><img src="https://img.shields.io/github/forks/SteveBaka/FlowBot?style=flat&label=Forks&labelColor=2A3B4C&color=60A5FA" alt="Forks"></a>
+  <a href="https://github.com/SteveBaka/FlowBot/releases"><img src="https://img.shields.io/github/downloads/SteveBaka/FlowBot/total?style=flat&label=Downloads&labelColor=2A3B4C&color=60A5FA" alt="Downloads"></a>
+  <a href="https://t.me/ffffflowbot"><img src="https://img.shields.io/badge/Telegram-通知-60A5FA?style=flat&logo=telegram&logoColor=white&labelColor=2A3B4C&color=60A5FA" alt="Telegram Notification" style="height: 24px; vertical-align: middle;"></a>
+</p>
 
 <p align="center">
   <img src="app.jpg" alt="WeFlow 应用预览" width="90%">
@@ -24,6 +30,8 @@ FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础�
 | 图片发送 | 微信图片推送到外部适配器（支持 base64 / URL 模式） |
 | 图片接收 | 外部适配器图片推送到微信（仅v1.2版本之后支持） |
 | 表情解析 | 支持推送GIF以及多种表情推送到外部适配器 |
+
+> ⚠️由于兼容 *图片双向发送功能* ， Onebot 协议目前无法在 Astrbot 中显示真实的账号，如介意且不在意图片发送至微信的情况，可以选用 V1.2 前的版本。
 
 ## 快速开始
 
@@ -101,6 +109,7 @@ WS 推送:  ws://你的IP:7400/api/v1/ws/messages?token=<Bot Token>
 7. 保存后，Bot 实例自动启动
 
 V1.4.0新增： Astrbot 插件[astrbot_plugin_flowbot_adapter](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter)，以获取实际账号。
+
 ## 构建镜像
 
 如果你没有预构建的镜像，可以自行构建：
@@ -272,4 +281,5 @@ start.sh 启动容器
 感谢以下开源项目的贡献：
 
 - [WeFlow](https://github.com/hicccc77/WeFlow) 为项目提供了基础的软件和消息协议支持，在此对作者表示衷心的感谢
+- [NapCat](https://github.com/NapNeko/NapCatQQ) 为OneBot协议的实现提供了重要的思路
 - [OneBot v11](https://github.com/botuniverse/onebot-11)
