@@ -2,6 +2,7 @@ import { exec, execFile } from 'child_process'
 import { promisify } from 'util'
 import type { IPlatformSender } from '../enhancedMessageSender'
 import type { SendMode, SendTask, SendProgress } from './types'
+import { ConfigService } from '../../services/config'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -18,6 +19,90 @@ const RETRY_DELAY_MS = 1500
 const INTER_MESSAGE_DELAY_MS = 800
 const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
+
+// ─── 发送延时档位（safe / standard / aggressive）───────────────────────────────
+type DelayMode = 'safe' | 'standard' | 'aggressive'
+
+interface DelayProfile {
+  interMessage: number
+  searchOpen: number
+  searchSettle: number
+  selectSettle: number
+  focusMove: number
+  inputClick: number
+  textClipSettle: number
+  pasteSettle: number
+  imageClipSettle: number
+  imagePasteSettle: number
+  postSendSettle: number
+}
+
+const DELAY_PROFILES: Record<DelayMode, DelayProfile> = {
+  safe: {
+    interMessage: 1200, searchOpen: 600, searchSettle: 900, selectSettle: 600,
+    focusMove: 120, inputClick: 300, textClipSettle: 150, pasteSettle: 400,
+    imageClipSettle: 300, imagePasteSettle: 700, postSendSettle: 800
+  },
+  standard: {
+    interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400,
+    focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300,
+    imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500
+  },
+  aggressive: {
+    interMessage: 500, searchOpen: 250, searchSettle: 350, selectSettle: 250,
+    focusMove: 50, inputClick: 120, textClipSettle: 60, pasteSettle: 180,
+    imageClipSettle: 120, imagePasteSettle: 300, postSendSettle: 300
+  }
+}
+
+function getDelayMode(): DelayMode {
+  const envMode = String(process.env.SEND_DELAY_MODE || '').trim().toLowerCase()
+  if (envMode === 'safe' || envMode === 'standard' || envMode === 'aggressive') return envMode
+  try {
+    const cfgMode = String(ConfigService.getInstance().get('sendDelayMode') || '').trim().toLowerCase()
+    if (cfgMode === 'safe' || cfgMode === 'standard' || cfgMode === 'aggressive') return cfgMode
+  } catch {}
+  return 'standard'
+}
+
+// ─── 拼音缓存：避免每次中文名起子进程（python3 /opt/pinyin.py）──────────────────
+const pinyinCache = new Map<string, string>()
+let pinyinCacheFile = ''
+
+function resolvePinyinCacheFile(): string {
+  if (pinyinCacheFile) return pinyinCacheFile
+  try {
+    pinyinCacheFile = require('path').join(ConfigService.getInstance().getCacheBasePath(), 'pinyin-cache.json')
+  } catch { pinyinCacheFile = '' }
+  return pinyinCacheFile
+}
+
+function persistPinyinCache(): void {
+  const file = resolvePinyinCacheFile()
+  if (!file) return
+  try {
+    const fs = require('fs')
+    const dir = require('path').dirname(file)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(pinyinCache)))
+  } catch {}
+}
+
+function loadPinyinCache(): void {
+  const file = resolvePinyinCacheFile()
+  if (!file) return
+  try {
+    const fs = require('fs')
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (data && typeof data === 'object') {
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'string') pinyinCache.set(k, v)
+        }
+      }
+    }
+  } catch {}
+}
 
 interface QueuedMessage {
   id: string
@@ -105,6 +190,18 @@ export class LinuxSender implements IPlatformSender {
   private currentMode: SendMode = 'foreground'
   private lastSendTime = 0
   private cachedWid = ''
+  private delay: DelayProfile = DELAY_PROFILES.standard
+
+  constructor() {
+    try {
+      const mode = getDelayMode()
+      this.delay = DELAY_PROFILES[mode] || DELAY_PROFILES.standard
+      log(`Delay profile: ${mode} (interMessage=${this.delay.interMessage}ms)`)
+    } catch {
+      this.delay = DELAY_PROFILES.standard
+    }
+    loadPinyinCache()
+  }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
 
@@ -189,13 +286,21 @@ export class LinuxSender implements IPlatformSender {
 
   private async toPinyin(text: string): Promise<string> {
     try {
+      // 拼音缓存：命中直接返回，避免每次起子进程
+      const cached = pinyinCache.get(text)
+      if (cached) return cached
+
       const { execSync } = require('child_process')
       const result = execSync(`python3 /opt/pinyin.py '${text.replace(/'/g, "'\\''")}'`, {
         timeout: 3000,
         encoding: 'utf-8',
         env: DISPLAY_ENV
       }).trim()
-      return result || text
+      const pinyin = result || text
+      if (pinyinCache.size >= 5000) pinyinCache.clear() // 防无限膨胀
+      pinyinCache.set(text, pinyin)
+      persistPinyinCache()
+      return pinyin
     } catch {
       return text
     }
@@ -204,7 +309,7 @@ export class LinuxSender implements IPlatformSender {
   private async searchAndSelectContact(contactName: string, wid: string): Promise<boolean> {
     log(`Opening search with Ctrl+F...`)
     await run(`xdotool key --window "${wid}" ctrl+f`)
-    await new Promise(r => setTimeout(r, 400))
+    await new Promise(r => setTimeout(r, this.delay.searchOpen))
 
     log(`Selecting all and typing contact name: "${contactName}"`)
     await run(`xdotool key --window "${wid}" ctrl+a`)
@@ -218,14 +323,14 @@ export class LinuxSender implements IPlatformSender {
       await run(`xdotool type --window "${wid}" --delay 30 "${contactName.replace(/'/g, "'\\''")}"`)
     } else {
       await xclipSet(contactName)
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise(r => setTimeout(r, this.delay.textClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
     }
-    await new Promise(r => setTimeout(r, 600))
+    await new Promise(r => setTimeout(r, this.delay.searchSettle))
 
     log(`Pressing Enter to select first result...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, 400))
+    await new Promise(r => setTimeout(r, this.delay.selectSettle))
 
     log(`Search complete for contact: "${contactName}"`)
     return true
@@ -245,9 +350,9 @@ export class LinuxSender implements IPlatformSender {
     const clickY = h - 100
     log(`Window ${w}x${h}, clicking input area at (${clickX}, ${clickY})`)
     await run(`xdotool mousemove --window "${wid}" ${clickX} ${clickY}`)
-    await new Promise(r => setTimeout(r, 80))
+    await new Promise(r => setTimeout(r, this.delay.focusMove))
     await run(`xdotool click 1`)
-    await new Promise(r => setTimeout(r, INPUT_CLICK_DELAY_MS))
+    await new Promise(r => setTimeout(r, this.delay.inputClick))
   }
 
   private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
@@ -259,21 +364,21 @@ export class LinuxSender implements IPlatformSender {
         warn('xclipSetImage failed, falling back to text')
         await xclipSet(content)
       }
-      await new Promise(r => setTimeout(r, 200))
+      await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
       log('Image pasted to clipboard successfully')
-      await new Promise(r => setTimeout(r, 500))
+      await new Promise(r => setTimeout(r, this.delay.imagePasteSettle))
     } else {
       log(`Pasting message (${content.length} chars)...`)
       await xclipSet(content)
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise(r => setTimeout(r, this.delay.textClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, this.delay.pasteSettle))
     }
 
     log(`Pressing Enter to send...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, POST_SEND_SETTLE_MS))
+    await new Promise(r => setTimeout(r, this.delay.postSendSettle))
 
     log('Message sent successfully')
     return true
@@ -401,8 +506,8 @@ export class LinuxSender implements IPlatformSender {
       const item = this.queue[0]
 
       const elapsed = Date.now() - this.lastSendTime
-      if (elapsed < INTER_MESSAGE_DELAY_MS) {
-        const wait = INTER_MESSAGE_DELAY_MS - elapsed
+      if (elapsed < this.delay.interMessage) {
+        const wait = this.delay.interMessage - elapsed
         log(`Waiting ${wait}ms before next send...`)
         await new Promise(r => setTimeout(r, wait))
       }

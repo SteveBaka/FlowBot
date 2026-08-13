@@ -263,8 +263,41 @@ class HttpService {
   private mediaUploads = new Map<string, { path: string; expires: number }>()
   private readonly mediaUploadTtlMs = 5 * 60 * 1000
 
+  // 身份库直读（WebUI 维护的 identity.db，同容器文件系统，发送前一次读取省 WCDB）
+  private identityDbReadOnly: any = null
+  private identityDbPath = ''
+
   constructor() {
     this.configService = ConfigService.getInstance()
+  }
+
+  private getIdentityDbPath(): string {
+    if (this.identityDbPath) return this.identityDbPath
+    const configDir = process.env.WEFLOW_CONFIG_DIR || (process.env.WEFLOW_DOCKER ? '/opt/weflow/data' : '')
+    this.identityDbPath = configDir ? require('path').join(configDir, 'identity.db') : ''
+    return this.identityDbPath
+  }
+
+  /**
+   * 从身份库读取显示名/自定义 wxid 缓存（优先于 WCDB 查询，失败返回 null 走兜底）。
+   */
+  private queryIdentityName(wxid: string): { displayName?: string; customWxid?: string } | null {
+    try {
+      const dbPath = this.getIdentityDbPath()
+      if (!dbPath) return null
+      if (!this.identityDbReadOnly) {
+        const { DatabaseSync } = require('node:sqlite')
+        this.identityDbReadOnly = new DatabaseSync(dbPath, { readOnly: true })
+      }
+      const row = this.identityDbReadOnly.prepare('SELECT display_name, custom_wxid FROM contacts WHERE real_wxid = ?').get(String(wxid))
+      if (row) {
+        return {
+          displayName: row.display_name ? String(row.display_name) : undefined,
+          customWxid: row.custom_wxid ? String(row.custom_wxid) : undefined
+        }
+      }
+    } catch {}
+    return null
   }
 
   /**
@@ -2938,6 +2971,21 @@ class HttpService {
     if (!this.looksLikeWxid(id)) return id
 
     const isGroup = /@chatroom$/i.test(id)
+
+    // 身份库优先（WebUI 维护的 display_name / custom_wxid 缓存，省 WCDB round-trip）
+    try {
+      const identity = this.queryIdentityName(id)
+      if (identity) {
+        if (isGroup) {
+          if (identity.displayName && identity.displayName !== id) return identity.displayName
+        } else if (identity.customWxid) {
+          // 私聊：优先自定义 wxid（微信号 alias），唯一不重名
+          return identity.customWxid
+        } else if (identity.displayName && identity.displayName !== id) {
+          return identity.displayName
+        }
+      }
+    } catch {}
 
     try {
       const contact = await chatService.getContact(id)
