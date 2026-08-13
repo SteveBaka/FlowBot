@@ -36,10 +36,14 @@ interface MessagePushPayload {
   sessionType: 'private' | 'group' | 'official' | 'other'
   rawid: string
   avatarUrl?: string
+  groupAvatarUrl?: string
   sourceName: string
   senderId?: string
+  senderName?: string
   senderCard?: string
   groupName?: string
+  selfId?: string
+  atUsers?: string[]
   content: string | null
   timestamp: number
   imagePath?: string
@@ -934,9 +938,29 @@ class MessagePushService {
       const groupInfo = await chatService.getContactAvatar(sessionId)
       const groupName = session.displayName || groupInfo?.displayName || sessionId
       const sourceName = await this.resolveGroupSourceName(sessionId, message, session)
-      const senderId = String(message.senderUsername || '').trim() || undefined
+
+      // sender_id：优先 WCDB sender_username；为空时兜底解析消息 XML <fromusername>（群消息发送者 wxid 权威来源）
+      let senderId = String(message.senderUsername || '').trim() || undefined
+      if (!senderId) {
+        const fromUser = this.extractXmlValue(String(message.rawContent || message.content || ''), 'fromusername')
+        if (fromUser) senderId = fromUser
+      }
+
       const senderCard = await this.resolveGroupSourceCard(sessionId, message)
-      const avatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || groupInfo?.avatarUrl)
+
+      // sender_name：senderCard（群昵称）→ 联系人显示名 → sourceName
+      let senderName = senderCard
+      if (!senderName && senderId) {
+        try {
+          const senderContact = await chatService.getContactAvatar(senderId)
+          senderName = senderContact?.displayName || undefined
+        } catch {}
+      }
+      if (!senderName) senderName = sourceName
+
+      // avatar_url 语义 = 发送者头像：群消息无法低成本解析成员头像 → 置空，由下游走 group-members 查询
+      // group_avatar_url 语义 = 群头像（原 avatar_url 承载，现显式分离）
+      const groupAvatarUrl = await this.normalizePushAvatarUrl(session.avatarUrl || groupInfo?.avatarUrl)
       const myWxid = this.configService.getMyWxidCleaned()
       cacheGroup(sessionId, groupName, myWxid)
       scheduleGroupRefresh(sessionId)
@@ -965,10 +989,12 @@ class MessagePushService {
         rawid,
         selfId,
         atUsers,
-        avatarUrl,
+        avatarUrl: undefined,
+        groupAvatarUrl,
         groupName,
         sourceName,
         senderId,
+        senderName,
         senderCard,
         content,
         timestamp: createTime,
@@ -986,14 +1012,16 @@ class MessagePushService {
     cachePrivate(senderId)
     schedulePrivateRefresh(senderId)
     const senderIdAlias = await this.resolveSenderAlias(senderId)
+    const sourceName = session.displayName || contactInfo?.displayName || sessionId
     return {
       event: 'message.new',
       sessionId,
       sessionType,
       rawid,
       avatarUrl,
-      sourceName: session.displayName || contactInfo?.displayName || sessionId,
+      sourceName,
       senderId,
+      senderName: sourceName,
       content,
       timestamp: createTime,
       imagePath,

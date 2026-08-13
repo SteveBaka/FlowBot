@@ -263,6 +263,9 @@ class HttpService {
   private mediaUploads = new Map<string, { path: string; expires: number }>()
   private readonly mediaUploadTtlMs = 5 * 60 * 1000
 
+  // 图片发送限制（防微信粘贴冻结）：仅体积 >5MB 拒绝
+  private readonly IMAGE_SEND_MAX_BYTES = 5 * 1024 * 1024
+
   constructor() {
     this.configService = ConfigService.getInstance()
   }
@@ -2993,6 +2996,8 @@ class HttpService {
     if (imageToken) {
       const entry = this.mediaUploads.get(String(imageToken))
       if (entry && entry.expires > Date.now() && fs.existsSync(entry.path)) {
+        const err = this.validateSendImage(entry.path)
+        if (err) return { path: null, error: err }
         return { path: entry.path }
       }
       return { path: null, error: '图片 token 无效或已过期' }
@@ -3007,9 +3012,17 @@ class HttpService {
         }
         const buf = Buffer.from(b64, 'base64')
         if (buf.length > 0) {
+          if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
+            return { path: null, error: `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
+          }
           const ext = this.detectImageExt(buf)
           const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
           fs.writeFileSync(tmpPath, buf)
+          const err = this.validateSendImage(tmpPath)
+          if (err) {
+            try { fs.unlinkSync(tmpPath) } catch {}
+            return { path: null, error: err }
+          }
           return { path: tmpPath }
         }
       } catch {}
@@ -3028,10 +3041,17 @@ class HttpService {
         }
         if (!resp.ok) return { path: null, error: `URL 下载失败: HTTP ${resp.status}` }
         const buf = Buffer.from(await resp.arrayBuffer())
-        if (buf.length > 15 * 1024 * 1024) return { path: null, error: 'URL 图片过大（>15MB）' }
+        if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
+          return { path: null, error: `URL 图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
+        }
         const ext = this.detectImageExt(buf)
         const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
         fs.writeFileSync(tmpPath, buf)
+        const err = this.validateSendImage(tmpPath)
+        if (err) {
+          try { fs.unlinkSync(tmpPath) } catch {}
+          return { path: null, error: err }
+        }
         return { path: tmpPath }
       } catch (error: any) {
         return { path: null, error: `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}` }
@@ -3040,7 +3060,11 @@ class HttpService {
     // ③ image_path：仅同主机（flowbot 文件系统）有效
     if (imagePath) {
       const p = String(imagePath).trim()
-      if (fs.existsSync(p)) return { path: p }
+      if (fs.existsSync(p)) {
+        const err = this.validateSendImage(p)
+        if (err) return { path: null, error: err }
+        return { path: p }
+      }
       return { path: null, error: '路径不可访问（跨主机请使用 image_token / image_base64 / image_url）' }
     }
     return { path: null, error: 'Image message requires image_token, image_base64, image_url or image_path' }
@@ -3054,6 +3078,19 @@ class HttpService {
     if (buf[0] === 0x52 && buf[1] === 0x49) return '.webp'
     if (buf[0] === 0x42 && buf[1] === 0x4d) return '.bmp'
     return '.png'
+  }
+
+  /** 校验待发送图片（仅体积限制），超限返回错误文案，合法返回 null */
+  private validateSendImage(filePath: string): string | null {
+    try {
+      const st = fs.statSync(filePath)
+      if (st.size > this.IMAGE_SEND_MAX_BYTES) {
+        return `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）`
+      }
+    } catch {
+      return '图片校验失败'
+    }
+    return null
   }
 
   private scheduleTempImageCleanup(filePath: string): void {
