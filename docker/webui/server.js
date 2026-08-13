@@ -1116,20 +1116,24 @@ function startPluginApiServer(port, token) {
           fetchOpts.body = await body(req)
         }
         const result = await proxyRequest(targetUrl, fetchOpts)
-        // 会话列表：私聊 username 改写为自定义 wxid；群聊名称以身份库（WCDB Contact 权威源）为准自动刷新
-        if (p === '/api/v1/sessions' && req.method === 'GET' && result.data && Array.isArray(result.data.sessions)) {
-          for (const s of result.data.sessions) {
-            if (s && s.sessionType !== 'group' && s.username) {
-              const alias = getCustomWxid(String(s.username))
-              if (alias) s.username = alias
-            } else if (s && s.sessionType === 'group' && s.username) {
-              const g = identityMemory.get(String(s.username))
-              if (g && g.display_name && g.display_name !== s.displayName) {
-                s.displayName = g.display_name
-              }
-            }
-          }
-        }
+         // 会话列表：私聊 username 改写为自定义 wxid；群聊名称/头像以身份库为准自动刷新
+         if (p === '/api/v1/sessions' && req.method === 'GET' && result.data && Array.isArray(result.data.sessions)) {
+           for (const s of result.data.sessions) {
+             const iden = s && s.username ? identityMemory.get(String(s.username)) : undefined
+             if (s && iden && iden.avatar_url && !s.avatarUrl) {
+               s.avatarUrl = iden.avatar_url
+             }
+             if (s && s.sessionType !== 'group' && s.username) {
+               const alias = getCustomWxid(String(s.username))
+               if (alias) s.username = alias
+             } else if (s && s.sessionType === 'group' && s.username) {
+               const g = identityMemory.get(String(s.username))
+               if (g && g.display_name && g.display_name !== s.displayName) {
+                 s.displayName = g.display_name
+               }
+             }
+           }
+         }
         json(res, result.data, result.status)
       } catch (err) {
         json(res, { ok: false, error: String(err) }, 502)
@@ -1269,16 +1273,25 @@ function initIdentityDb() {
     identityDb.exec(
       'CREATE TABLE IF NOT EXISTS contacts (' +
       'real_wxid TEXT PRIMARY KEY, custom_wxid TEXT, display_name TEXT, nickname TEXT, ' +
-      'type TEXT, numeric_id INTEGER, updated_at INTEGER, dirty INTEGER DEFAULT 0)'
+      'type TEXT, numeric_id INTEGER, updated_at INTEGER, dirty INTEGER DEFAULT 0, avatar_url TEXT)'
     )
     identityDb.exec('CREATE INDEX IF NOT EXISTS idx_contacts_custom ON contacts(custom_wxid)')
     identityDb.exec('CREATE INDEX IF NOT EXISTS idx_contacts_numeric ON contacts(numeric_id)')
     identityDb.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
     identityDb.exec(
       'CREATE TABLE IF NOT EXISTS group_nicknames (' +
-      'session_id TEXT NOT NULL, member_wxid TEXT NOT NULL, nickname TEXT, ' +
+      'session_id TEXT NOT NULL, member_wxid TEXT NOT NULL, nickname TEXT, avatar_url TEXT, ' +
       'updated_at INTEGER, PRIMARY KEY (session_id, member_wxid))'
     )
+    // 存量库迁移：补 avatar_url 列
+    try {
+      const cols = identityDb.prepare("PRAGMA table_info(contacts)").all().map(c => c.name)
+      if (!cols.includes('avatar_url')) identityDb.exec('ALTER TABLE contacts ADD COLUMN avatar_url TEXT')
+    } catch {}
+    try {
+      const gcols = identityDb.prepare("PRAGMA table_info(group_nicknames)").all().map(c => c.name)
+      if (!gcols.includes('avatar_url')) identityDb.exec('ALTER TABLE group_nicknames ADD COLUMN avatar_url TEXT')
+    } catch {}
     loadIdentityFromDb()
   } catch (e) {
     console.error('[IdentityDB] init error: ' + e.message)
@@ -1318,6 +1331,28 @@ function rememberSelfWxid(wxid) {
   }
 }
 
+// 会话/联系人头像学习入库（推送 payload 携带 CDN 链接 或 data URI 群头像）
+function rememberAvatar(wxid, avatarUrl) {
+  const id = String(wxid || '').trim()
+  const url = String(avatarUrl || '').trim()
+  const isHttp = url.startsWith('http')
+  const isDataImage = url.startsWith('data:image/')
+  if (!id || !url || (!isHttp && !isDataImage)) return
+  try {
+    // http 链接持久化到 DB（防膨胀）；data URI 仅入内存，供会话兜底读取
+    if (isHttp) {
+      identityDb.prepare(
+        'INSERT INTO contacts (real_wxid, avatar_url, updated_at, dirty) VALUES (?,?,?,1) ' +
+        'ON CONFLICT(real_wxid) DO UPDATE SET avatar_url=excluded.avatar_url, updated_at=excluded.updated_at'
+      ).run(id, url, Date.now())
+    }
+    const existing = identityMemory.get(id)
+    if (existing) {
+      identityMemory.set(id, Object.assign({}, existing, { avatar_url: url, updated_at: Date.now() }))
+    }
+  } catch (e) {}
+}
+
 // 同步各群成员群昵称 → group_nicknames 表（供 @ 链路 / 未来特性读身份库）
 async function syncBotGroupNicknames() {
   const myWxid = getSelfWxid()
@@ -1344,10 +1379,11 @@ async function syncBotGroupNicknames() {
           const mid = String(m.wxid || m.username || '').trim()
           if (!mid) continue
           const nick = String(m.groupNickname || m.nickname || m.displayName || '').trim()
+          const avatar = String(m.avatarUrl || '').trim()
           identityDb.prepare(
-            'INSERT INTO group_nicknames (session_id, member_wxid, nickname, updated_at) VALUES (?,?,?,?) ' +
-            'ON CONFLICT(session_id, member_wxid) DO UPDATE SET nickname=excluded.nickname, updated_at=excluded.updated_at'
-          ).run(g.username, mid, nick || null, Date.now())
+            'INSERT INTO group_nicknames (session_id, member_wxid, nickname, avatar_url, updated_at) VALUES (?,?,?,?,?) ' +
+            'ON CONFLICT(session_id, member_wxid) DO UPDATE SET nickname=excluded.nickname, avatar_url=excluded.avatar_url, updated_at=excluded.updated_at'
+          ).run(g.username, mid, nick || null, avatar || null, Date.now())
         }
         identityDb.exec('COMMIT')
       } catch (e) {
@@ -1546,6 +1582,7 @@ function normalizePushPayload(p) {
       type: type,
       content: String(p.content || ''),
       timestamp: Number(p.timestamp || 0),
+      avatar_url: p.avatarUrl ? String(p.avatarUrl) : undefined,
       image_path: p.imagePath || undefined,
       image_url: imageUrl,
       emoji_url: p.emojiUrl || undefined,
@@ -1566,6 +1603,10 @@ function handleSseBlock(block) {
     // 学习机器人自身 wxid 并写入身份库（@ 信息链路在身份库中的读写）
     if (payload && payload.selfId) {
       rememberSelfWxid(String(payload.selfId))
+    }
+    // 会话/联系人头像入库（CDN 链接）
+    if (payload && payload.sessionId && payload.avatarUrl) {
+      rememberAvatar(String(payload.sessionId), String(payload.avatarUrl))
     }
     // 引导期/重放过滤：丢弃时间戳早于本进程启动前 5 秒的旧消息（重启后摒弃先前消息）
     // 注意：payload.timestamp 为秒，serverStartTime 为毫秒，需换算

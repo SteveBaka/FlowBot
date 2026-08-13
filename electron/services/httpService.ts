@@ -1268,6 +1268,23 @@ class HttpService {
 
       const limitedSessions = filteredSessions.slice(0, limit)
 
+      // 补齐会话头像（含群头像：@chatroom 走 head_image.db）。
+      // onlyMissingAvatar+skipDisplayName：仅查询缺失头像的会话，命中 avatarCache 的直接复用，减轻容器负担。
+      try {
+        const enrich = await chatService.enrichSessionsContactInfo(
+          limitedSessions.map(s => s.username),
+          { skipDisplayName: true, onlyMissingAvatar: true }
+        )
+        if (enrich.success && enrich.contacts) {
+          for (const session of limitedSessions) {
+            const info = enrich.contacts[session.username]
+            if (info?.avatarUrl) session.avatarUrl = info.avatarUrl
+          }
+        }
+      } catch (e) {
+        console.error('[HttpService] handleSessions enrich avatar error:', e)
+      }
+
       if (format === 'chatlab') {
         this.sendJson(res, {
           sessions: limitedSessions.map(s => ({
@@ -1276,7 +1293,8 @@ class HttpService {
             platform: 'wechat',
             type: this.getApiSessionType(s.username),
             messageCount: s.messageCountHint || undefined,
-            lastMessageAt: s.lastTimestamp
+            lastMessageAt: s.lastTimestamp,
+            avatarUrl: s.avatarUrl
           }))
         })
         return
@@ -1291,7 +1309,8 @@ class HttpService {
           type: s.type,
           sessionType: this.getApiSessionType(s.username),
           lastTimestamp: s.lastTimestamp,
-          unreadCount: s.unreadCount
+          unreadCount: s.unreadCount,
+          avatarUrl: s.avatarUrl
         }))
       })
     } catch (error) {
