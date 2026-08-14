@@ -1025,13 +1025,18 @@ var SendManagerPage = {
     var mergeEnabled = ref(false)
     var dedupEnabled = ref(false)
     var priorityEnabled = ref(false)
+    var backpressureEnabled = ref(false)
+    var dynamicIntervalEnabled = ref(false)
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500 })
     var status = reactive({
       mode: 'standard',
       queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
       backpressure: { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true },
-      options: { merge: false, dedup: false, priority: false },
+      options: { merge: false, dedup: false, priority: false, dynamicInterval: false },
       dedupCount: 0,
       stats: { sent: 0, failed: 0 },
+      lastSendSteps: [],
+      successStreak: 0,
       batch: { contact: null, size: 0 },
       pinyinCacheSize: 0
     })
@@ -1069,6 +1074,11 @@ var SendManagerPage = {
         mergeEnabled.value = d.sendMerge === true
         dedupEnabled.value = d.sendDedup === true
         priorityEnabled.value = d.sendPriority === true
+        backpressureEnabled.value = d.sendBackpressureEnabled === true
+        dynamicIntervalEnabled.value = d.sendDynamicInterval === true
+        bpParams.threshold = d.sendFailureThreshold || 3
+        bpParams.cooldownMs = d.sendCooldownMs || 10000
+        bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
         custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
         initParams()
       }
@@ -1095,13 +1105,16 @@ var SendManagerPage = {
         status.options = (d.status.options && {
           merge: d.status.options.merge === true,
           dedup: d.status.options.dedup === true,
-          priority: d.status.options.priority === true
-        }) || { merge: false, dedup: false, priority: false }
+          priority: d.status.options.priority === true,
+          dynamicInterval: d.status.options.dynamicInterval === true
+        }) || { merge: false, dedup: false, priority: false, dynamicInterval: false }
         status.dedupCount = d.status.dedupCount || 0
         status.stats = (d.status.stats && {
           sent: d.status.stats.sent || 0,
           failed: d.status.stats.failed || 0
         }) || { sent: 0, failed: 0 }
+        status.lastSendSteps = (Array.isArray(d.status.lastSendSteps)) ? d.status.lastSendSteps : []
+        status.successStreak = d.status.successStreak || 0
         status.batch = (d.status.batch && {
           contact: d.status.batch.contact || null,
           size: d.status.batch.size || 0
@@ -1134,7 +1147,12 @@ var SendManagerPage = {
           sendAutoDowngrade: autoDowngrade.value,
           sendMerge: mergeEnabled.value,
           sendDedup: dedupEnabled.value,
-          sendPriority: priorityEnabled.value
+          sendPriority: priorityEnabled.value,
+          sendBackpressureEnabled: backpressureEnabled.value,
+          sendDynamicInterval: dynamicIntervalEnabled.value,
+          sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
+          sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
+          sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500)
         })
       })
       saving.value = false
@@ -1189,6 +1207,18 @@ var SendManagerPage = {
       return new Date(ts).toLocaleTimeString()
     }
 
+    function stepSummary() {
+      var steps = status.lastSendSteps
+      if (!steps || !steps.length) return '-'
+      var total = 0
+      var parts = []
+      for (var i = 0; i < steps.length; i++) {
+        total += steps[i].ms || 0
+        parts.push(steps[i].step + ' ' + steps[i].ms + 'ms')
+      }
+      return parts.join(' / ') + '（总计 ~' + Math.round(total / 100) / 10 + 's）'
+    }
+
     var timer = null
     onMounted(function () {
       loadMode()
@@ -1202,10 +1232,11 @@ var SendManagerPage = {
     return {
       mode: mode, params: params, status: status, saving: saving, autoDowngrade: autoDowngrade,
       mergeEnabled: mergeEnabled, dedupEnabled: dedupEnabled, priorityEnabled: priorityEnabled,
+      backpressureEnabled: backpressureEnabled, dynamicIntervalEnabled: dynamicIntervalEnabled, bpParams: bpParams,
       clearingQueue: clearingQueue, clearingPinyin: clearingPinyin,
       profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
       clearQueue: clearQueue, clearPinyinCache: clearPinyinCache,
-      onModeChange: onModeChange, fmtTime: fmtTime
+      onModeChange: onModeChange, fmtTime: fmtTime, stepSummary: stepSummary
     }
   },
   template: '<div>' +
@@ -1219,8 +1250,10 @@ var SendManagerPage = {
     '<div class="form-row"><label>正在发送</label><span class="status-badge" :class="status.queue.processing ? \'connected\' : \'disconnected\'">{{ status.queue.processing ? "是" : "否" }}</span></div>' +
     '<div class="form-row"><label>队列冷却</label><span :class="status.backpressure.coolRemainingMs > 0 ? \'status-badge disconnected\' : \'\'">{{ status.backpressure.coolRemainingMs > 0 ? "冷却中 " + Math.ceil(status.backpressure.coolRemainingMs / 1000) + "s" : "无" }}</span></div>' +
     '<div class="form-row"><label>连续失败</label><span>{{ status.backpressure.consecutiveFailures }} 次</span></div>' +
+    '<div class="form-row"><label>连续成功</label><span>{{ status.successStreak }} 次</span></div>' +
     '<div class="form-row"><label>已去重</label><span>{{ status.dedupCount }} 条</span></div>' +
     '<div class="form-row"><label>吞吐统计</label><span>已发 {{ status.stats.sent }} / 失败 {{ status.stats.failed }}</span></div>' +
+    '<div class="form-row"><label>最近发送耗时</label><span style="font-size:12px;text-align:right">{{ stepSummary() }}</span></div>' +
     '<div class="form-row"><label>最近发送</label><span>{{ fmtTime(status.queue.lastSendTime) }}</span></div>' +
     '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条 <button class="btn btn-secondary btn-sm" style="margin-left:8px" :disabled="clearingPinyin" @click="clearPinyinCache">{{ clearingPinyin ? "清空中..." : "清空" }}</button></span></div>' +
     '</div>' +
@@ -1254,6 +1287,16 @@ var SendManagerPage = {
     '<div class="form-hint">同一联系人同时待发的相同文本只保留第一条，避免重复发送</div>' +
     '<div class="form-row"><label>联系人分组优先</label><toggle-switch v-model="priorityEnabled" /></div>' +
     '<div class="form-hint">同一联系人的消息（文字+图片）在队列中连续排列，按首次出现顺序分发，避免图文发送割裂</div>' +
+    '<div class="form-row"><label>自适应背压</label><toggle-switch v-model="backpressureEnabled" /></div>' +
+    '<div class="form-hint">发送连续失败达到阈值时暂停队列冷却，并自动降档保护；默认关闭</div>' +
+    '<div class="form-row"><label>动态缩间隔</label><toggle-switch v-model="dynamicIntervalEnabled" /></div>' +
+    '<div class="form-hint">连续成功时自动缩短消息间隔（下限 300ms），失败后复位；默认关闭</div>' +
+    '<div class="form-row"><label>失败阈值</label><input type="number" min="1" step="1" v-model.number="bpParams.threshold" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">连续失败达到该次数触发队列冷却（默认 3）</div>' +
+    '<div class="form-row"><label>冷却时长(ms)</label><input type="number" min="1000" step="1000" v-model.number="bpParams.cooldownMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">队列暂停时长，默认 10000（10 秒）</div>' +
+    '<div class="form-row"><label>退避基数(ms)</label><input type="number" min="100" step="100" v-model.number="bpParams.backoffBaseMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
     '</div>' +
 
     '<div class="card">' +

@@ -3474,7 +3474,12 @@ class HttpService {
                 'sendAutoDowngrade',
                 'sendMerge',
                 'sendDedup',
-                'sendPriority'
+                'sendPriority',
+                'sendBackpressureEnabled',
+                'sendDynamicInterval',
+                'sendFailureThreshold',
+                'sendCooldownMs',
+                'sendBackoffBaseMs'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {

@@ -22,8 +22,11 @@ const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
 
 // ─── 自适应背压（P1-L2）──────────────────────────────────────────────
-const CONSECUTIVE_FAILURE_THRESHOLD = 3   // 连续失败 ≥3 次 → 队列冷却 10s + 自动降档
-const QUEUE_COOLDOWN_MS = 10 * 1000        // 队列冷却时长
+const CONSECUTIVE_FAILURE_THRESHOLD = 3   // 连续失败 ≥3 次 → 队列冷却 10s + 自动降档（默认值，可配置）
+const QUEUE_COOLDOWN_MS = 10 * 1000        // 队列冷却时长（默认值，可配置）
+// ─── L2 动态缩间隔（sendDynamicInterval，默认关闭）─────────────────────
+const DYNAMIC_INTERVAL_STEP_MS = 50        // 每连续成功 1 条缩短的间隔（ms）
+const DYNAMIC_INTERVAL_MIN_MS = 300        // 动态缩短下限保护
 
 // ─── 发送延时档位（safe / standard / aggressive）───────────────────────────────
 type DelayMode = 'safe' | 'standard' | 'aggressive'
@@ -97,6 +100,33 @@ function isQueueOptionEnabled(key: 'sendMerge' | 'sendDedup' | 'sendPriority'): 
   } catch {
     return false
   }
+}
+
+/** 自适应背压总开关（默认关闭） */
+function isBackpressureEnabled(): boolean {
+  try {
+    return ConfigService.getInstance().get('sendBackpressureEnabled') === true
+  } catch {
+    return false
+  }
+}
+
+/** L2 动态缩间隔开关（默认关闭） */
+function isDynamicIntervalEnabled(): boolean {
+  try {
+    return ConfigService.getInstance().get('sendDynamicInterval') === true
+  } catch {
+    return false
+  }
+}
+
+/** 读取数值配置（非法/缺失回退默认值） */
+function getConfigNumber(key: string, def: number): number {
+  try {
+    const v = ConfigService.getInstance().get(key as any)
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
+  } catch {}
+  return def
 }
 
 // ─── 拼音缓存：避免每次中文名起子进程（python3 /opt/pinyin.py）──────────────────
@@ -237,6 +267,9 @@ export class LinuxSender implements IPlatformSender {
   // 吞吐统计
   private totalSent = 0
   private totalFailed = 0
+  // L2 动态缩间隔 / 每步耗时
+  private successStreak = 0
+  private lastSendSteps: Array<{ step: string; ms: number }> = []
 
   constructor() {
     try {
@@ -293,6 +326,7 @@ export class LinuxSender implements IPlatformSender {
   /** 消息发送成功：复位连续失败计数，并向上恢复一档（至多到配置档位） */
   private onSendSuccess(): void {
     this.consecutiveFailures = 0
+    this.successStreak += 1
     if (this.activeTier !== null) {
       const configuredIdx = this.getConfiguredTierIndex(getDelayMode())
       const nextIdx = this.activeTier - 1
@@ -306,13 +340,17 @@ export class LinuxSender implements IPlatformSender {
     }
   }
 
-  /** 消息发送失败：累计连续失败，≥阈值 → 队列冷却 10s + 自动降档 */
+  /** 消息发送失败：背压开启时累计连续失败，≥阈值 → 队列冷却 + 自动降档 */
   private onSendFailure(): void {
+    this.successStreak = 0
+    if (!isBackpressureEnabled()) return
+    const threshold = Math.max(1, Math.floor(getConfigNumber('sendFailureThreshold', CONSECUTIVE_FAILURE_THRESHOLD)))
     this.consecutiveFailures += 1
-    if (this.consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
+    if (this.consecutiveFailures >= threshold) {
       this.consecutiveFailures = 0
-      this.queueCoolUntil = Date.now() + QUEUE_COOLDOWN_MS
-      warn(`Send failed ${CONSECUTIVE_FAILURE_THRESHOLD} times consecutively, pausing queue for ${QUEUE_COOLDOWN_MS / 1000}s`)
+      const cooldownMs = Math.max(1000, Math.floor(getConfigNumber('sendCooldownMs', QUEUE_COOLDOWN_MS)))
+      this.queueCoolUntil = Date.now() + cooldownMs
+      warn(`Send failed ${threshold} times consecutively, pausing queue for ${Math.round(cooldownMs / 1000)}s`)
       if (this.isAutoDowngradeEnabled()) this.downgradeTier()
     }
   }
@@ -324,6 +362,14 @@ export class LinuxSender implements IPlatformSender {
     if (current >= 2) return
     this.activeTier = current + 1
     warn(`Auto downgraded delay tier: ${this.tierIndexToMode(current)} → ${this.tierIndexToMode(this.activeTier)}`)
+  }
+
+  /** 生效的队列消息间隔：动态缩间隔开启时按连续成功缩短（下限 300ms），否则用档位值 */
+  private getEffectiveInterMessage(): number {
+    const base = this.delay.interMessage
+    if (!isDynamicIntervalEnabled() || this.successStreak <= 0) return base
+    const shrink = Math.min(this.successStreak * DYNAMIC_INTERVAL_STEP_MS, base * 0.5)
+    return Math.max(DYNAMIC_INTERVAL_MIN_MS, Math.round(base - shrink))
   }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
@@ -539,10 +585,15 @@ export class LinuxSender implements IPlatformSender {
     atMentions?: Array<{ wxid: string; name: string }>,
     skipSearch = false
   ): Promise<{ success: boolean; error?: string }> {
+    const steps: Array<{ step: string; ms: number }> = []
+    let t0 = Date.now()
+
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
     }
+    steps.push({ step: '激活窗口', ms: Date.now() - t0 })
 
+    t0 = Date.now()
     if (!skipSearch) {
       log(`Searching contact "${contactName}"...`)
       if (!await this.searchAndSelectContact(contactName, wid)) {
@@ -551,18 +602,24 @@ export class LinuxSender implements IPlatformSender {
     } else {
       log(`Reusing open chat for "${contactName}" (skip search)`)
     }
+    steps.push({ step: '搜索联系人', ms: Date.now() - t0 })
 
+    t0 = Date.now()
     await this.ensureFocusInInput(wid)
+    steps.push({ step: '聚焦输入框', ms: Date.now() - t0 })
 
     // 真正渲染群内 @：输入 @ + 成员名 + 回车选中，再拼正文
     if (atMentions && atMentions.length > 0) {
       await this.typeAtMentions(atMentions, wid)
     }
 
+    t0 = Date.now()
     if (!await this.pasteAndSend(content, wid, imagePath)) {
       return { success: false, error: '粘贴发送失败' }
     }
+    steps.push({ step: '粘贴发送', ms: Date.now() - t0 })
 
+    this.lastSendSteps = steps
     this.lastSendTime = Date.now()
     log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"${atMentions && atMentions.length ? ` with @(${atMentions.length})` : ''}`)
     return { success: true }
@@ -662,8 +719,8 @@ export class LinuxSender implements IPlatformSender {
     while (this.queue.length > 0) {
       this.refreshDelayProfile()
 
-      // 背压冷却：暂停队列（新消息排队等待，不发送）
-      if (Date.now() < this.queueCoolUntil) {
+      // 背压冷却：暂停队列（新消息排队等待，不发送；仅背压开启时生效）
+      if (isBackpressureEnabled() && Date.now() < this.queueCoolUntil) {
         const remaining = this.queueCoolUntil - Date.now()
         const wait = Math.min(remaining, 1000)
         log(`Queue cooldown active (${Math.ceil(remaining / 1000)}s left), pausing send queue`)
@@ -673,9 +730,10 @@ export class LinuxSender implements IPlatformSender {
 
       const item = this.queue[0]
 
+      const interMessage = this.getEffectiveInterMessage()
       const elapsed = Date.now() - this.lastSendTime
-      if (elapsed < this.delay.interMessage) {
-        const wait = this.delay.interMessage - elapsed
+      if (elapsed < interMessage) {
+        const wait = interMessage - elapsed
         log(`Waiting ${wait}ms before next send...`)
         await new Promise(r => setTimeout(r, wait))
       }
@@ -712,7 +770,8 @@ export class LinuxSender implements IPlatformSender {
           item.resolve({ success: false, error: `发送失败（重试${MAX_RETRIES}次）: ${result.error}`, method: this.currentMode })
           this.queue.shift()
         } else {
-          const backoff = Math.min(RETRY_DELAY_MS * Math.pow(2, item.retries - 1), RETRY_BACKOFF_MAX_MS)
+          const backoffBase = Math.max(100, Math.floor(getConfigNumber('sendBackoffBaseMs', RETRY_DELAY_MS)))
+          const backoff = Math.min(backoffBase * Math.pow(2, item.retries - 1), RETRY_BACKOFF_MAX_MS)
           warn(`Message ${item.id} failed (attempt ${item.retries}/${MAX_RETRIES}), retrying in ${backoff}ms...`)
           await new Promise(r => setTimeout(r, backoff))
         }
@@ -792,20 +851,27 @@ export class LinuxSender implements IPlatformSender {
       profile: { ...resolveDelayProfile(mode) },
       custom: getDelayCustomOverrides(),
       backpressure: {
+        enabled: isBackpressureEnabled(),
         consecutiveFailures: this.consecutiveFailures,
         coolRemainingMs: Math.max(0, this.queueCoolUntil - Date.now()),
-        autoDowngrade: this.isAutoDowngradeEnabled()
+        autoDowngrade: this.isAutoDowngradeEnabled(),
+        failureThreshold: Math.max(1, Math.floor(getConfigNumber('sendFailureThreshold', CONSECUTIVE_FAILURE_THRESHOLD))),
+        cooldownMs: Math.max(1000, Math.floor(getConfigNumber('sendCooldownMs', QUEUE_COOLDOWN_MS))),
+        backoffBaseMs: Math.max(100, Math.floor(getConfigNumber('sendBackoffBaseMs', RETRY_DELAY_MS)))
       },
       options: {
         merge: isQueueOptionEnabled('sendMerge'),
         dedup: isQueueOptionEnabled('sendDedup'),
-        priority: isQueueOptionEnabled('sendPriority')
+        priority: isQueueOptionEnabled('sendPriority'),
+        dynamicInterval: isDynamicIntervalEnabled()
       },
       dedupCount: this.dedupCount,
       stats: {
         sent: this.totalSent,
         failed: this.totalFailed
       },
+      lastSendSteps: this.lastSendSteps,
+      successStreak: this.successStreak,
       batch: {
         contact: batchContact,
         size: batchSize

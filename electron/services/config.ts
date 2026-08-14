@@ -85,6 +85,11 @@ interface ConfigSchema {
   sendMerge: boolean
   sendDedup: boolean
   sendPriority: boolean
+  sendBackpressureEnabled: boolean
+  sendDynamicInterval: boolean
+  sendFailureThreshold: number
+  sendCooldownMs: number
+  sendBackoffBaseMs: number
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -267,6 +272,11 @@ export class ConfigService {
       sendMerge: false,
       sendDedup: false,
       sendPriority: false,
+      sendBackpressureEnabled: false,
+      sendDynamicInterval: false,
+      sendFailureThreshold: 3,
+      sendCooldownMs: 10000,
+      sendBackoffBaseMs: 1500,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',
