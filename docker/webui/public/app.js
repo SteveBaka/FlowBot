@@ -1052,9 +1052,9 @@ var SendManagerPage = {
       { key: 'focusMove', label: '聚焦移动' },
       { key: 'inputClick', label: '点击输入框' },
       { key: 'textClipSettle', label: '文本剪贴板' },
-      { key: 'pasteSettle', label: '文本粘贴' },
+      { key: 'pasteSettle', label: '文本粘贴后发送' },
       { key: 'imageClipSettle', label: '图片剪贴板' },
-      { key: 'imagePasteSettle', label: '图片粘贴' },
+      { key: 'imagePasteSettle', label: '图片粘贴后发送' },
       { key: 'postSendSettle', label: '发送后稳定' }
     ]
 
@@ -1265,13 +1265,16 @@ var SendManagerPage = {
     '</div>' +
     '<div class="form-row"><label>失败自动降档</label><toggle-switch v-model="autoDowngrade" /></div>' +
     '<div class="delay-grid">' +
-    '<div class="delay-item" v-for="item in profileLabels" :key="item.key">' +
+    '<template v-for="(item, idx) in profileLabels" :key="item.key">' +
+    '<div class="delay-group-title" v-if="idx === 6">粘贴发送（剪贴板/粘贴/发送稳定，建议 ≥ 当前值）</div>' +
+    '<div class="delay-item">' +
     '<div class="delay-item-label">{{ item.label }}</div>' +
     '<div class="delay-item-input">' +
     '<input type="number" min="0" step="10" v-model.number="params[item.key]">' +
     '<span class="ms">ms</span>' +
     '</div>' +
     '</div>' +
+    '</template>' +
     '</div>' +
     '<div style="margin-top:12px">' +
     '<button class="btn btn-secondary" style="margin-right:8px" @click="resetCustom">恢复预设值</button>' +
@@ -1459,7 +1462,7 @@ var LoginPage = {
   },
   template: '<div class="login-page">' +
     '<div class="login-card">' +
-    '<div class="login-logo">W</div>' +
+    '<div class="login-logo"><img src="icon.png" alt="FlowBOT"></div>' +
     '<h2 style="border:none;padding:0;margin:0 0 6px;font-size:22px;color:var(--accent)">FlowBOT</h2>' +
     '<p style="font-size:13px;color:var(--text-muted);margin:0 0 28px">请输入密码以访问管理面板</p>' +
     '<div v-if="error" class="login-error">{{ error }}</div>' +

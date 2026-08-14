@@ -197,7 +197,7 @@ async function xclipSet(text: any): Promise<void> {
   if (!str) return
   const escaped = str.replace(/'/g, "'\\''")
   try {
-    await execAsync(`echo -n '${escaped}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -silent`, {
+    await execAsync(`echo -n '${escaped}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -silent >/dev/null 2>&1`, {
       timeout: 3000,
       env: DISPLAY_ENV
     })
@@ -225,7 +225,7 @@ async function xclipGet(): Promise<string> {
 
 async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Promise<boolean> {
   try {
-    await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t ${mime} -i "${imagePath.replace(/"/g, '\\"')}"`, {
+    await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t ${mime} -i "${imagePath.replace(/"/g, '\\"')}" >/dev/null 2>&1`, {
       timeout: 5000,
       env: DISPLAY_ENV
     })
@@ -234,7 +234,7 @@ async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Pro
     warn(`xclipSetImage failed (${mime}): ${e}`)
     if (mime !== 'image/bmp') {
       try {
-        await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t image/bmp -i "${imagePath.replace(/"/g, '\\"')}"`, {
+        await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t image/bmp -i "${imagePath.replace(/"/g, '\\"')}" >/dev/null 2>&1`, {
           timeout: 5000,
           env: DISPLAY_ENV
         })
