@@ -965,7 +965,7 @@ var AboutPage = {
     '<h1 class="page-title">关于</h1>' +
 
     '<div class="card" style="text-align:center">' +
-    '<div class="about-logo">W</div>' +
+    '<div class="about-logo"><img src="icon.png" alt="FlowBOT"></div>' +
     '<h2 style="border:none;padding:0">FlowBOT | {{ info.flowbotVersion }}</h2>' +
     '<p class="text-muted">基于 WeFlow & OneBot v11 制作的聊天机器人</p>' +
     '<div class="about-info">' +
