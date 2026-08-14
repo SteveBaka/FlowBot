@@ -16,9 +16,14 @@ const DISPLAY_ENV = { ...process.env, DISPLAY: process.env.DISPLAY || ':99', PAT
 
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1500
+const RETRY_BACKOFF_MAX_MS = 6000
 const INTER_MESSAGE_DELAY_MS = 800
 const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
+
+// ─── 自适应背压（P1-L2）──────────────────────────────────────────────
+const CONSECUTIVE_FAILURE_THRESHOLD = 3   // 连续失败 ≥3 次 → 队列冷却 10s + 自动降档
+const QUEUE_COOLDOWN_MS = 10 * 1000        // 队列冷却时长
 
 // ─── 发送延时档位（safe / standard / aggressive）───────────────────────────────
 type DelayMode = 'safe' | 'standard' | 'aggressive'
@@ -83,6 +88,15 @@ function getDelayCustomOverrides(): Record<string, number> {
 /** 计算生效延时档位：预设档位 + 自定义覆盖 */
 function resolveDelayProfile(mode: DelayMode): DelayProfile {
   return { ...DELAY_PROFILES[mode] || DELAY_PROFILES.standard, ...getDelayCustomOverrides() }
+}
+
+/** 队列优化开关（WebUI 配置，独立控制） */
+function isQueueOptionEnabled(key: 'sendMerge' | 'sendDedup' | 'sendPriority'): boolean {
+  try {
+    return ConfigService.getInstance().get(key) === true
+  } catch {
+    return false
+  }
 }
 
 // ─── 拼音缓存：避免每次中文名起子进程（python3 /opt/pinyin.py）──────────────────
@@ -213,6 +227,16 @@ export class LinuxSender implements IPlatformSender {
   private delay: DelayProfile = DELAY_PROFILES.standard
   private delayMode: DelayMode = 'standard'
   private lastDelayMode: DelayMode | '' = ''
+  // 自适应背压状态
+  private consecutiveFailures = 0
+  private queueCoolUntil = 0
+  private activeTier: number | null = null   // 降档后的档位索引（null=跟随配置档位）
+  // 队列优化状态（P1-L3）
+  private dedupCount = 0
+  private lastMergeContact = ''              // 当前批次的联系人（同联系人免重复搜索）
+  // 吞吐统计
+  private totalSent = 0
+  private totalFailed = 0
 
   constructor() {
     try {
@@ -227,10 +251,13 @@ export class LinuxSender implements IPlatformSender {
     loadPinyinCache()
   }
 
-  /** 按当前配置刷新延时档位（WebUI 改档/改参数后下一条消息生效） */
+  /** 按当前配置刷新延时档位（WebUI 改档/改参数后下一条消息生效；背压降档优先） */
   private refreshDelayProfile(): void {
     try {
-      const mode = getDelayMode()
+      let mode = getDelayMode()
+      if (this.activeTier !== null) {
+        mode = this.tierIndexToMode(this.activeTier)
+      }
       this.delay = resolveDelayProfile(mode)
       this.delayMode = mode
       if (mode !== this.lastDelayMode) {
@@ -241,6 +268,62 @@ export class LinuxSender implements IPlatformSender {
       this.delay = resolveDelayProfile('standard')
       this.delayMode = 'standard'
     }
+  }
+
+  // ─── 自适应背压：失败冷却 + 自动降档/升档 ─────────────────────────────────
+
+  private getConfiguredTierIndex(mode: DelayMode): number {
+    return mode === 'aggressive' ? 0 : mode === 'safe' ? 2 : 1
+  }
+
+  private tierIndexToMode(idx: number): DelayMode {
+    if (idx <= 0) return 'aggressive'
+    if (idx >= 2) return 'safe'
+    return 'standard'
+  }
+
+  private isAutoDowngradeEnabled(): boolean {
+    try {
+      return ConfigService.getInstance().get('sendAutoDowngrade') !== false
+    } catch {
+      return true
+    }
+  }
+
+  /** 消息发送成功：复位连续失败计数，并向上恢复一档（至多到配置档位） */
+  private onSendSuccess(): void {
+    this.consecutiveFailures = 0
+    if (this.activeTier !== null) {
+      const configuredIdx = this.getConfiguredTierIndex(getDelayMode())
+      const nextIdx = this.activeTier - 1
+      if (nextIdx >= configuredIdx) {
+        this.activeTier = nextIdx
+        log(`Send success, upgraded delay tier to ${this.tierIndexToMode(nextIdx)}`)
+      } else {
+        this.activeTier = null
+        log('Send success, delay tier restored to configured')
+      }
+    }
+  }
+
+  /** 消息发送失败：累计连续失败，≥阈值 → 队列冷却 10s + 自动降档 */
+  private onSendFailure(): void {
+    this.consecutiveFailures += 1
+    if (this.consecutiveFailures >= CONSECUTIVE_FAILURE_THRESHOLD) {
+      this.consecutiveFailures = 0
+      this.queueCoolUntil = Date.now() + QUEUE_COOLDOWN_MS
+      warn(`Send failed ${CONSECUTIVE_FAILURE_THRESHOLD} times consecutively, pausing queue for ${QUEUE_COOLDOWN_MS / 1000}s`)
+      if (this.isAutoDowngradeEnabled()) this.downgradeTier()
+    }
+  }
+
+  /** 降一档（aggressive→standard→safe），已到 safe 不再降 */
+  private downgradeTier(): void {
+    const configuredIdx = this.getConfiguredTierIndex(getDelayMode())
+    const current = this.activeTier === null ? configuredIdx : this.activeTier
+    if (current >= 2) return
+    this.activeTier = current + 1
+    warn(`Auto downgraded delay tier: ${this.tierIndexToMode(current)} → ${this.tierIndexToMode(this.activeTier)}`)
   }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
@@ -428,14 +511,15 @@ export class LinuxSender implements IPlatformSender {
     content: string,
     contactName: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    skipSearch = false
   ): Promise<{ success: boolean; error?: string }> {
     const wid = await this.findWeChatWindow()
     if (!wid) {
       return { success: false, error: '找不到微信窗口' }
     }
 
-    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions)
+    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions, skipSearch)
   }
 
   private detectImageMime(imagePath: string): string {
@@ -452,15 +536,20 @@ export class LinuxSender implements IPlatformSender {
     contactName: string,
     wid: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    skipSearch = false
   ): Promise<{ success: boolean; error?: string }> {
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
     }
 
-    log(`Searching contact "${contactName}"...`)
-    if (!await this.searchAndSelectContact(contactName, wid)) {
-      return { success: false, error: '搜索联系人失败' }
+    if (!skipSearch) {
+      log(`Searching contact "${contactName}"...`)
+      if (!await this.searchAndSelectContact(contactName, wid)) {
+        return { success: false, error: '搜索联系人失败' }
+      }
+    } else {
+      log(`Reusing open chat for "${contactName}" (skip search)`)
     }
 
     await this.ensureFocusInInput(wid)
@@ -522,6 +611,19 @@ export class LinuxSender implements IPlatformSender {
     }
 
     return new Promise((resolve) => {
+      // 去重（sendDedup）：同联系人 + 同内容文本，且队列中已有待发 → 丢弃本次
+      if (!imagePath && !(atMentions && atMentions.length) && isQueueOptionEnabled('sendDedup')) {
+        const dup = this.queue.find(q =>
+          q.contactName === name && q.content === str && !q.imagePath && !(q.atMentions && q.atMentions.length)
+        )
+        if (dup) {
+          this.dedupCount++
+          log(`Deduplicated message to "${name}" (same content already queued as ${dup.id}), dedupCount=${this.dedupCount}`)
+          resolve({ success: true, method: this.currentMode })
+          return
+        }
+      }
+
       const item: QueuedMessage = {
         id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         content: str,
@@ -532,7 +634,21 @@ export class LinuxSender implements IPlatformSender {
         retries: 0,
         createdAt: Date.now()
       }
-      this.queue.push(item)
+
+      // 优先级分组（sendPriority）：同联系人消息连续（组顺序=首次出现顺序，组内到达顺序）
+      if (isQueueOptionEnabled('sendPriority')) {
+        let insertAt = this.queue.length
+        for (let i = this.queue.length - 1; i >= 0; i--) {
+          if (this.queue[i].contactName === name) {
+            insertAt = i + 1
+            break
+          }
+        }
+        this.queue.splice(insertAt, 0, item)
+      } else {
+        this.queue.push(item)
+      }
+
       log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''}${atMentions && atMentions.length ? ` [AT:${atMentions.length}]` : ''} (queue size: ${this.queue.length})`)
       this.processQueue()
     })
@@ -541,9 +657,20 @@ export class LinuxSender implements IPlatformSender {
   private async processQueue(): Promise<void> {
     if (this.processing) return
     this.processing = true
+    this.lastMergeContact = ''
 
     while (this.queue.length > 0) {
       this.refreshDelayProfile()
+
+      // 背压冷却：暂停队列（新消息排队等待，不发送）
+      if (Date.now() < this.queueCoolUntil) {
+        const remaining = this.queueCoolUntil - Date.now()
+        const wait = Math.min(remaining, 1000)
+        log(`Queue cooldown active (${Math.ceil(remaining / 1000)}s left), pausing send queue`)
+        await new Promise(r => setTimeout(r, wait))
+        continue
+      }
+
       const item = this.queue[0]
 
       const elapsed = Date.now() - this.lastSendTime
@@ -553,11 +680,16 @@ export class LinuxSender implements IPlatformSender {
         await new Promise(r => setTimeout(r, wait))
       }
 
-      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}`)
+      // 同批免重复搜索（sendMerge）：同一联系人的连续消息（含图片，无 @）复用已打开的聊天
+      const skipSearch = isQueueOptionEnabled('sendMerge') &&
+        this.lastMergeContact === item.contactName &&
+        !(item.atMentions && item.atMentions.length)
+
+      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}${skipSearch ? ' [MERGED]' : ''}`)
 
       let result: { success: boolean; error?: string }
       try {
-        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions)
+        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions, skipSearch)
       } catch (e: any) {
         result = { success: false, error: e?.message || 'Unknown error' }
       }
@@ -565,17 +697,24 @@ export class LinuxSender implements IPlatformSender {
       if (result.success) {
         log(`Message ${item.id} sent successfully`)
         log(`Message ${item.id} (${item.imagePath ? 'image' : 'text'}) sent successfully`)
+        this.onSendSuccess()
+        this.totalSent++
+        this.lastMergeContact = item.contactName
         item.resolve({ success: true, method: this.currentMode })
         this.queue.shift()
       } else {
         item.retries++
         if (item.retries >= MAX_RETRIES) {
           warn(`Message ${item.id} failed after ${MAX_RETRIES} attempts: ${result.error}`)
+          this.onSendFailure()
+          this.totalFailed++
+          this.lastMergeContact = ''
           item.resolve({ success: false, error: `发送失败（重试${MAX_RETRIES}次）: ${result.error}`, method: this.currentMode })
           this.queue.shift()
         } else {
-          warn(`Message ${item.id} failed (attempt ${item.retries}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`)
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+          const backoff = Math.min(RETRY_DELAY_MS * Math.pow(2, item.retries - 1), RETRY_BACKOFF_MAX_MS)
+          warn(`Message ${item.id} failed (attempt ${item.retries}/${MAX_RETRIES}), retrying in ${backoff}ms...`)
+          await new Promise(r => setTimeout(r, backoff))
         }
       }
     }
@@ -602,6 +741,23 @@ export class LinuxSender implements IPlatformSender {
     return count
   }
 
+  /** 清空拼音缓存并持久化空文件，返回清除条数 */
+  clearPinyinCache(): number {
+    const cleared = pinyinCache.size
+    pinyinCache.clear()
+    try {
+      const fs = require('fs')
+      const file = resolvePinyinCacheFile()
+      if (file) {
+        const dir = require('path').dirname(file)
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(file, '{}')
+      }
+    } catch {}
+    log(`Pinyin cache cleared (${cleared} entries)`)
+    return cleared
+  }
+
   getProgress(): SendProgress {
     return {
       total: this.queue.length,
@@ -615,17 +771,58 @@ export class LinuxSender implements IPlatformSender {
   getSendStatus(): Record<string, any> {
     let mode: DelayMode = this.delayMode
     try {
-      mode = getDelayMode() || this.delayMode
+      let cfg = getDelayMode() || this.delayMode
+      if (this.activeTier !== null) cfg = this.tierIndexToMode(this.activeTier)
+      mode = cfg
     } catch {}
+
+    // 当前批次：队首连续同联系人的消息数
+    let batchContact: string | null = null
+    let batchSize = 0
+    if (this.queue.length > 0) {
+      batchContact = this.queue[0].contactName
+      for (const it of this.queue) {
+        if (it.contactName === batchContact) batchSize++
+        else break
+      }
+    }
+
     return {
       mode,
       profile: { ...resolveDelayProfile(mode) },
       custom: getDelayCustomOverrides(),
+      backpressure: {
+        consecutiveFailures: this.consecutiveFailures,
+        coolRemainingMs: Math.max(0, this.queueCoolUntil - Date.now()),
+        autoDowngrade: this.isAutoDowngradeEnabled()
+      },
+      options: {
+        merge: isQueueOptionEnabled('sendMerge'),
+        dedup: isQueueOptionEnabled('sendDedup'),
+        priority: isQueueOptionEnabled('sendPriority')
+      },
+      dedupCount: this.dedupCount,
+      stats: {
+        sent: this.totalSent,
+        failed: this.totalFailed
+      },
+      batch: {
+        contact: batchContact,
+        size: batchSize
+      },
       queue: {
         pending: this.queue.length,
         processing: this.processing,
         currentContent: this.queue[0]?.content || null,
-        lastSendTime: this.lastSendTime || null
+        lastSendTime: this.lastSendTime || null,
+        items: this.queue.slice(0, 50).map((it) => ({
+          id: it.id,
+          contactName: it.contactName,
+          type: it.imagePath ? 'image' : 'text',
+          atMentions: !!(it.atMentions && it.atMentions.length),
+          contentPreview: it.content ? it.content.slice(0, 30) : '',
+          queuedSeconds: Math.round((Date.now() - it.createdAt) / 1000)
+        }))
       },
       pinyinCacheSize: pinyinCache.size
     }

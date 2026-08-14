@@ -1016,16 +1016,28 @@ var PRESETS = {
 }
 
 var SendManagerPage = {
+  components: { ToggleSwitch: ToggleSwitch },
   setup: function () {
     var mode = ref('standard')
     var custom = ref({})
     var params = reactive({})
+    var autoDowngrade = ref(true)
+    var mergeEnabled = ref(false)
+    var dedupEnabled = ref(false)
+    var priorityEnabled = ref(false)
     var status = reactive({
       mode: 'standard',
-      queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null },
+      queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
+      backpressure: { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true },
+      options: { merge: false, dedup: false, priority: false },
+      dedupCount: 0,
+      stats: { sent: 0, failed: 0 },
+      batch: { contact: null, size: 0 },
       pinyinCacheSize: 0
     })
     var saving = ref(false)
+    var clearingQueue = ref(false)
+    var clearingPinyin = ref(false)
 
     var profileLabels = [
       { key: 'interMessage', label: '队列消息间隔' },
@@ -1053,6 +1065,10 @@ var SendManagerPage = {
       var d = await api('/api/v1/mgmt/config')
       if (!d.error) {
         if (d.sendDelayMode) mode.value = d.sendDelayMode
+        autoDowngrade.value = d.sendAutoDowngrade !== false
+        mergeEnabled.value = d.sendMerge === true
+        dedupEnabled.value = d.sendDedup === true
+        priorityEnabled.value = d.sendPriority === true
         custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
         initParams()
       }
@@ -1070,6 +1086,26 @@ var SendManagerPage = {
         status.queue.processing = !!(d.status.queue && d.status.queue.processing)
         status.queue.currentContent = (d.status.queue && d.status.queue.currentContent) || null
         status.queue.lastSendTime = (d.status.queue && d.status.queue.lastSendTime) || null
+        status.queue.items = (d.status.queue && Array.isArray(d.status.queue.items)) ? d.status.queue.items : []
+        status.backpressure = (d.status.backpressure && {
+          consecutiveFailures: d.status.backpressure.consecutiveFailures || 0,
+          coolRemainingMs: d.status.backpressure.coolRemainingMs || 0,
+          autoDowngrade: d.status.backpressure.autoDowngrade !== false
+        }) || { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true }
+        status.options = (d.status.options && {
+          merge: d.status.options.merge === true,
+          dedup: d.status.options.dedup === true,
+          priority: d.status.options.priority === true
+        }) || { merge: false, dedup: false, priority: false }
+        status.dedupCount = d.status.dedupCount || 0
+        status.stats = (d.status.stats && {
+          sent: d.status.stats.sent || 0,
+          failed: d.status.stats.failed || 0
+        }) || { sent: 0, failed: 0 }
+        status.batch = (d.status.batch && {
+          contact: d.status.batch.contact || null,
+          size: d.status.batch.size || 0
+        }) || { contact: null, size: 0 }
         status.pinyinCacheSize = d.status.pinyinCacheSize || 0
       }
     }
@@ -1092,7 +1128,14 @@ var SendManagerPage = {
       var d = await api('/api/v1/mgmt/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sendDelayMode: mode.value, sendDelayCustom: buildCustom() })
+        body: JSON.stringify({
+          sendDelayMode: mode.value,
+          sendDelayCustom: buildCustom(),
+          sendAutoDowngrade: autoDowngrade.value,
+          sendMerge: mergeEnabled.value,
+          sendDedup: dedupEnabled.value,
+          sendPriority: priorityEnabled.value
+        })
       })
       saving.value = false
       if (d.success) {
@@ -1107,6 +1150,38 @@ var SendManagerPage = {
     function resetCustom() {
       custom.value = {}
       initParams()
+    }
+
+    async function clearQueue() {
+      clearingQueue.value = true
+      var d = await api('/api/v1/mgmt/send-clear-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+      clearingQueue.value = false
+      if (!d.error) {
+        toast('已清空队列（取消 ' + (d.cancelled || 0) + ' 条待发消息）')
+        loadStatus()
+      } else {
+        toast('清空失败: ' + (d.error || '未知错误'), 'error')
+      }
+    }
+
+    async function clearPinyinCache() {
+      clearingPinyin.value = true
+      var d = await api('/api/v1/mgmt/send-clear-pinyin-cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+      clearingPinyin.value = false
+      if (!d.error) {
+        toast('拼音缓存已清空（' + (d.cleared || 0) + ' 条）')
+        loadStatus()
+      } else {
+        toast('清空失败: ' + (d.error || '未知错误'), 'error')
+      }
     }
 
     function fmtTime(ts) {
@@ -1125,8 +1200,11 @@ var SendManagerPage = {
     })
 
     return {
-      mode: mode, params: params, status: status, saving: saving,
+      mode: mode, params: params, status: status, saving: saving, autoDowngrade: autoDowngrade,
+      mergeEnabled: mergeEnabled, dedupEnabled: dedupEnabled, priorityEnabled: priorityEnabled,
+      clearingQueue: clearingQueue, clearingPinyin: clearingPinyin,
       profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
+      clearQueue: clearQueue, clearPinyinCache: clearPinyinCache,
       onModeChange: onModeChange, fmtTime: fmtTime
     }
   },
@@ -1137,10 +1215,14 @@ var SendManagerPage = {
     '<h2>当前运行状态</h2>' +
     '<div class="form-row"><label>当前档位</label><span>{{ status.mode }}</span></div>' +
     '<div class="form-row"><label>队列待发</label><span>{{ status.queue.pending }}</span></div>' +
+    '<div class="form-row"><label>当前批次</label><span>{{ status.batch.contact ? status.batch.contact + "（" + status.batch.size + " 条）" : "-" }}</span></div>' +
     '<div class="form-row"><label>正在发送</label><span class="status-badge" :class="status.queue.processing ? \'connected\' : \'disconnected\'">{{ status.queue.processing ? "是" : "否" }}</span></div>' +
-    '<div class="form-row"><label>当前消息</label><span style="word-break:break-all">{{ status.queue.currentContent || "-" }}</span></div>' +
+    '<div class="form-row"><label>队列冷却</label><span :class="status.backpressure.coolRemainingMs > 0 ? \'status-badge disconnected\' : \'\'">{{ status.backpressure.coolRemainingMs > 0 ? "冷却中 " + Math.ceil(status.backpressure.coolRemainingMs / 1000) + "s" : "无" }}</span></div>' +
+    '<div class="form-row"><label>连续失败</label><span>{{ status.backpressure.consecutiveFailures }} 次</span></div>' +
+    '<div class="form-row"><label>已去重</label><span>{{ status.dedupCount }} 条</span></div>' +
+    '<div class="form-row"><label>吞吐统计</label><span>已发 {{ status.stats.sent }} / 失败 {{ status.stats.failed }}</span></div>' +
     '<div class="form-row"><label>最近发送</label><span>{{ fmtTime(status.queue.lastSendTime) }}</span></div>' +
-    '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条</span></div>' +
+    '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条 <button class="btn btn-secondary btn-sm" style="margin-left:8px" :disabled="clearingPinyin" @click="clearPinyinCache">{{ clearingPinyin ? "清空中..." : "清空" }}</button></span></div>' +
     '</div>' +
 
     '<div class="card">' +
@@ -1148,6 +1230,7 @@ var SendManagerPage = {
     '<div class="form-row"><label>延时档位</label>' +
     '<select v-model="mode" @change="onModeChange"><option value="safe">安全（慢，更稳）</option><option value="standard">标准</option><option value="aggressive">激进（快，风险高）</option></select>' +
     '</div>' +
+    '<div class="form-row"><label>失败自动降档</label><toggle-switch v-model="autoDowngrade" /></div>' +
     '<div class="delay-grid">' +
     '<div class="delay-item" v-for="item in profileLabels" :key="item.key">' +
     '<div class="delay-item-label">{{ item.label }}</div>' +
@@ -1161,6 +1244,32 @@ var SendManagerPage = {
     '<button class="btn btn-secondary" style="margin-right:8px" @click="resetCustom">恢复预设值</button>' +
     '<button class="btn btn-primary" :disabled="saving" @click="saveMode">{{ saving ? "保存中..." : "保存配置" }}</button>' +
     '</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>队列优化</h2>' +
+    '<div class="form-row"><label>连续文本合并</label><toggle-switch v-model="mergeEnabled" /></div>' +
+    '<div class="form-hint">同一联系人的连续消息将复用已打开的聊天窗口，仅首条搜索联系人，后续直接粘贴发送，发送更快</div>' +
+    '<div class="form-row"><label>消息去重</label><toggle-switch v-model="dedupEnabled" /></div>' +
+    '<div class="form-hint">同一联系人同时待发的相同文本只保留第一条，避免重复发送</div>' +
+    '<div class="form-row"><label>联系人分组优先</label><toggle-switch v-model="priorityEnabled" /></div>' +
+    '<div class="form-hint">同一联系人的消息（文字+图片）在队列中连续排列，按首次出现顺序分发，避免图文发送割裂</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>队列明细</h2>' +
+    '<div style="max-height:300px;overflow-y:auto">' +
+    '<div class="form-row" v-for="item in status.queue.items" :key="item.id">' +
+    '<label>{{ item.contactName }}</label>' +
+    '<span style="display:flex;align-items:center;gap:8px;font-size:12px;min-width:0">' +
+    '<span class="badge" :class="item.type === \'image\' ? \'warn\' : \'ok\'">{{ item.type === "image" ? "图" : "文" }}</span>' +
+    '<span style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.contentPreview || "-" }}</span>' +
+    '<span style="color:var(--text-muted);flex-shrink:0">{{ item.queuedSeconds }}s</span>' +
+    '</span>' +
+    '</div>' +
+    '<div v-if="!status.queue.items.length" style="color:var(--text-muted);font-size:12px;padding:10px 0">队列为空</div>' +
+    '</div>' +
+    '<button class="btn btn-danger btn-sm" style="margin-top:10px" :disabled="clearingQueue || !status.queue.items.length" @click="clearQueue">{{ clearingQueue ? "清空中..." : "清空队列" }}</button>' +
     '</div>' +
     '</div>'
 }

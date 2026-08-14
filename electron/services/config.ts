@@ -81,6 +81,10 @@ interface ConfigSchema {
   messageSendMode: 'foreground' | 'background'
   sendDelayMode: 'safe' | 'standard' | 'aggressive'
   sendDelayCustom: Record<string, number>
+  sendAutoDowngrade: boolean
+  sendMerge: boolean
+  sendDedup: boolean
+  sendPriority: boolean
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -259,6 +263,10 @@ export class ConfigService {
       messageSendMode: 'foreground',
       sendDelayMode: 'standard',
       sendDelayCustom: {},
+      sendAutoDowngrade: true,
+      sendMerge: false,
+      sendDedup: false,
+      sendPriority: false,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

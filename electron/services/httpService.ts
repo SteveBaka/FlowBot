@@ -785,6 +785,10 @@ class HttpService {
                 this.handleMgmtBotStatus(res)
             } else if (pathname === '/api/v1/mgmt/send-status' && req.method === 'GET') {
                 this.handleMgmtSendStatus(res)
+            } else if (pathname === '/api/v1/mgmt/send-clear-queue' && req.method === 'POST') {
+                this.handleMgmtSendClearQueue(res)
+            } else if (pathname === '/api/v1/mgmt/send-clear-pinyin-cache' && req.method === 'POST') {
+                this.handleMgmtSendClearPinyinCache(res)
             } else if (pathname === '/api/v1/mgmt/logs' && req.method === 'GET') {
                 this.handleMgmtLogs(url, res)
             } else if (pathname === '/api/v1/mgmt/logs/stats' && req.method === 'GET') {
@@ -3466,7 +3470,11 @@ class HttpService {
                 'imageTransferMode', 'imageServerBaseUrl',
                 'flowbotCommand',
                 'sendDelayMode',
-                'sendDelayCustom'
+                'sendDelayCustom',
+                'sendAutoDowngrade',
+                'sendMerge',
+                'sendDedup',
+                'sendPriority'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {
@@ -3489,6 +3497,28 @@ class HttpService {
         ? sender.getSendStatus()
         : { mode: 'unavailable', error: 'sender 未初始化' }
       this.sendJson(res, { success: true, status })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /** 清空待发队列（取消所有 PENDING 消息） */
+  private handleMgmtSendClearQueue(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const count = sender && typeof sender.cancelPending === 'function' ? sender.cancelPending() : 0
+      this.sendJson(res, { success: true, cancelled: count })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /** 清空拼音缓存 */
+  private handleMgmtSendClearPinyinCache(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const cleared = sender && typeof sender.clearPinyinCache === 'function' ? sender.clearPinyinCache() : 0
+      this.sendJson(res, { success: true, cleared })
     } catch (error) {
       this.sendError(res, 500, String(error))
     }
