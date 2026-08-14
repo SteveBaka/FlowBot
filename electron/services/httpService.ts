@@ -783,6 +783,8 @@ class HttpService {
                 await this.handleMgmtBotRestart(req, res, bodyParams)
             } else if (pathname === '/api/v1/mgmt/bots/status' && req.method === 'GET') {
                 this.handleMgmtBotStatus(res)
+            } else if (pathname === '/api/v1/mgmt/send-status' && req.method === 'GET') {
+                this.handleMgmtSendStatus(res)
             } else if (pathname === '/api/v1/mgmt/logs' && req.method === 'GET') {
                 this.handleMgmtLogs(url, res)
             } else if (pathname === '/api/v1/mgmt/logs/stats' && req.method === 'GET') {
@@ -3462,7 +3464,9 @@ class HttpService {
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
                 'logEnabled', 'bots',
                 'imageTransferMode', 'imageServerBaseUrl',
-                'flowbotCommand'
+                'flowbotCommand',
+                'sendDelayMode',
+                'sendDelayCustom'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {
@@ -3476,6 +3480,19 @@ class HttpService {
             this.sendError(res, 500, String(error))
         }
     }
+
+  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  private handleMgmtSendStatus(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const status = sender && typeof sender.getSendStatus === 'function'
+        ? sender.getSendStatus()
+        : { mode: 'unavailable', error: 'sender 未初始化' }
+      this.sendJson(res, { success: true, status })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
 
   private async handleMgmtSetConfig(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {

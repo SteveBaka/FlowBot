@@ -39,30 +39,50 @@ interface DelayProfile {
 
 const DELAY_PROFILES: Record<DelayMode, DelayProfile> = {
   safe: {
-    interMessage: 1200, searchOpen: 600, searchSettle: 900, selectSettle: 600,
-    focusMove: 120, inputClick: 300, textClipSettle: 150, pasteSettle: 400,
-    imageClipSettle: 300, imagePasteSettle: 700, postSendSettle: 800
-  },
-  standard: {
     interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400,
     focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300,
     imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500
   },
+  standard: {
+    interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250,
+    focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200,
+    imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500
+  },
   aggressive: {
-    interMessage: 500, searchOpen: 250, searchSettle: 350, selectSettle: 250,
-    focusMove: 50, inputClick: 120, textClipSettle: 60, pasteSettle: 180,
-    imageClipSettle: 120, imagePasteSettle: 300, postSendSettle: 300
+    interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150,
+    focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120,
+    imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300
   }
 }
 
+/** 延时档位来源：仅 WebUI 配置（config.sendDelayMode），默认 standard */
 function getDelayMode(): DelayMode {
-  const envMode = String(process.env.SEND_DELAY_MODE || '').trim().toLowerCase()
-  if (envMode === 'safe' || envMode === 'standard' || envMode === 'aggressive') return envMode
   try {
     const cfgMode = String(ConfigService.getInstance().get('sendDelayMode') || '').trim().toLowerCase()
     if (cfgMode === 'safe' || cfgMode === 'standard' || cfgMode === 'aggressive') return cfgMode
   } catch {}
   return 'standard'
+}
+
+/** 读取 WebUI 自定义延时覆盖（config.sendDelayCustom，单位 ms） */
+function getDelayCustomOverrides(): Record<string, number> {
+  try {
+    const raw = ConfigService.getInstance().get('sendDelayCustom')
+    if (raw && typeof raw === 'object') {
+      const out: Record<string, number> = {}
+      for (const [k, v] of Object.entries(raw)) {
+        const n = Number(v)
+        if (Number.isFinite(n) && n >= 0) out[k] = n
+      }
+      return out
+    }
+  } catch {}
+  return {}
+}
+
+/** 计算生效延时档位：预设档位 + 自定义覆盖 */
+function resolveDelayProfile(mode: DelayMode): DelayProfile {
+  return { ...DELAY_PROFILES[mode] || DELAY_PROFILES.standard, ...getDelayCustomOverrides() }
 }
 
 // ─── 拼音缓存：避免每次中文名起子进程（python3 /opt/pinyin.py）──────────────────
@@ -191,16 +211,36 @@ export class LinuxSender implements IPlatformSender {
   private lastSendTime = 0
   private cachedWid = ''
   private delay: DelayProfile = DELAY_PROFILES.standard
+  private delayMode: DelayMode = 'standard'
+  private lastDelayMode: DelayMode | '' = ''
 
   constructor() {
     try {
       const mode = getDelayMode()
-      this.delay = DELAY_PROFILES[mode] || DELAY_PROFILES.standard
+      this.delay = resolveDelayProfile(mode)
+      this.delayMode = mode
       log(`Delay profile: ${mode} (interMessage=${this.delay.interMessage}ms)`)
     } catch {
-      this.delay = DELAY_PROFILES.standard
+      this.delay = resolveDelayProfile('standard')
+      this.delayMode = 'standard'
     }
     loadPinyinCache()
+  }
+
+  /** 按当前配置刷新延时档位（WebUI 改档/改参数后下一条消息生效） */
+  private refreshDelayProfile(): void {
+    try {
+      const mode = getDelayMode()
+      this.delay = resolveDelayProfile(mode)
+      this.delayMode = mode
+      if (mode !== this.lastDelayMode) {
+        this.lastDelayMode = mode
+        log(`Delay profile refreshed: ${mode} (interMessage=${this.delay.interMessage}ms)`)
+      }
+    } catch {
+      this.delay = resolveDelayProfile('standard')
+      this.delayMode = 'standard'
+    }
   }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
@@ -503,6 +543,7 @@ export class LinuxSender implements IPlatformSender {
     this.processing = true
 
     while (this.queue.length > 0) {
+      this.refreshDelayProfile()
       const item = this.queue[0]
 
       const elapsed = Date.now() - this.lastSendTime
@@ -567,6 +608,26 @@ export class LinuxSender implements IPlatformSender {
       sent: 0,
       failed: 0,
       current: this.queue[0]?.content
+    }
+  }
+
+  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  getSendStatus(): Record<string, any> {
+    let mode: DelayMode = this.delayMode
+    try {
+      mode = getDelayMode() || this.delayMode
+    } catch {}
+    return {
+      mode,
+      profile: { ...resolveDelayProfile(mode) },
+      custom: getDelayCustomOverrides(),
+      queue: {
+        pending: this.queue.length,
+        processing: this.processing,
+        currentContent: this.queue[0]?.content || null,
+        lastSendTime: this.lastSendTime || null
+      },
+      pinyinCacheSize: pinyinCache.size
     }
   }
 

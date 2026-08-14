@@ -1009,6 +1009,162 @@ var AboutPage = {
     '</div>'
 }
 
+var PRESETS = {
+  safe: { interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400, focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300, imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500 },
+  standard: { interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250, focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200, imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500 },
+  aggressive: { interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150, focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120, imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300 }
+}
+
+var SendManagerPage = {
+  setup: function () {
+    var mode = ref('standard')
+    var custom = ref({})
+    var params = reactive({})
+    var status = reactive({
+      mode: 'standard',
+      queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null },
+      pinyinCacheSize: 0
+    })
+    var saving = ref(false)
+
+    var profileLabels = [
+      { key: 'interMessage', label: '队列消息间隔' },
+      { key: 'searchOpen', label: '打开搜索' },
+      { key: 'searchSettle', label: '搜索结果等待' },
+      { key: 'selectSettle', label: '选中联系人' },
+      { key: 'focusMove', label: '聚焦移动' },
+      { key: 'inputClick', label: '点击输入框' },
+      { key: 'textClipSettle', label: '文本剪贴板' },
+      { key: 'pasteSettle', label: '文本粘贴' },
+      { key: 'imageClipSettle', label: '图片剪贴板' },
+      { key: 'imagePasteSettle', label: '图片粘贴' },
+      { key: 'postSendSettle', label: '发送后稳定' }
+    ]
+
+    function initParams() {
+      var preset = PRESETS[mode.value] || PRESETS.standard
+      for (var i = 0; i < profileLabels.length; i++) {
+        var key = profileLabels[i].key
+        params[key] = (custom.value[key] !== undefined) ? custom.value[key] : preset[key]
+      }
+    }
+
+    async function loadMode() {
+      var d = await api('/api/v1/mgmt/config')
+      if (!d.error) {
+        if (d.sendDelayMode) mode.value = d.sendDelayMode
+        custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
+        initParams()
+      }
+    }
+
+    function onModeChange() {
+      initParams()
+    }
+
+    async function loadStatus() {
+      var d = await api('/api/v1/mgmt/send-status')
+      if (!d.error && d.status) {
+        status.mode = d.status.mode || 'standard'
+        status.queue.pending = (d.status.queue && d.status.queue.pending) || 0
+        status.queue.processing = !!(d.status.queue && d.status.queue.processing)
+        status.queue.currentContent = (d.status.queue && d.status.queue.currentContent) || null
+        status.queue.lastSendTime = (d.status.queue && d.status.queue.lastSendTime) || null
+        status.pinyinCacheSize = d.status.pinyinCacheSize || 0
+      }
+    }
+
+    function buildCustom() {
+      var preset = PRESETS[mode.value] || PRESETS.standard
+      var out = {}
+      for (var i = 0; i < profileLabels.length; i++) {
+        var key = profileLabels[i].key
+        var raw = params[key]
+        if (raw === '' || raw === undefined || raw === null) continue
+        var n = Number(raw)
+        if (Number.isFinite(n) && n >= 0 && n !== preset[key]) out[key] = n
+      }
+      return out
+    }
+
+    async function saveMode() {
+      saving.value = true
+      var d = await api('/api/v1/mgmt/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sendDelayMode: mode.value, sendDelayCustom: buildCustom() })
+      })
+      saving.value = false
+      if (d.success) {
+        toast('发送配置已保存，下一条消息生效')
+        custom.value = buildCustom()
+        loadStatus()
+      } else {
+        toast('保存失败: ' + (d.error || '未知错误'), 'error')
+      }
+    }
+
+    function resetCustom() {
+      custom.value = {}
+      initParams()
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '-'
+      return new Date(ts).toLocaleTimeString()
+    }
+
+    var timer = null
+    onMounted(function () {
+      loadMode()
+      loadStatus()
+      timer = setInterval(loadStatus, 3000)
+    })
+    onUnmounted(function () {
+      if (timer) clearInterval(timer)
+    })
+
+    return {
+      mode: mode, params: params, status: status, saving: saving,
+      profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
+      onModeChange: onModeChange, fmtTime: fmtTime
+    }
+  },
+  template: '<div>' +
+    '<h1 class="page-title">发送管理</h1>' +
+
+    '<div class="card">' +
+    '<h2>当前运行状态</h2>' +
+    '<div class="form-row"><label>当前档位</label><span>{{ status.mode }}</span></div>' +
+    '<div class="form-row"><label>队列待发</label><span>{{ status.queue.pending }}</span></div>' +
+    '<div class="form-row"><label>正在发送</label><span class="status-badge" :class="status.queue.processing ? \'connected\' : \'disconnected\'">{{ status.queue.processing ? "是" : "否" }}</span></div>' +
+    '<div class="form-row"><label>当前消息</label><span style="word-break:break-all">{{ status.queue.currentContent || "-" }}</span></div>' +
+    '<div class="form-row"><label>最近发送</label><span>{{ fmtTime(status.queue.lastSendTime) }}</span></div>' +
+    '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条</span></div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>发送延时档位</h2>' +
+    '<div class="form-row"><label>延时档位</label>' +
+    '<select v-model="mode" @change="onModeChange"><option value="safe">安全（慢，更稳）</option><option value="standard">标准</option><option value="aggressive">激进（快，风险高）</option></select>' +
+    '</div>' +
+    '<div class="delay-grid">' +
+    '<div class="delay-item" v-for="item in profileLabels" :key="item.key">' +
+    '<div class="delay-item-label">{{ item.label }}</div>' +
+    '<div class="delay-item-input">' +
+    '<input type="number" min="0" step="10" v-model.number="params[item.key]">' +
+    '<span class="ms">ms</span>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+    '<div style="margin-top:12px">' +
+    '<button class="btn btn-secondary" style="margin-right:8px" @click="resetCustom">恢复预设值</button>' +
+    '<button class="btn btn-primary" :disabled="saving" @click="saveMode">{{ saving ? "保存中..." : "保存配置" }}</button>' +
+    '</div>' +
+    '</div>' +
+    '</div>'
+}
+
 var LogsPage = {
   components: { ToggleSwitch: ToggleSwitch },
   data: function () {
@@ -1333,6 +1489,7 @@ var routes = [
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
   { path: '/filter', component: FilterPage, meta: { title: '消息过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
+  { path: '/send', component: SendManagerPage, meta: { title: '发送管理' } },
   { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } },
   { path: '/login', component: LoginPage, meta: { title: '登录' } }
@@ -1360,6 +1517,7 @@ var App = {
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
       { path: '/filter', label: '消息过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
+      { path: '/send', label: '发送管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
     ]

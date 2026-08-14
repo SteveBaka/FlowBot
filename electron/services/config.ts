@@ -80,6 +80,7 @@ interface ConfigSchema {
   messageSendEnabled: boolean
   messageSendMode: 'foreground' | 'background'
   sendDelayMode: 'safe' | 'standard' | 'aggressive'
+  sendDelayCustom: Record<string, number>
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -257,6 +258,7 @@ export class ConfigService {
       messageSendEnabled: true,
       messageSendMode: 'foreground',
       sendDelayMode: 'standard',
+      sendDelayCustom: {},
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',
