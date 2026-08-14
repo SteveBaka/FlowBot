@@ -965,7 +965,7 @@ var AboutPage = {
     '<h1 class="page-title">关于</h1>' +
 
     '<div class="card" style="text-align:center">' +
-    '<div class="about-logo">W</div>' +
+    '<div class="about-logo"><img src="icon.png" alt="FlowBOT"></div>' +
     '<h2 style="border:none;padding:0">FlowBOT | {{ info.flowbotVersion }}</h2>' +
     '<p class="text-muted">基于 WeFlow & OneBot v11 制作的聊天机器人</p>' +
     '<div class="about-info">' +
@@ -1006,6 +1006,317 @@ var AboutPage = {
     '<div class="port-item"><span>WebUI</span><span class="port">7300</span></div>' +
     '<div class="port-item"><span>noVNC</span><span class="port">7600</span></div>' +
     '</div></div>' +
+    '</div>'
+}
+
+var PRESETS = {
+  safe: { interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400, focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300, imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500 },
+  standard: { interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250, focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200, imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500 },
+  aggressive: { interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150, focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120, imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300 }
+}
+
+var SendManagerPage = {
+  components: { ToggleSwitch: ToggleSwitch },
+  setup: function () {
+    var mode = ref('standard')
+    var custom = ref({})
+    var params = reactive({})
+    var autoDowngrade = ref(true)
+    var mergeEnabled = ref(false)
+    var dedupEnabled = ref(false)
+    var priorityEnabled = ref(false)
+    var backpressureEnabled = ref(false)
+    var dynamicIntervalEnabled = ref(false)
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500 })
+    var status = reactive({
+      mode: 'standard',
+      queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
+      backpressure: { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true },
+      options: { merge: false, dedup: false, priority: false, dynamicInterval: false },
+      dedupCount: 0,
+      stats: { sent: 0, failed: 0 },
+      lastSendSteps: [],
+      successStreak: 0,
+      batch: { contact: null, size: 0 },
+      pinyinCacheSize: 0
+    })
+    var saving = ref(false)
+    var clearingQueue = ref(false)
+    var clearingPinyin = ref(false)
+
+    var profileLabels = [
+      { key: 'interMessage', label: '队列消息间隔' },
+      { key: 'searchOpen', label: '打开搜索' },
+      { key: 'searchSettle', label: '搜索结果等待' },
+      { key: 'selectSettle', label: '选中联系人' },
+      { key: 'focusMove', label: '聚焦移动' },
+      { key: 'inputClick', label: '点击输入框' },
+      { key: 'textClipSettle', label: '文本剪贴板' },
+      { key: 'pasteSettle', label: '文本粘贴后发送' },
+      { key: 'imageClipSettle', label: '图片剪贴板' },
+      { key: 'imagePasteSettle', label: '图片粘贴后发送' },
+      { key: 'postSendSettle', label: '发送后稳定' }
+    ]
+
+    function initParams() {
+      var preset = PRESETS[mode.value] || PRESETS.standard
+      for (var i = 0; i < profileLabels.length; i++) {
+        var key = profileLabels[i].key
+        params[key] = (custom.value[key] !== undefined) ? custom.value[key] : preset[key]
+      }
+    }
+
+    async function loadMode() {
+      var d = await api('/api/v1/mgmt/config')
+      if (!d.error) {
+        if (d.sendDelayMode) mode.value = d.sendDelayMode
+        autoDowngrade.value = d.sendAutoDowngrade !== false
+        mergeEnabled.value = d.sendMerge === true
+        dedupEnabled.value = d.sendDedup === true
+        priorityEnabled.value = d.sendPriority === true
+        backpressureEnabled.value = d.sendBackpressureEnabled === true
+        dynamicIntervalEnabled.value = d.sendDynamicInterval === true
+        bpParams.threshold = d.sendFailureThreshold || 3
+        bpParams.cooldownMs = d.sendCooldownMs || 10000
+        bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
+        custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
+        initParams()
+      }
+    }
+
+    function onModeChange() {
+      initParams()
+    }
+
+    async function loadStatus() {
+      var d = await api('/api/v1/mgmt/send-status')
+      if (!d.error && d.status) {
+        status.mode = d.status.mode || 'standard'
+        status.queue.pending = (d.status.queue && d.status.queue.pending) || 0
+        status.queue.processing = !!(d.status.queue && d.status.queue.processing)
+        status.queue.currentContent = (d.status.queue && d.status.queue.currentContent) || null
+        status.queue.lastSendTime = (d.status.queue && d.status.queue.lastSendTime) || null
+        status.queue.items = (d.status.queue && Array.isArray(d.status.queue.items)) ? d.status.queue.items : []
+        status.backpressure = (d.status.backpressure && {
+          consecutiveFailures: d.status.backpressure.consecutiveFailures || 0,
+          coolRemainingMs: d.status.backpressure.coolRemainingMs || 0,
+          autoDowngrade: d.status.backpressure.autoDowngrade !== false
+        }) || { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true }
+        status.options = (d.status.options && {
+          merge: d.status.options.merge === true,
+          dedup: d.status.options.dedup === true,
+          priority: d.status.options.priority === true,
+          dynamicInterval: d.status.options.dynamicInterval === true
+        }) || { merge: false, dedup: false, priority: false, dynamicInterval: false }
+        status.dedupCount = d.status.dedupCount || 0
+        status.stats = (d.status.stats && {
+          sent: d.status.stats.sent || 0,
+          failed: d.status.stats.failed || 0
+        }) || { sent: 0, failed: 0 }
+        status.lastSendSteps = (Array.isArray(d.status.lastSendSteps)) ? d.status.lastSendSteps : []
+        status.successStreak = d.status.successStreak || 0
+        status.batch = (d.status.batch && {
+          contact: d.status.batch.contact || null,
+          size: d.status.batch.size || 0
+        }) || { contact: null, size: 0 }
+        status.pinyinCacheSize = d.status.pinyinCacheSize || 0
+      }
+    }
+
+    function buildCustom() {
+      var preset = PRESETS[mode.value] || PRESETS.standard
+      var out = {}
+      for (var i = 0; i < profileLabels.length; i++) {
+        var key = profileLabels[i].key
+        var raw = params[key]
+        if (raw === '' || raw === undefined || raw === null) continue
+        var n = Number(raw)
+        if (Number.isFinite(n) && n >= 0 && n !== preset[key]) out[key] = n
+      }
+      return out
+    }
+
+    async function saveMode() {
+      saving.value = true
+      var d = await api('/api/v1/mgmt/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sendDelayMode: mode.value,
+          sendDelayCustom: buildCustom(),
+          sendAutoDowngrade: autoDowngrade.value,
+          sendMerge: mergeEnabled.value,
+          sendDedup: dedupEnabled.value,
+          sendPriority: priorityEnabled.value,
+          sendBackpressureEnabled: backpressureEnabled.value,
+          sendDynamicInterval: dynamicIntervalEnabled.value,
+          sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
+          sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
+          sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500)
+        })
+      })
+      saving.value = false
+      if (d.success) {
+        toast('发送配置已保存，下一条消息生效')
+        custom.value = buildCustom()
+        loadStatus()
+      } else {
+        toast('保存失败: ' + (d.error || '未知错误'), 'error')
+      }
+    }
+
+    function resetCustom() {
+      custom.value = {}
+      initParams()
+    }
+
+    async function clearQueue() {
+      clearingQueue.value = true
+      var d = await api('/api/v1/mgmt/send-clear-queue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+      clearingQueue.value = false
+      if (!d.error) {
+        toast('已清空队列（取消 ' + (d.cancelled || 0) + ' 条待发消息）')
+        loadStatus()
+      } else {
+        toast('清空失败: ' + (d.error || '未知错误'), 'error')
+      }
+    }
+
+    async function clearPinyinCache() {
+      clearingPinyin.value = true
+      var d = await api('/api/v1/mgmt/send-clear-pinyin-cache', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+      })
+      clearingPinyin.value = false
+      if (!d.error) {
+        toast('拼音缓存已清空（' + (d.cleared || 0) + ' 条）')
+        loadStatus()
+      } else {
+        toast('清空失败: ' + (d.error || '未知错误'), 'error')
+      }
+    }
+
+    function fmtTime(ts) {
+      if (!ts) return '-'
+      return new Date(ts).toLocaleTimeString()
+    }
+
+    function stepSummary() {
+      var steps = status.lastSendSteps
+      if (!steps || !steps.length) return '-'
+      var total = 0
+      var parts = []
+      for (var i = 0; i < steps.length; i++) {
+        total += steps[i].ms || 0
+        parts.push(steps[i].step + ' ' + steps[i].ms + 'ms')
+      }
+      return parts.join(' / ') + '（总计 ~' + Math.round(total / 100) / 10 + 's）'
+    }
+
+    var timer = null
+    onMounted(function () {
+      loadMode()
+      loadStatus()
+      timer = setInterval(loadStatus, 3000)
+    })
+    onUnmounted(function () {
+      if (timer) clearInterval(timer)
+    })
+
+    return {
+      mode: mode, params: params, status: status, saving: saving, autoDowngrade: autoDowngrade,
+      mergeEnabled: mergeEnabled, dedupEnabled: dedupEnabled, priorityEnabled: priorityEnabled,
+      backpressureEnabled: backpressureEnabled, dynamicIntervalEnabled: dynamicIntervalEnabled, bpParams: bpParams,
+      clearingQueue: clearingQueue, clearingPinyin: clearingPinyin,
+      profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
+      clearQueue: clearQueue, clearPinyinCache: clearPinyinCache,
+      onModeChange: onModeChange, fmtTime: fmtTime, stepSummary: stepSummary
+    }
+  },
+  template: '<div>' +
+    '<h1 class="page-title">发送管理</h1>' +
+
+    '<div class="card">' +
+    '<h2>当前运行状态</h2>' +
+    '<div class="form-row"><label>当前档位</label><span>{{ status.mode }}</span></div>' +
+    '<div class="form-row"><label>队列待发</label><span>{{ status.queue.pending }}</span></div>' +
+    '<div class="form-row"><label>当前批次</label><span>{{ status.batch.contact ? status.batch.contact + "（" + status.batch.size + " 条）" : "-" }}</span></div>' +
+    '<div class="form-row"><label>正在发送</label><span class="status-badge" :class="status.queue.processing ? \'connected\' : \'disconnected\'">{{ status.queue.processing ? "是" : "否" }}</span></div>' +
+    '<div class="form-row"><label>队列冷却</label><span :class="status.backpressure.coolRemainingMs > 0 ? \'status-badge disconnected\' : \'\'">{{ status.backpressure.coolRemainingMs > 0 ? "冷却中 " + Math.ceil(status.backpressure.coolRemainingMs / 1000) + "s" : "无" }}</span></div>' +
+    '<div class="form-row"><label>连续失败</label><span>{{ status.backpressure.consecutiveFailures }} 次</span></div>' +
+    '<div class="form-row"><label>连续成功</label><span>{{ status.successStreak }} 次</span></div>' +
+    '<div class="form-row"><label>已去重</label><span>{{ status.dedupCount }} 条</span></div>' +
+    '<div class="form-row"><label>吞吐统计</label><span>已发 {{ status.stats.sent }} / 失败 {{ status.stats.failed }}</span></div>' +
+    '<div class="form-row"><label>最近发送耗时</label><span style="font-size:12px;text-align:right">{{ stepSummary() }}</span></div>' +
+    '<div class="form-row"><label>最近发送</label><span>{{ fmtTime(status.queue.lastSendTime) }}</span></div>' +
+    '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条 <button class="btn btn-secondary btn-sm" style="margin-left:8px" :disabled="clearingPinyin" @click="clearPinyinCache">{{ clearingPinyin ? "清空中..." : "清空" }}</button></span></div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>发送延时档位</h2>' +
+    '<div class="form-row"><label>延时档位</label>' +
+    '<select v-model="mode" @change="onModeChange"><option value="safe">安全（慢，更稳）</option><option value="standard">标准</option><option value="aggressive">激进（快，风险高）</option></select>' +
+    '</div>' +
+    '<div class="form-row"><label>失败自动降档</label><toggle-switch v-model="autoDowngrade" /></div>' +
+    '<div class="delay-grid">' +
+    '<template v-for="(item, idx) in profileLabels" :key="item.key">' +
+    '<div class="delay-group-title" v-if="idx === 6">粘贴发送（剪贴板/粘贴/发送稳定，建议 ≥ 当前值）</div>' +
+    '<div class="delay-item">' +
+    '<div class="delay-item-label">{{ item.label }}</div>' +
+    '<div class="delay-item-input">' +
+    '<input type="number" min="0" step="10" v-model.number="params[item.key]">' +
+    '<span class="ms">ms</span>' +
+    '</div>' +
+    '</div>' +
+    '</template>' +
+    '</div>' +
+    '<div style="margin-top:12px">' +
+    '<button class="btn btn-secondary" style="margin-right:8px" @click="resetCustom">恢复预设值</button>' +
+    '<button class="btn btn-primary" :disabled="saving" @click="saveMode">{{ saving ? "保存中..." : "保存配置" }}</button>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>队列优化</h2>' +
+    '<div class="form-row"><label>连续文本合并</label><toggle-switch v-model="mergeEnabled" /></div>' +
+    '<div class="form-hint">同一联系人的连续消息将复用已打开的聊天窗口，仅首条搜索联系人，后续直接粘贴发送，发送更快</div>' +
+    '<div class="form-row"><label>消息去重</label><toggle-switch v-model="dedupEnabled" /></div>' +
+    '<div class="form-hint">同一联系人同时待发的相同文本只保留第一条，避免重复发送</div>' +
+    '<div class="form-row"><label>联系人分组优先</label><toggle-switch v-model="priorityEnabled" /></div>' +
+    '<div class="form-hint">同一联系人的消息（文字+图片）在队列中连续排列，按首次出现顺序分发，避免图文发送割裂</div>' +
+    '<div class="form-row"><label>自适应背压</label><toggle-switch v-model="backpressureEnabled" /></div>' +
+    '<div class="form-hint">发送连续失败达到阈值时暂停队列冷却，并自动降档保护；默认关闭</div>' +
+    '<div class="form-row"><label>动态缩间隔</label><toggle-switch v-model="dynamicIntervalEnabled" /></div>' +
+    '<div class="form-hint">连续成功时自动缩短消息间隔（下限 300ms），失败后复位；默认关闭</div>' +
+    '<div class="form-row"><label>失败阈值</label><input type="number" min="1" step="1" v-model.number="bpParams.threshold" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">连续失败达到该次数触发队列冷却（默认 3）</div>' +
+    '<div class="form-row"><label>冷却时长(ms)</label><input type="number" min="1000" step="1000" v-model.number="bpParams.cooldownMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">队列暂停时长，默认 10000（10 秒）</div>' +
+    '<div class="form-row"><label>退避基数(ms)</label><input type="number" min="100" step="100" v-model.number="bpParams.backoffBaseMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>队列明细</h2>' +
+    '<div style="max-height:300px;overflow-y:auto">' +
+    '<div class="form-row" v-for="item in status.queue.items" :key="item.id">' +
+    '<label>{{ item.contactName }}</label>' +
+    '<span style="display:flex;align-items:center;gap:8px;font-size:12px;min-width:0">' +
+    '<span class="badge" :class="item.type === \'image\' ? \'warn\' : \'ok\'">{{ item.type === "image" ? "图" : "文" }}</span>' +
+    '<span style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.contentPreview || "-" }}</span>' +
+    '<span style="color:var(--text-muted);flex-shrink:0">{{ item.queuedSeconds }}s</span>' +
+    '</span>' +
+    '</div>' +
+    '<div v-if="!status.queue.items.length" style="color:var(--text-muted);font-size:12px;padding:10px 0">队列为空</div>' +
+    '</div>' +
+    '<button class="btn btn-danger btn-sm" style="margin-top:10px" :disabled="clearingQueue || !status.queue.items.length" @click="clearQueue">{{ clearingQueue ? "清空中..." : "清空队列" }}</button>' +
+    '</div>' +
     '</div>'
 }
 
@@ -1151,7 +1462,7 @@ var LoginPage = {
   },
   template: '<div class="login-page">' +
     '<div class="login-card">' +
-    '<div class="login-logo">W</div>' +
+    '<div class="login-logo"><img src="icon.png" alt="FlowBOT"></div>' +
     '<h2 style="border:none;padding:0;margin:0 0 6px;font-size:22px;color:var(--accent)">FlowBOT</h2>' +
     '<p style="font-size:13px;color:var(--text-muted);margin:0 0 28px">请输入密码以访问管理面板</p>' +
     '<div v-if="error" class="login-error">{{ error }}</div>' +
@@ -1333,6 +1644,7 @@ var routes = [
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
   { path: '/filter', component: FilterPage, meta: { title: '消息过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
+  { path: '/send', component: SendManagerPage, meta: { title: '发送管理' } },
   { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } },
   { path: '/login', component: LoginPage, meta: { title: '登录' } }
@@ -1360,6 +1672,7 @@ var App = {
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
       { path: '/filter', label: '消息过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
+      { path: '/send', label: '发送管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
     ]

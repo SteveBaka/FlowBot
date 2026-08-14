@@ -2,6 +2,7 @@ import { exec, execFile } from 'child_process'
 import { promisify } from 'util'
 import type { IPlatformSender } from '../enhancedMessageSender'
 import type { SendMode, SendTask, SendProgress } from './types'
+import { ConfigService } from '../../services/config'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -15,6 +16,7 @@ const DISPLAY_ENV = { ...process.env, DISPLAY: process.env.DISPLAY || ':99', PAT
 
 const MAX_RETRIES = 3
 const RETRY_DELAY_MS = 1500
+const RETRY_BACKOFF_MAX_MS = 6000
 const INTER_MESSAGE_DELAY_MS = 800
 const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
@@ -22,6 +24,153 @@ const INPUT_CLICK_DELAY_MS = 200
 // 图片粘贴防冻结：仅 >5MB 拒绝粘贴；失败熔断 30s
 const MAX_PASTE_IMAGE_BYTES = 5 * 1024 * 1024
 const IMAGE_PASTE_COOLDOWN_MS = 30 * 1000
+
+// ─── 自适应背压（P1-L2）──────────────────────────────────────────────
+const CONSECUTIVE_FAILURE_THRESHOLD = 3   // 连续失败 ≥3 次 → 队列冷却 10s + 自动降档（默认值，可配置）
+const QUEUE_COOLDOWN_MS = 10 * 1000        // 队列冷却时长（默认值，可配置）
+// ─── L2 动态缩间隔（sendDynamicInterval，默认关闭）─────────────────────
+const DYNAMIC_INTERVAL_STEP_MS = 50        // 每连续成功 1 条缩短的间隔（ms）
+const DYNAMIC_INTERVAL_MIN_MS = 300        // 动态缩短下限保护
+
+// ─── 发送延时档位（safe / standard / aggressive）───────────────────────────────
+type DelayMode = 'safe' | 'standard' | 'aggressive'
+
+interface DelayProfile {
+  interMessage: number
+  searchOpen: number
+  searchSettle: number
+  selectSettle: number
+  focusMove: number
+  inputClick: number
+  textClipSettle: number
+  pasteSettle: number
+  imageClipSettle: number
+  imagePasteSettle: number
+  postSendSettle: number
+}
+
+const DELAY_PROFILES: Record<DelayMode, DelayProfile> = {
+  safe: {
+    interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400,
+    focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300,
+    imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500
+  },
+  standard: {
+    interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250,
+    focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200,
+    imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500
+  },
+  aggressive: {
+    interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150,
+    focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120,
+    imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300
+  }
+}
+
+/** 延时档位来源：仅 WebUI 配置（config.sendDelayMode），默认 standard */
+function getDelayMode(): DelayMode {
+  try {
+    const cfgMode = String(ConfigService.getInstance().get('sendDelayMode') || '').trim().toLowerCase()
+    if (cfgMode === 'safe' || cfgMode === 'standard' || cfgMode === 'aggressive') return cfgMode
+  } catch {}
+  return 'standard'
+}
+
+/** 读取 WebUI 自定义延时覆盖（config.sendDelayCustom，单位 ms） */
+function getDelayCustomOverrides(): Record<string, number> {
+  try {
+    const raw = ConfigService.getInstance().get('sendDelayCustom')
+    if (raw && typeof raw === 'object') {
+      const out: Record<string, number> = {}
+      for (const [k, v] of Object.entries(raw)) {
+        const n = Number(v)
+        if (Number.isFinite(n) && n >= 0) out[k] = n
+      }
+      return out
+    }
+  } catch {}
+  return {}
+}
+
+/** 计算生效延时档位：预设档位 + 自定义覆盖 */
+function resolveDelayProfile(mode: DelayMode): DelayProfile {
+  return { ...DELAY_PROFILES[mode] || DELAY_PROFILES.standard, ...getDelayCustomOverrides() }
+}
+
+/** 队列优化开关（WebUI 配置，独立控制） */
+function isQueueOptionEnabled(key: 'sendMerge' | 'sendDedup' | 'sendPriority'): boolean {
+  try {
+    return ConfigService.getInstance().get(key) === true
+  } catch {
+    return false
+  }
+}
+
+/** 自适应背压总开关（默认关闭） */
+function isBackpressureEnabled(): boolean {
+  try {
+    return ConfigService.getInstance().get('sendBackpressureEnabled') === true
+  } catch {
+    return false
+  }
+}
+
+/** L2 动态缩间隔开关（默认关闭） */
+function isDynamicIntervalEnabled(): boolean {
+  try {
+    return ConfigService.getInstance().get('sendDynamicInterval') === true
+  } catch {
+    return false
+  }
+}
+
+/** 读取数值配置（非法/缺失回退默认值） */
+function getConfigNumber(key: string, def: number): number {
+  try {
+    const v = ConfigService.getInstance().get(key as any)
+    if (typeof v === 'number' && Number.isFinite(v) && v >= 0) return v
+  } catch {}
+  return def
+}
+
+// ─── 拼音缓存：避免每次中文名起子进程（python3 /opt/pinyin.py）──────────────────
+const pinyinCache = new Map<string, string>()
+let pinyinCacheFile = ''
+
+function resolvePinyinCacheFile(): string {
+  if (pinyinCacheFile) return pinyinCacheFile
+  try {
+    pinyinCacheFile = require('path').join(ConfigService.getInstance().getCacheBasePath(), 'pinyin-cache.json')
+  } catch { pinyinCacheFile = '' }
+  return pinyinCacheFile
+}
+
+function persistPinyinCache(): void {
+  const file = resolvePinyinCacheFile()
+  if (!file) return
+  try {
+    const fs = require('fs')
+    const dir = require('path').dirname(file)
+    fs.mkdirSync(dir, { recursive: true })
+    fs.writeFileSync(file, JSON.stringify(Object.fromEntries(pinyinCache)))
+  } catch {}
+}
+
+function loadPinyinCache(): void {
+  const file = resolvePinyinCacheFile()
+  if (!file) return
+  try {
+    const fs = require('fs')
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, 'utf-8'))
+      if (data && typeof data === 'object') {
+        for (const [k, v] of Object.entries(data)) {
+          if (typeof v === 'string') pinyinCache.set(k, v)
+        }
+      }
+    }
+  } catch {}
+}
 
 interface QueuedMessage {
   id: string
@@ -52,7 +201,7 @@ async function xclipSet(text: any): Promise<void> {
   if (!str) return
   const escaped = str.replace(/'/g, "'\\''")
   try {
-    await execAsync(`echo -n '${escaped}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -silent`, {
+    await execAsync(`echo -n '${escaped}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -silent >/dev/null 2>&1`, {
       timeout: 3000,
       env: DISPLAY_ENV
     })
@@ -80,7 +229,7 @@ async function xclipGet(): Promise<string> {
 
 async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Promise<boolean> {
   try {
-    await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t ${mime} -i "${imagePath.replace(/"/g, '\\"')}"`, {
+    await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t ${mime} -i "${imagePath.replace(/"/g, '\\"')}" >/dev/null 2>&1`, {
       timeout: 5000,
       env: DISPLAY_ENV
     })
@@ -89,7 +238,7 @@ async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Pro
     warn(`xclipSetImage failed (${mime}): ${e}`)
     if (mime !== 'image/bmp') {
       try {
-        await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t image/bmp -i "${imagePath.replace(/"/g, '\\"')}"`, {
+        await execAsync(`PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t image/bmp -i "${imagePath.replace(/"/g, '\\"')}" >/dev/null 2>&1`, {
           timeout: 5000,
           env: DISPLAY_ENV
         })
@@ -109,9 +258,126 @@ export class LinuxSender implements IPlatformSender {
   private currentMode: SendMode = 'foreground'
   private lastSendTime = 0
   private cachedWid = ''
+  private delay: DelayProfile = DELAY_PROFILES.standard
+  private delayMode: DelayMode = 'standard'
+  private lastDelayMode: DelayMode | '' = ''
+  // 自适应背压状态
+  private consecutiveFailures = 0
+  private queueCoolUntil = 0
+  private activeTier: number | null = null   // 降档后的档位索引（null=跟随配置档位）
+  // 队列优化状态（P1-L3）
+  private dedupCount = 0
+  private lastMergeContact = ''              // 当前批次的联系人（同联系人免重复搜索）
+  // 吞吐统计
+  private totalSent = 0
+  private totalFailed = 0
+  // L2 动态缩间隔 / 每步耗时
+  private successStreak = 0
+  private lastSendSteps: Array<{ step: string; ms: number }> = []
   // 图片粘贴熔断：连续失败 ≥1 次 → 冷却 30s；冷却后仅再试一次，失败则不发送
   private imagePasteFails = 0
   private imagePasteCoolUntil = 0
+
+  constructor() {
+    try {
+      const mode = getDelayMode()
+      this.delay = resolveDelayProfile(mode)
+      this.delayMode = mode
+      log(`Delay profile: ${mode} (interMessage=${this.delay.interMessage}ms)`)
+    } catch {
+      this.delay = resolveDelayProfile('standard')
+      this.delayMode = 'standard'
+    }
+    loadPinyinCache()
+  }
+
+  /** 按当前配置刷新延时档位（WebUI 改档/改参数后下一条消息生效；背压降档优先） */
+  private refreshDelayProfile(): void {
+    try {
+      let mode = getDelayMode()
+      if (this.activeTier !== null) {
+        mode = this.tierIndexToMode(this.activeTier)
+      }
+      this.delay = resolveDelayProfile(mode)
+      this.delayMode = mode
+      if (mode !== this.lastDelayMode) {
+        this.lastDelayMode = mode
+        log(`Delay profile refreshed: ${mode} (interMessage=${this.delay.interMessage}ms)`)
+      }
+    } catch {
+      this.delay = resolveDelayProfile('standard')
+      this.delayMode = 'standard'
+    }
+  }
+
+  // ─── 自适应背压：失败冷却 + 自动降档/升档 ─────────────────────────────────
+
+  private getConfiguredTierIndex(mode: DelayMode): number {
+    return mode === 'aggressive' ? 0 : mode === 'safe' ? 2 : 1
+  }
+
+  private tierIndexToMode(idx: number): DelayMode {
+    if (idx <= 0) return 'aggressive'
+    if (idx >= 2) return 'safe'
+    return 'standard'
+  }
+
+  private isAutoDowngradeEnabled(): boolean {
+    try {
+      return ConfigService.getInstance().get('sendAutoDowngrade') !== false
+    } catch {
+      return true
+    }
+  }
+
+  /** 消息发送成功：复位连续失败计数，并向上恢复一档（至多到配置档位） */
+  private onSendSuccess(): void {
+    this.consecutiveFailures = 0
+    this.successStreak += 1
+    if (this.activeTier !== null) {
+      const configuredIdx = this.getConfiguredTierIndex(getDelayMode())
+      const nextIdx = this.activeTier - 1
+      if (nextIdx >= configuredIdx) {
+        this.activeTier = nextIdx
+        log(`Send success, upgraded delay tier to ${this.tierIndexToMode(nextIdx)}`)
+      } else {
+        this.activeTier = null
+        log('Send success, delay tier restored to configured')
+      }
+    }
+  }
+
+  /** 消息发送失败：背压开启时累计连续失败，≥阈值 → 队列冷却 + 自动降档 */
+  private onSendFailure(): void {
+    this.successStreak = 0
+    if (!isBackpressureEnabled()) return
+    const threshold = Math.max(1, Math.floor(getConfigNumber('sendFailureThreshold', CONSECUTIVE_FAILURE_THRESHOLD)))
+    this.consecutiveFailures += 1
+    if (this.consecutiveFailures >= threshold) {
+      this.consecutiveFailures = 0
+      const cooldownMs = Math.max(1000, Math.floor(getConfigNumber('sendCooldownMs', QUEUE_COOLDOWN_MS)))
+      this.queueCoolUntil = Date.now() + cooldownMs
+      warn(`Send failed ${threshold} times consecutively, pausing queue for ${Math.round(cooldownMs / 1000)}s`)
+      if (this.isAutoDowngradeEnabled()) this.downgradeTier()
+    }
+  }
+
+  /** 降一档（aggressive→standard→safe），已到 safe 不再降 */
+  private downgradeTier(): void {
+    const configuredIdx = this.getConfiguredTierIndex(getDelayMode())
+    const current = this.activeTier === null ? configuredIdx : this.activeTier
+    if (current >= 2) return
+    this.activeTier = current + 1
+    warn(`Auto downgraded delay tier: ${this.tierIndexToMode(current)} → ${this.tierIndexToMode(this.activeTier)}`)
+  }
+
+  /** 生效的队列消息间隔：动态缩间隔开启时按连续成功缩短（下限 300ms），否则用档位值 */
+  private getEffectiveInterMessage(): number {
+    const base = this.delay.interMessage
+    if (!isDynamicIntervalEnabled() || this.successStreak <= 0) return base
+    const shrink = Math.min(this.successStreak * DYNAMIC_INTERVAL_STEP_MS, base * 0.5)
+    return Math.max(DYNAMIC_INTERVAL_MIN_MS, Math.round(base - shrink))
+  }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
 
@@ -211,13 +477,21 @@ export class LinuxSender implements IPlatformSender {
 
   private async toPinyin(text: string): Promise<string> {
     try {
+      // 拼音缓存：命中直接返回，避免每次起子进程
+      const cached = pinyinCache.get(text)
+      if (cached) return cached
+
       const { execSync } = require('child_process')
       const result = execSync(`python3 /opt/pinyin.py '${text.replace(/'/g, "'\\''")}'`, {
         timeout: 3000,
         encoding: 'utf-8',
         env: DISPLAY_ENV
       }).trim()
-      return result || text
+      const pinyin = result || text
+      if (pinyinCache.size >= 5000) pinyinCache.clear() // 防无限膨胀
+      pinyinCache.set(text, pinyin)
+      persistPinyinCache()
+      return pinyin
     } catch {
       return text
     }
@@ -226,7 +500,7 @@ export class LinuxSender implements IPlatformSender {
   private async searchAndSelectContact(contactName: string, wid: string): Promise<boolean> {
     log(`Opening search with Ctrl+F...`)
     await run(`xdotool key --window "${wid}" ctrl+f`)
-    await new Promise(r => setTimeout(r, 400))
+    await new Promise(r => setTimeout(r, this.delay.searchOpen))
 
     log(`Selecting all and typing contact name: "${contactName}"`)
     await run(`xdotool key --window "${wid}" ctrl+a`)
@@ -240,14 +514,14 @@ export class LinuxSender implements IPlatformSender {
       await run(`xdotool type --window "${wid}" --delay 30 "${contactName.replace(/'/g, "'\\''")}"`)
     } else {
       await xclipSet(contactName)
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise(r => setTimeout(r, this.delay.textClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
     }
-    await new Promise(r => setTimeout(r, 600))
+    await new Promise(r => setTimeout(r, this.delay.searchSettle))
 
     log(`Pressing Enter to select first result...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, 400))
+    await new Promise(r => setTimeout(r, this.delay.selectSettle))
 
     log(`Search complete for contact: "${contactName}"`)
     return true
@@ -267,9 +541,9 @@ export class LinuxSender implements IPlatformSender {
     const clickY = h - 100
     log(`Window ${w}x${h}, clicking input area at (${clickX}, ${clickY})`)
     await run(`xdotool mousemove --window "${wid}" ${clickX} ${clickY}`)
-    await new Promise(r => setTimeout(r, 80))
+    await new Promise(r => setTimeout(r, this.delay.focusMove))
     await run(`xdotool click 1`)
-    await new Promise(r => setTimeout(r, INPUT_CLICK_DELAY_MS))
+    await new Promise(r => setTimeout(r, this.delay.inputClick))
   }
 
   private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
@@ -289,21 +563,21 @@ export class LinuxSender implements IPlatformSender {
         this.triggerImagePasteCooldown()
         return false
       }
-      await new Promise(r => setTimeout(r, 200))
+      await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
       log('Image pasted to clipboard successfully')
-      await new Promise(r => setTimeout(r, 500))
+      await new Promise(r => setTimeout(r, this.delay.imagePasteSettle))
     } else {
       log(`Pasting message (${content.length} chars)...`)
       await xclipSet(content)
-      await new Promise(r => setTimeout(r, 100))
+      await new Promise(r => setTimeout(r, this.delay.textClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
-      await new Promise(r => setTimeout(r, 300))
+      await new Promise(r => setTimeout(r, this.delay.pasteSettle))
     }
 
     log(`Pressing Enter to send...`)
     await run(`xdotool key --window "${wid}" Return`)
-    await new Promise(r => setTimeout(r, POST_SEND_SETTLE_MS))
+    await new Promise(r => setTimeout(r, this.delay.postSendSettle))
 
     log('Message sent successfully')
     return true
@@ -313,14 +587,15 @@ export class LinuxSender implements IPlatformSender {
     content: string,
     contactName: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    skipSearch = false
   ): Promise<{ success: boolean; error?: string }> {
     const wid = await this.findWeChatWindow()
     if (!wid) {
       return { success: false, error: '找不到微信窗口' }
     }
 
-    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions)
+    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions, skipSearch)
   }
 
   private detectImageMime(imagePath: string): string {
@@ -337,28 +612,44 @@ export class LinuxSender implements IPlatformSender {
     contactName: string,
     wid: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    skipSearch = false
   ): Promise<{ success: boolean; error?: string }> {
+    const steps: Array<{ step: string; ms: number }> = []
+    let t0 = Date.now()
+
     if (!await this.activateWindow(wid)) {
       return { success: false, error: '无法激活微信窗口' }
     }
+    steps.push({ step: '激活窗口', ms: Date.now() - t0 })
 
-    log(`Searching contact "${contactName}"...`)
-    if (!await this.searchAndSelectContact(contactName, wid)) {
-      return { success: false, error: '搜索联系人失败' }
+    t0 = Date.now()
+    if (!skipSearch) {
+      log(`Searching contact "${contactName}"...`)
+      if (!await this.searchAndSelectContact(contactName, wid)) {
+        return { success: false, error: '搜索联系人失败' }
+      }
+    } else {
+      log(`Reusing open chat for "${contactName}" (skip search)`)
     }
+    steps.push({ step: '搜索联系人', ms: Date.now() - t0 })
 
+    t0 = Date.now()
     await this.ensureFocusInInput(wid)
+    steps.push({ step: '聚焦输入框', ms: Date.now() - t0 })
 
     // 真正渲染群内 @：输入 @ + 成员名 + 回车选中，再拼正文
     if (atMentions && atMentions.length > 0) {
       await this.typeAtMentions(atMentions, wid)
     }
 
+    t0 = Date.now()
     if (!await this.pasteAndSend(content, wid, imagePath)) {
       return { success: false, error: '粘贴发送失败' }
     }
+    steps.push({ step: '粘贴发送', ms: Date.now() - t0 })
 
+    this.lastSendSteps = steps
     this.lastSendTime = Date.now()
     log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"${atMentions && atMentions.length ? ` with @(${atMentions.length})` : ''}`)
     return { success: true }
@@ -407,6 +698,19 @@ export class LinuxSender implements IPlatformSender {
     }
 
     return new Promise((resolve) => {
+      // 去重（sendDedup）：同联系人 + 同内容文本，且队列中已有待发 → 丢弃本次
+      if (!imagePath && !(atMentions && atMentions.length) && isQueueOptionEnabled('sendDedup')) {
+        const dup = this.queue.find(q =>
+          q.contactName === name && q.content === str && !q.imagePath && !(q.atMentions && q.atMentions.length)
+        )
+        if (dup) {
+          this.dedupCount++
+          log(`Deduplicated message to "${name}" (same content already queued as ${dup.id}), dedupCount=${this.dedupCount}`)
+          resolve({ success: true, method: this.currentMode })
+          return
+        }
+      }
+
       const item: QueuedMessage = {
         id: `msg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
         content: str,
@@ -417,7 +721,21 @@ export class LinuxSender implements IPlatformSender {
         retries: 0,
         createdAt: Date.now()
       }
-      this.queue.push(item)
+
+      // 优先级分组（sendPriority）：同联系人消息连续（组顺序=首次出现顺序，组内到达顺序）
+      if (isQueueOptionEnabled('sendPriority')) {
+        let insertAt = this.queue.length
+        for (let i = this.queue.length - 1; i >= 0; i--) {
+          if (this.queue[i].contactName === name) {
+            insertAt = i + 1
+            break
+          }
+        }
+        this.queue.splice(insertAt, 0, item)
+      } else {
+        this.queue.push(item)
+      }
+
       log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''}${atMentions && atMentions.length ? ` [AT:${atMentions.length}]` : ''} (queue size: ${this.queue.length})`)
       this.processQueue()
     })
@@ -426,18 +744,36 @@ export class LinuxSender implements IPlatformSender {
   private async processQueue(): Promise<void> {
     if (this.processing) return
     this.processing = true
+    this.lastMergeContact = ''
 
     while (this.queue.length > 0) {
+      this.refreshDelayProfile()
+
+      // 背压冷却：暂停队列（新消息排队等待，不发送；仅背压开启时生效）
+      if (isBackpressureEnabled() && Date.now() < this.queueCoolUntil) {
+        const remaining = this.queueCoolUntil - Date.now()
+        const wait = Math.min(remaining, 1000)
+        log(`Queue cooldown active (${Math.ceil(remaining / 1000)}s left), pausing send queue`)
+        await new Promise(r => setTimeout(r, wait))
+        continue
+      }
+
       const item = this.queue[0]
 
+      const interMessage = this.getEffectiveInterMessage()
       const elapsed = Date.now() - this.lastSendTime
-      if (elapsed < INTER_MESSAGE_DELAY_MS) {
-        const wait = INTER_MESSAGE_DELAY_MS - elapsed
+      if (elapsed < interMessage) {
+        const wait = interMessage - elapsed
         log(`Waiting ${wait}ms before next send...`)
         await new Promise(r => setTimeout(r, wait))
       }
 
-      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}`)
+      // 同批免重复搜索（sendMerge）：同一联系人的连续消息（含图片，无 @）复用已打开的聊天
+      const skipSearch = isQueueOptionEnabled('sendMerge') &&
+        this.lastMergeContact === item.contactName &&
+        !(item.atMentions && item.atMentions.length)
+
+      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}${skipSearch ? ' [MERGED]' : ''}`)
 
       // 图片粘贴熔断：冷却期内图片消息快速失败，不粘贴不重试，保证队列稳定
       if (item.imagePath && Date.now() < this.imagePasteCoolUntil) {
@@ -450,7 +786,7 @@ export class LinuxSender implements IPlatformSender {
 
       let result: { success: boolean; error?: string }
       try {
-        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions)
+        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions, skipSearch)
       } catch (e: any) {
         result = { success: false, error: e?.message || 'Unknown error' }
       }
@@ -458,17 +794,25 @@ export class LinuxSender implements IPlatformSender {
       if (result.success) {
         log(`Message ${item.id} sent successfully`)
         log(`Message ${item.id} (${item.imagePath ? 'image' : 'text'}) sent successfully`)
+        this.onSendSuccess()
+        this.totalSent++
+        this.lastMergeContact = item.contactName
         item.resolve({ success: true, method: this.currentMode })
         this.queue.shift()
       } else {
         item.retries++
         if (item.retries >= MAX_RETRIES) {
           warn(`Message ${item.id} failed after ${MAX_RETRIES} attempts: ${result.error}`)
+          this.onSendFailure()
+          this.totalFailed++
+          this.lastMergeContact = ''
           item.resolve({ success: false, error: `发送失败（重试${MAX_RETRIES}次）: ${result.error}`, method: this.currentMode })
           this.queue.shift()
         } else {
-          warn(`Message ${item.id} failed (attempt ${item.retries}/${MAX_RETRIES}), retrying in ${RETRY_DELAY_MS}ms...`)
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS))
+          const backoffBase = Math.max(100, Math.floor(getConfigNumber('sendBackoffBaseMs', RETRY_DELAY_MS)))
+          const backoff = Math.min(backoffBase * Math.pow(2, item.retries - 1), RETRY_BACKOFF_MAX_MS)
+          warn(`Message ${item.id} failed (attempt ${item.retries}/${MAX_RETRIES}), retrying in ${backoff}ms...`)
+          await new Promise(r => setTimeout(r, backoff))
         }
       }
     }
@@ -495,12 +839,97 @@ export class LinuxSender implements IPlatformSender {
     return count
   }
 
+  /** 清空拼音缓存并持久化空文件，返回清除条数 */
+  clearPinyinCache(): number {
+    const cleared = pinyinCache.size
+    pinyinCache.clear()
+    try {
+      const fs = require('fs')
+      const file = resolvePinyinCacheFile()
+      if (file) {
+        const dir = require('path').dirname(file)
+        fs.mkdirSync(dir, { recursive: true })
+        fs.writeFileSync(file, '{}')
+      }
+    } catch {}
+    log(`Pinyin cache cleared (${cleared} entries)`)
+    return cleared
+  }
+
   getProgress(): SendProgress {
     return {
       total: this.queue.length,
       sent: 0,
       failed: 0,
       current: this.queue[0]?.content
+    }
+  }
+
+  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  getSendStatus(): Record<string, any> {
+    let mode: DelayMode = this.delayMode
+    try {
+      let cfg = getDelayMode() || this.delayMode
+      if (this.activeTier !== null) cfg = this.tierIndexToMode(this.activeTier)
+      mode = cfg
+    } catch {}
+
+    // 当前批次：队首连续同联系人的消息数
+    let batchContact: string | null = null
+    let batchSize = 0
+    if (this.queue.length > 0) {
+      batchContact = this.queue[0].contactName
+      for (const it of this.queue) {
+        if (it.contactName === batchContact) batchSize++
+        else break
+      }
+    }
+
+    return {
+      mode,
+      profile: { ...resolveDelayProfile(mode) },
+      custom: getDelayCustomOverrides(),
+      backpressure: {
+        enabled: isBackpressureEnabled(),
+        consecutiveFailures: this.consecutiveFailures,
+        coolRemainingMs: Math.max(0, this.queueCoolUntil - Date.now()),
+        autoDowngrade: this.isAutoDowngradeEnabled(),
+        failureThreshold: Math.max(1, Math.floor(getConfigNumber('sendFailureThreshold', CONSECUTIVE_FAILURE_THRESHOLD))),
+        cooldownMs: Math.max(1000, Math.floor(getConfigNumber('sendCooldownMs', QUEUE_COOLDOWN_MS))),
+        backoffBaseMs: Math.max(100, Math.floor(getConfigNumber('sendBackoffBaseMs', RETRY_DELAY_MS)))
+      },
+      options: {
+        merge: isQueueOptionEnabled('sendMerge'),
+        dedup: isQueueOptionEnabled('sendDedup'),
+        priority: isQueueOptionEnabled('sendPriority'),
+        dynamicInterval: isDynamicIntervalEnabled()
+      },
+      dedupCount: this.dedupCount,
+      stats: {
+        sent: this.totalSent,
+        failed: this.totalFailed
+      },
+      lastSendSteps: this.lastSendSteps,
+      successStreak: this.successStreak,
+      batch: {
+        contact: batchContact,
+        size: batchSize
+      },
+      queue: {
+        pending: this.queue.length,
+        processing: this.processing,
+        currentContent: this.queue[0]?.content || null,
+        lastSendTime: this.lastSendTime || null,
+        items: this.queue.slice(0, 50).map((it) => ({
+          id: it.id,
+          contactName: it.contactName,
+          type: it.imagePath ? 'image' : 'text',
+          atMentions: !!(it.atMentions && it.atMentions.length),
+          contentPreview: it.content ? it.content.slice(0, 30) : '',
+          queuedSeconds: Math.round((Date.now() - it.createdAt) / 1000)
+        }))
+      },
+      pinyinCacheSize: pinyinCache.size
     }
   }
 

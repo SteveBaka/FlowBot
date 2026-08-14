@@ -265,9 +265,41 @@ class HttpService {
 
   // 图片发送限制（防微信粘贴冻结）：仅体积 >5MB 拒绝
   private readonly IMAGE_SEND_MAX_BYTES = 5 * 1024 * 1024
+  // 身份库直读（WebUI 维护的 identity.db，同容器文件系统，发送前一次读取省 WCDB）
+  private identityDbReadOnly: any = null
+  private identityDbPath = ''
 
   constructor() {
     this.configService = ConfigService.getInstance()
+  }
+
+  private getIdentityDbPath(): string {
+    if (this.identityDbPath) return this.identityDbPath
+    const configDir = process.env.WEFLOW_CONFIG_DIR || (process.env.WEFLOW_DOCKER ? '/opt/weflow/data' : '')
+    this.identityDbPath = configDir ? require('path').join(configDir, 'identity.db') : ''
+    return this.identityDbPath
+  }
+
+  /**
+   * 从身份库读取显示名/自定义 wxid 缓存（优先于 WCDB 查询，失败返回 null 走兜底）。
+   */
+  private queryIdentityName(wxid: string): { displayName?: string; customWxid?: string } | null {
+    try {
+      const dbPath = this.getIdentityDbPath()
+      if (!dbPath) return null
+      if (!this.identityDbReadOnly) {
+        const { DatabaseSync } = require('node:sqlite')
+        this.identityDbReadOnly = new DatabaseSync(dbPath, { readOnly: true })
+      }
+      const row = this.identityDbReadOnly.prepare('SELECT display_name, custom_wxid FROM contacts WHERE real_wxid = ?').get(String(wxid))
+      if (row) {
+        return {
+          displayName: row.display_name ? String(row.display_name) : undefined,
+          customWxid: row.custom_wxid ? String(row.custom_wxid) : undefined
+        }
+      }
+    } catch {}
+    return null
   }
 
   /**
@@ -753,6 +785,12 @@ class HttpService {
                 await this.handleMgmtBotRestart(req, res, bodyParams)
             } else if (pathname === '/api/v1/mgmt/bots/status' && req.method === 'GET') {
                 this.handleMgmtBotStatus(res)
+            } else if (pathname === '/api/v1/mgmt/send-status' && req.method === 'GET') {
+                this.handleMgmtSendStatus(res)
+            } else if (pathname === '/api/v1/mgmt/send-clear-queue' && req.method === 'POST') {
+                this.handleMgmtSendClearQueue(res)
+            } else if (pathname === '/api/v1/mgmt/send-clear-pinyin-cache' && req.method === 'POST') {
+                this.handleMgmtSendClearPinyinCache(res)
             } else if (pathname === '/api/v1/mgmt/logs' && req.method === 'GET') {
                 this.handleMgmtLogs(url, res)
             } else if (pathname === '/api/v1/mgmt/logs/stats' && req.method === 'GET') {
@@ -2961,6 +2999,21 @@ class HttpService {
 
     const isGroup = /@chatroom$/i.test(id)
 
+    // 身份库优先（WebUI 维护的 display_name / custom_wxid 缓存，省 WCDB round-trip）
+    try {
+      const identity = this.queryIdentityName(id)
+      if (identity) {
+        if (isGroup) {
+          if (identity.displayName && identity.displayName !== id) return identity.displayName
+        } else if (identity.customWxid) {
+          // 私聊：优先自定义 wxid（微信号 alias），唯一不重名
+          return identity.customWxid
+        } else if (identity.displayName && identity.displayName !== id) {
+          return identity.displayName
+        }
+      }
+    } catch {}
+
     try {
       const contact = await chatService.getContact(id)
       if (contact) {
@@ -3470,7 +3523,18 @@ class HttpService {
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
                 'logEnabled', 'bots',
                 'imageTransferMode', 'imageServerBaseUrl',
-                'flowbotCommand'
+                'flowbotCommand',
+                'sendDelayMode',
+                'sendDelayCustom',
+                'sendAutoDowngrade',
+                'sendMerge',
+                'sendDedup',
+                'sendPriority',
+                'sendBackpressureEnabled',
+                'sendDynamicInterval',
+                'sendFailureThreshold',
+                'sendCooldownMs',
+                'sendBackoffBaseMs'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {
@@ -3484,6 +3548,41 @@ class HttpService {
             this.sendError(res, 500, String(error))
         }
     }
+
+  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  private handleMgmtSendStatus(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const status = sender && typeof sender.getSendStatus === 'function'
+        ? sender.getSendStatus()
+        : { mode: 'unavailable', error: 'sender 未初始化' }
+      this.sendJson(res, { success: true, status })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /** 清空待发队列（取消所有 PENDING 消息） */
+  private handleMgmtSendClearQueue(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const count = sender && typeof sender.cancelPending === 'function' ? sender.cancelPending() : 0
+      this.sendJson(res, { success: true, cancelled: count })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
+
+  /** 清空拼音缓存 */
+  private handleMgmtSendClearPinyinCache(res: http.ServerResponse): void {
+    try {
+      const sender = getEnhancedMessageSender() as any
+      const cleared = sender && typeof sender.clearPinyinCache === 'function' ? sender.clearPinyinCache() : 0
+      this.sendJson(res, { success: true, cleared })
+    } catch (error) {
+      this.sendError(res, 500, String(error))
+    }
+  }
 
   private async handleMgmtSetConfig(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
