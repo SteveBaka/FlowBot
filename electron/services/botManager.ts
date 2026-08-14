@@ -721,6 +721,8 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           user_id: senderUserId,
           message: messageSegments,
           raw_message: data.content || '',
+          // 头像 CDN 链接（wx.qlogo.cn），供 OneBot 消费方取用
+          avatar: data.avatarUrl ? String(data.avatarUrl) : undefined,
           sender: {
             user_id: senderUserId,
             nickname: senderNickname,

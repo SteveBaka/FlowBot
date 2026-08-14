@@ -19,6 +19,10 @@ const INTER_MESSAGE_DELAY_MS = 800
 const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
 
+// 图片粘贴防冻结：仅 >5MB 拒绝粘贴；失败熔断 30s
+const MAX_PASTE_IMAGE_BYTES = 5 * 1024 * 1024
+const IMAGE_PASTE_COOLDOWN_MS = 30 * 1000
+
 interface QueuedMessage {
   id: string
   content: string
@@ -105,8 +109,26 @@ export class LinuxSender implements IPlatformSender {
   private currentMode: SendMode = 'foreground'
   private lastSendTime = 0
   private cachedWid = ''
+  // 图片粘贴熔断：连续失败 ≥1 次 → 冷却 30s；冷却后仅再试一次，失败则不发送
+  private imagePasteFails = 0
+  private imagePasteCoolUntil = 0
 
   setMode(mode: SendMode): void { this.currentMode = mode }
+
+  /** 探测图片体积（仅 stat，微秒级） */
+  private probeImageBytes(filePath: string): number | null {
+    try {
+      const fs = require('fs')
+      return fs.statSync(filePath).size
+    } catch { return null }
+  }
+
+  /** 触发图片粘贴熔断：冷却 30s */
+  private triggerImagePasteCooldown(): void {
+    this.imagePasteFails += 1
+    this.imagePasteCoolUntil = Date.now() + IMAGE_PASTE_COOLDOWN_MS
+    warn(`Image paste cooldown triggered (fail #${this.imagePasteFails}), next 30s image sends will be skipped`)
+  }
 
   private async findWeChatWindow(): Promise<string> {
     if (this.cachedWid) {
@@ -253,11 +275,19 @@ export class LinuxSender implements IPlatformSender {
   private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
     if (imagePath) {
       log(`Pasting image: ${imagePath}`)
+      // 兜底：探测图片体积，>5MB 拒绝并触发熔断（防微信粘贴冻结）
+      const bytes = this.probeImageBytes(imagePath)
+      if (bytes !== null && bytes > MAX_PASTE_IMAGE_BYTES) {
+        warn(`Image too large to paste (${Math.round(bytes / 1024 / 1024)}MB > 5MB), rejected`)
+        this.triggerImagePasteCooldown()
+        return false
+      }
       const mime = this.detectImageMime(imagePath)
       const ok = await xclipSetImage(imagePath, mime)
       if (!ok) {
-        warn('xclipSetImage failed, falling back to text')
-        await xclipSet(content)
+        warn('xclipSetImage failed, triggering image paste cooldown')
+        this.triggerImagePasteCooldown()
+        return false
       }
       await new Promise(r => setTimeout(r, 200))
       await run(`xdotool key --window "${wid}" ctrl+v`)
@@ -408,6 +438,15 @@ export class LinuxSender implements IPlatformSender {
       }
 
       log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}`)
+
+      // 图片粘贴熔断：冷却期内图片消息快速失败，不粘贴不重试，保证队列稳定
+      if (item.imagePath && Date.now() < this.imagePasteCoolUntil) {
+        const remaining = Math.ceil((this.imagePasteCoolUntil - Date.now()) / 1000)
+        warn(`Image paste cooldown active (${remaining}s left), skipping image send`)
+        item.resolve({ success: false, error: `图片粘贴冷却中（${remaining}s）`, method: this.currentMode })
+        this.queue.shift()
+        continue
+      }
 
       let result: { success: boolean; error?: string }
       try {
