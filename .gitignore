@@ -102,3 +102,5 @@ docs/WCDB-DEADLINE-DOCKER.md
 docs/message-filter-and-official-block.md
 docs/unified-port-message-api.md
 docs/IDENTITY-DB.md
+docs/IDENTITY-DB-GROUP-NICKNAME.md
+docs/SEND-DELAY-CONTROL.md
