@@ -90,6 +90,7 @@ interface ConfigSchema {
   sendFailureThreshold: number
   sendCooldownMs: number
   sendBackoffBaseMs: number
+  imagePasteCapMs: number
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -277,6 +278,7 @@ export class ConfigService {
       sendFailureThreshold: 3,
       sendCooldownMs: 10000,
       sendBackoffBaseMs: 1500,
+      imagePasteCapMs: 1500,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

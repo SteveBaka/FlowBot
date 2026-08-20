@@ -1011,8 +1011,8 @@ var AboutPage = {
 
 var PRESETS = {
   safe: { interMessage: 800, searchOpen: 400, searchSettle: 600, selectSettle: 400, focusMove: 80, inputClick: 200, textClipSettle: 100, pasteSettle: 300, imageClipSettle: 200, imagePasteSettle: 500, postSendSettle: 500 },
-  standard: { interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250, focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200, imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500 },
-  aggressive: { interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150, focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120, imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300 }
+  standard: { interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250, focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200, imageClipSettle: 200, imagePasteSettle: 400, postSendSettle: 500 },
+  aggressive: { interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150, focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120, imageClipSettle: 120, imagePasteSettle: 400, postSendSettle: 300 }
 }
 
 var SendManagerPage = {
@@ -1027,7 +1027,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500 })
     var status = reactive({
       mode: 'standard',
       queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
@@ -1079,6 +1079,7 @@ var SendManagerPage = {
         bpParams.threshold = d.sendFailureThreshold || 3
         bpParams.cooldownMs = d.sendCooldownMs || 10000
         bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
+        bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
         custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
         initParams()
       }
@@ -1152,7 +1153,8 @@ var SendManagerPage = {
           sendDynamicInterval: dynamicIntervalEnabled.value,
           sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
           sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
-          sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500)
+          sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
+          imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500)
         })
       })
       saving.value = false
@@ -1300,6 +1302,8 @@ var SendManagerPage = {
     '<div class="form-hint">队列暂停时长，默认 10000（10 秒）</div>' +
     '<div class="form-row"><label>退避基数(ms)</label><input type="number" min="100" step="100" v-model.number="bpParams.backoffBaseMs" style="width:110px;text-align:right"></div>' +
     '<div class="form-hint">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
+    '<div class="form-row"><label>大图粘贴等待上限(ms)</label><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
     '</div>' +
 
     '<div class="card">' +

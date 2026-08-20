@@ -58,12 +58,12 @@ const DELAY_PROFILES: Record<DelayMode, DelayProfile> = {
   standard: {
     interMessage: 800, searchOpen: 200, searchSettle: 350, selectSettle: 250,
     focusMove: 80, inputClick: 150, textClipSettle: 100, pasteSettle: 200,
-    imageClipSettle: 200, imagePasteSettle: 300, postSendSettle: 500
+    imageClipSettle: 200, imagePasteSettle: 400, postSendSettle: 500
   },
   aggressive: {
     interMessage: 500, searchOpen: 120, searchSettle: 200, selectSettle: 150,
     focusMove: 50, inputClick: 90, textClipSettle: 60, pasteSettle: 120,
-    imageClipSettle: 120, imagePasteSettle: 180, postSendSettle: 300
+    imageClipSettle: 120, imagePasteSettle: 400, postSendSettle: 300
   }
 }
 
@@ -389,6 +389,23 @@ export class LinuxSender implements IPlatformSender {
     } catch { return null }
   }
 
+  /**
+   * 图片粘贴后到发送前的等待，按体积自适应。
+   * - 小图（<1MB）：用基准 imagePasteSettle（如标准 600ms），不额外等待
+   * - 大图（≥1MB）：以 1MB 为起点，每超 1MB 追加 300ms，微信需要更长时间解码生成预览
+   * 上限 3000ms，避免无限长卡死队列。
+   */
+  private computeImagePasteWait(bytes: number | null, baseWait: number): number {
+    if (bytes === null || bytes <= 0) return baseWait
+    const mb = bytes / (1024 * 1024)
+    if (mb < 1) return baseWait
+    // 大图：从基准（如 400ms）随体积线性增量，封顶可配置上限（默认 1500ms），保证大图能发又不过度拖沓
+    const cap = Math.max(baseWait, Math.floor(getConfigNumber('imagePasteCapMs', 1500)))
+    const extra = Math.ceil((mb - 1) / 1) * 300
+    const total = baseWait + extra
+    return Math.min(total, cap)
+  }
+
   /** 触发图片粘贴熔断：冷却 30s */
   private triggerImagePasteCooldown(): void {
     this.imagePasteFails += 1
@@ -566,7 +583,14 @@ export class LinuxSender implements IPlatformSender {
       await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
       await run(`xdotool key --window "${wid}" ctrl+v`)
       log('Image pasted to clipboard successfully')
-      await new Promise(r => setTimeout(r, this.delay.imagePasteSettle))
+      // 体积自适应等待：基准 imagePasteSettle（标准 400ms），大图按比例增量封顶 1500ms，
+      // 小图用基准值不额外等待（避免小图也变慢而堵塞队列）
+      const baseWait = this.delay.imagePasteSettle
+      const effectiveWait = this.computeImagePasteWait(bytes, baseWait)
+      if (effectiveWait !== baseWait) {
+        warn(`Image ${bytes ? Math.round(bytes / 1024 / 1024 * 100) / 100 : '?'}MB: paste wait ${baseWait} → ${effectiveWait}ms (adaptive)`)
+      }
+      await new Promise(r => setTimeout(r, effectiveWait))
     } else {
       log(`Pasting message (${content.length} chars)...`)
       await xclipSet(content)

@@ -91,7 +91,6 @@ export async function showLinuxNotification(
     });
 
     notification.on("failed", (_, error) => {
-      console.error("[LinuxNotification] Notification failed:", error);
       clearNotificationState(notificationId);
     });
 
@@ -107,10 +106,6 @@ export async function showLinuxNotification(
     }
 
     notification.show();
-
-    console.log(
-      `[LinuxNotification] Shown notification ${notificationId}: ${data.title}`,
-    );
 
     return notificationId;
   } catch (error) {

@@ -3534,7 +3534,8 @@ class HttpService {
                 'sendDynamicInterval',
                 'sendFailureThreshold',
                 'sendCooldownMs',
-                'sendBackoffBaseMs'
+                'sendBackoffBaseMs',
+                'imagePasteCapMs'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {

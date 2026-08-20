@@ -30,7 +30,16 @@ dbus-daemon --system --fork 2>/dev/null || true
 eval $(dbus-launch --sh-syntax) 2>/dev/null || true
 
 # Generate WebUI login password (scrypt hashed)
-WEBUI_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+# 明文持久化到 webui-password.txt（权限 600，仅容器内 root 可读）；每次启动
+# 若已存在则沿用（重启密码不丢失），否则生成新密码。明文密码打印到 docker logs 供用户查看。
+WEBUI_PASS_FILE=/opt/weflow/data/webui-password.txt
+if [ -f "$WEBUI_PASS_FILE" ]; then
+  WEBUI_PASS=$(cat "$WEBUI_PASS_FILE")
+else
+  WEBUI_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+  echo -n "$WEBUI_PASS" > "$WEBUI_PASS_FILE"
+  chmod 600 "$WEBUI_PASS_FILE"
+fi
 node -e "
 const crypto = require('crypto');
 const fs = require('fs');
