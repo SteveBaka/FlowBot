@@ -540,9 +540,10 @@ class HttpService {
     /**
      * 解析 POST 请求的 JSON Body
      */
-    private async parseBody(req: http.IncomingMessage): Promise<Record<string, any>> {
+    private async parseBody(req: http.IncomingMessage, maxBodySize?: number): Promise<Record<string, any>> {
         if (req.method !== 'POST') return {}
-        const MAX_BODY_SIZE = 20 * 1024 * 1024 // 20MB（图片 base64 跨设备传输）
+        // 默认 20MB（图片 base64 跨设备传输）；调用方可按路由放宽（如 media/upload 的视频 base64）
+        const MAX_BODY_SIZE = maxBodySize ?? 20 * 1024 * 1024
         return new Promise((resolve) => {
             let body = ''
             let bodySize = 0
@@ -666,11 +667,13 @@ class HttpService {
         }
 
         try {
-            const bodyParams = await this.parseBody(req)
+            // media/upload 允许大视频 base64（≤100MB 原始字节 × base64 膨胀 1.333 ≈ 133MB + JSON 包裹开销 → 140MB）
+            const isMediaUpload = pathname === '/api/v1/media/upload'
+            const bodyParams = await this.parseBody(req, isMediaUpload ? 140 * 1024 * 1024 : undefined)
 
-            // body 超过 20MB 上限：给客户端明确提示
+            // body 超上限：给客户端明确提示
             if ((req as any).__bodyTooLarge) {
-                this.sendError(res, 413, '请求体过大（>20MB）')
+                this.sendError(res, 413, isMediaUpload ? '请求体过大（>140MB，媒体上传上限）' : '请求体过大（>20MB）')
                 return
             }
 

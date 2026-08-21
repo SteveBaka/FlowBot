@@ -48,11 +48,11 @@ function file(res, fp) {
   } catch { res.writeHead(404); res.end('Not Found') }
 }
 
-function body(req) {
+function body(req, limit) {
   return new Promise(resolve => {
     let data = ''
     let size = 0
-    const MAX = 20 * 1024 * 1024
+    const MAX = limit || 20 * 1024 * 1024
     req.on('data', chunk => {
       if (size > MAX) { return }
       size += chunk.length
@@ -652,8 +652,11 @@ const server = http.createServer(async (req, res) => {
 
   if (p.startsWith('/api/v1/') && !p.startsWith('/api/v1/mgmt/logs')) {
     try {
-      if ((req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') && isBodyTooLarge(req)) {
-        json(res, { ok: false, error: '请求体过大（>20MB）' }, 413)
+      // 媒体上传放开 body 上限（140MB：100MB 视频 base64 膨胀 1.333 + JSON 开销），其余 POST 仍 20MB
+      const isMediaUpload = p === '/api/v1/media/upload'
+      const uploadLimit = 140 * 1024 * 1024
+      if ((req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') && isBodyTooLarge(req, isMediaUpload ? uploadLimit : undefined)) {
+        json(res, { ok: false, error: isMediaUpload ? '请求体过大（>140MB，媒体上传上限）' : '请求体过大（>20MB）' }, 413)
         return
       }
       const token = readApiToken()
@@ -661,7 +664,7 @@ const server = http.createServer(async (req, res) => {
       const fetchOpts = { method: req.method, headers: {} }
       if (token) fetchOpts.headers['Authorization'] = `Bearer ${token}`
       if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
-        fetchOpts.body = await body(req)
+        fetchOpts.body = await body(req, isMediaUpload ? uploadLimit : undefined)
       }
       const result = await proxyRequest(targetUrl, fetchOpts)
       json(res, result.data, result.status)
@@ -1096,8 +1099,11 @@ function startPluginApiServer(port, token) {
     // 插件 API 代理（排除 mgmt，最小权限）
     if (p.startsWith('/api/v1/') && !p.startsWith('/api/v1/mgmt/')) {
       try {
-        if ((req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') && isBodyTooLarge(req)) {
-          json(res, { ok: false, error: '请求体过大（>20MB）' }, 413)
+        // 媒体上传放开 body 上限（140MB：100MB 视频 base64 膨胀 1.333 + JSON 开销），其余 POST 仍 20MB
+        const isMediaUpload = p === '/api/v1/media/upload'
+        const uploadLimit = 140 * 1024 * 1024
+        if ((req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') && isBodyTooLarge(req, isMediaUpload ? uploadLimit : undefined)) {
+          json(res, { ok: false, error: isMediaUpload ? '请求体过大（>140MB，媒体上传上限）' : '请求体过大（>20MB）' }, 413)
           return
         }
         const internalToken = readApiToken()
@@ -1113,7 +1119,7 @@ function startPluginApiServer(port, token) {
         if (internalToken) fetchOpts.headers['Authorization'] = 'Bearer ' + internalToken
         if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
           fetchOpts.headers['Content-Type'] = 'application/json'
-          fetchOpts.body = await body(req)
+          fetchOpts.body = await body(req, isMediaUpload ? uploadLimit : undefined)
         }
         const result = await proxyRequest(targetUrl, fetchOpts)
          // 会话列表：私聊 username 改写为自定义 wxid；群聊名称/头像以身份库为准自动刷新
