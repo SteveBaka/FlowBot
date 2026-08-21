@@ -20,6 +20,7 @@ import { snsService } from './snsService'
 import { getPluginManager } from '../plugins/pluginManager'
 import { SendOptions, MessageType } from '../plugins/plugin-interface'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
+import { prepareVideoForSend, detectVideoExt } from './outboundMediaService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -868,28 +869,33 @@ class HttpService {
 
   /**
    * 媒体上传：POST /api/v1/media/upload
-   * 入参：image_base64（字节）或 image_url（直链，flowbot 拉取），可选 filename
-   * 返回：{ success, token, expires, path }，token 用于 messages/send 的 image_token
+   * 入参：image_base64/image_url（图片）或 video_base64/video_url（视频），可选 filename
+   * 返回：{ success, token, expires, path }，token 用于 messages/send 的 image_token / media_path
    */
   private async handleMediaUpload(req: http.IncomingMessage, res: http.ServerResponse, bodyParams: Record<string, any>): Promise<void> {
     try {
-      const { image_base64, image_url, filename } = bodyParams
+      const { image_base64, image_url, video_base64, video_url, filename } = bodyParams
       let buf: Buffer | null = null
-      if (image_base64) {
-        const raw = String(image_base64)
+      let kind: 'image' | 'video' = 'image'
+      if (video_base64 || video_url) kind = 'video'
+      const maxBytes = kind === 'video' ? this.videoUploadMaxBytes() : 20 * 1024 * 1024
+      const b64Input = kind === 'video' ? video_base64 : image_base64
+      const urlInput = kind === 'video' ? video_url : image_url
+      if (b64Input) {
+        const raw = String(b64Input)
         const b64 = raw.includes('base64,') ? raw.slice(raw.indexOf('base64,') + 7) : raw
         if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64.trim())) {
-          this.sendError(res, 400, '图片 base64 解码失败（含非法字符）')
+          this.sendError(res, 400, kind === 'video' ? '视频 base64 解码失败（含非法字符）' : '图片 base64 解码失败（含非法字符）')
           return
         }
         buf = Buffer.from(b64, 'base64')
-      } else if (image_url) {
+      } else if (urlInput) {
         try {
           const controller = new AbortController()
-          const timer = setTimeout(() => controller.abort(), 15000)
+          const timer = setTimeout(() => controller.abort(), kind === 'video' ? 120000 : 15000)
           let resp: Response
           try {
-            resp = await fetch(String(image_url), { signal: controller.signal })
+            resp = await fetch(String(urlInput), { signal: controller.signal })
           } finally {
             clearTimeout(timer)
           }
@@ -899,19 +905,19 @@ class HttpService {
           }
           buf = Buffer.from(await resp.arrayBuffer())
         } catch (error: any) {
-          this.sendError(res, 400, `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}`)
+          this.sendError(res, 400, `URL 下载失败: ${error?.name === 'AbortError' ? '超时' : error?.message || String(error)}`)
           return
         }
       }
       if (!buf || buf.length === 0) {
-        this.sendError(res, 400, 'image_base64 或 image_url 必须提供且有效')
+        this.sendError(res, 400, kind === 'video' ? 'video_base64 或 video_url 必须提供且有效' : 'image_base64 或 image_url 必须提供且有效')
         return
       }
-      if (buf.length > 20 * 1024 * 1024) {
-        this.sendError(res, 400, '文件过大（>20MB）')
+      if (buf.length > maxBytes) {
+        this.sendError(res, 400, `文件过大（>${Math.round(maxBytes / 1024 / 1024)}MB）`)
         return
       }
-      const ext = this.detectImageExt(buf)
+      const ext = kind === 'video' ? (detectVideoExt(buf) || '.mp4') : this.detectImageExt(buf)
       const token = randomBytes(8).toString('hex')
       const dir = path.join(os.tmpdir(), 'weflow_uploads')
       fs.mkdirSync(dir, { recursive: true })
@@ -919,10 +925,19 @@ class HttpService {
       fs.writeFileSync(filePath, buf)
       const expires = Date.now() + this.mediaUploadTtlMs
       this.mediaUploads.set(token, { path: filePath, expires })
-      this.sendJson(res, { success: true, token, expires, path: filePath, filename: filename || `image${ext}` })
+      this.sendJson(res, { success: true, token, expires, path: filePath, filename: filename || `${kind}${ext}` })
     } catch (error) {
       this.sendError(res, 500, String(error))
     }
+  }
+
+  /** 视频上传大小上限（字节）——跟随 videoMaxBytes 配置，默认 100MB */
+  private videoUploadMaxBytes(): number {
+    try {
+      const v = this.configService?.get('videoMaxBytes')
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
+    } catch {}
+    return 100 * 1024 * 1024
   }
 
   private handleMediaRequest(pathname: string, res: http.ServerResponse): void {
@@ -2815,7 +2830,7 @@ class HttpService {
     bodyParams: any
   ): Promise<void> {
     try {
-      const { session_id, content, type = 'text', at_users, reply_to, image_path, image_base64, image_url, image_token, media_path } = bodyParams
+      const { session_id, content, type = 'text', at_users, reply_to, image_path, image_base64, image_url, image_token, media_path, video_base64, video_url } = bodyParams
 
       if (!session_id) {
         return this.sendError(res, 400, 'Missing required fields: session_id')
@@ -2845,7 +2860,7 @@ class HttpService {
 
       const strContent = String(content || '')
       const isImage = messageType === MessageType.Image
-      const hasMediaInput = Boolean(image_path || image_base64 || image_url || image_token || media_path)
+      const hasMediaInput = Boolean(image_path || image_base64 || image_url || image_token || media_path || video_base64 || video_url)
       if (!isImage && !strContent && !hasMediaInput) {
         return this.sendError(res, 400, 'Missing required fields: content')
       }
@@ -2896,6 +2911,8 @@ class HttpService {
           imageToken: image_token,
           atUsers: at_users,
           mediaPath: media_path,
+          videoBase64: video_base64,
+          videoUrl: video_url,
         })
         return
       }
@@ -2923,14 +2940,17 @@ class HttpService {
       imageToken?: string
       atUsers?: any[]
       mediaPath?: string
+      videoBase64?: string
+      videoUrl?: string
     }
   ): Promise<void> {
     try {
-      const { sessionId, content, type, imagePath, imageBase64, imageUrl, imageToken, atUsers } = params
+      const { sessionId, content, type, imagePath, imageBase64, imageUrl, imageToken, atUsers, mediaPath, videoBase64, videoUrl } = params
 
-      // Linux UI 自动化仅支持文本/图片粘贴，其余类型给出明确错误
-      if (type !== MessageType.Text && type !== MessageType.Image) {
-        this.sendError(res, 400, `Message type not supported on Linux sender: ${type} (supported: text, image)`)
+      // Linux UI 自动化支持 文本/图片/视频/文件 粘贴，其余类型给出明确错误
+      if (type !== MessageType.Text && type !== MessageType.Image
+        && type !== MessageType.Video && type !== MessageType.File) {
+        this.sendError(res, 400, `Message type not supported on Linux sender: ${type} (supported: text, image, video, file)`)
         return
       }
 
@@ -2942,6 +2962,26 @@ class HttpService {
           this.sendError(res, 400, prepared.error || 'Image message requires image_token, image_base64, image_url or image_path')
           return
         }
+      }
+
+      // 视频/文件来源归一（base64 / 直链 / media_path token，媒体 upload 亦可走 media_path）
+      let videoPath: string | undefined
+      if (type === MessageType.Video || type === MessageType.File) {
+        const src = videoBase64 ? `base64://${videoBase64}`
+          : videoUrl        ? videoUrl
+          : mediaPath       ? `file://${mediaPath}`
+          : null
+        if (!src) {
+          this.sendError(res, 400, 'video requires video_base64 / video_url / media_path')
+          return
+        }
+        const prepared = await prepareVideoForSend(src)
+        if (!prepared) {
+          console.error(`[HttpService] video normalization failed for ${String(src).slice(0, 80)}... (see [outboundMedia] logs for reason)`)
+          this.sendError(res, 400, 'video download failed or size exceeded')
+          return
+        }
+        videoPath = prepared.videoPath
       }
 
       const displayName = await this.resolveSessionDisplayName(sessionId)
@@ -2964,10 +3004,13 @@ class HttpService {
       }
 
       const sender = getEnhancedMessageSender()
-      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined, atMentions)
+      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined, atMentions, videoPath)
 
       if (targetImagePath) {
         this.scheduleTempImageCleanup(targetImagePath)
+      }
+      if (videoPath) {
+        this.scheduleTempImageCleanup(videoPath)
       }
 
       if (result.success) {
