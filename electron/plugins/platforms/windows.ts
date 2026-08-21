@@ -235,10 +235,13 @@ export class WindowsSender implements IPlatformSender {
   }
 
   // ─── 公开接口 ─────────────────────────────────────────────
-  async sendMessage(content: string, contactName?: string, imagePath?: string): Promise<{
+  async sendMessage(content: string, contactName?: string, imagePath?: string, atMentions?: Array<{ wxid: string; name: string }>, videoPath?: string): Promise<{
     success: boolean; error?: string; method: string
   }> {
     try {
+      if (videoPath) {
+        return { success: false, error: 'video not supported on this platform', method: this.currentMode }
+      }
       const hWnd = this.findWeChatWindow()
       if (!hWnd) {
         return { success: false, error: 'WeChat window not found', method: this.currentMode }
