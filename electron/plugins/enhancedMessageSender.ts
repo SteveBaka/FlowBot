@@ -4,7 +4,7 @@
  * 根据 process.platform 自动选择对应平台实现：
  * - win32 → platforms/windows.ts（koffi FFI + keybd_event）
  * - darwin → platforms/macos.ts（待实现）
- * - linux → platforms/linux.ts（待实现）
+ * - linux → platforms/linux.ts（xdotool + xclip）
  *
  * 各平台实现必须提供相同的 IPlatformSender 接口。
  * 备份文件：enhancedMessageSender.foreground-only.ts（Windows 前台模式快照）
@@ -20,7 +20,8 @@ export interface IPlatformSender {
     content: string,
     contactName?: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    videoPath?: string
   ): Promise<{ success: boolean; error?: string; method: string }>
   sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress>
   cancelPending(): number

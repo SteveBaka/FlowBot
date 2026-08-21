@@ -177,6 +177,7 @@ interface QueuedMessage {
   content: string
   contactName: string
   imagePath?: string
+  videoPath?: string
   atMentions?: Array<{ wxid: string; name: string }>
   resolve: (result: { success: boolean; error?: string; method: string }) => void
   retries: number
@@ -248,6 +249,36 @@ async function xclipSetImage(imagePath: string, mime: string = 'image/png'): Pro
         warn(`xclipSetImage BMP fallback also failed: ${e2}`)
       }
     }
+    return false
+  }
+}
+
+/**
+ * 剪贴板装载：文件 URI（视频/文件发送）。
+ * P2 实测（2026-08-21）：text/uri-list 为微信 Linux 唯一生效目标；
+ * x-special/gnome-copied-files 单目标实测无反应，仅作兼容可选补充。
+ * 发送结果由文件是否为合法有效视频决定（合法视频→视频卡片，否则→文件卡片）。
+ */
+async function xclipSetFile(filePath: string): Promise<boolean> {
+  const uri = `file://${filePath}`
+  try {
+    await execAsync(`printf '%s\\n' '${uri}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t text/uri-list -i >/dev/null 2>&1`, {
+      timeout: 5000,
+      env: DISPLAY_ENV
+    })
+    return true
+  } catch (e) {
+    warn(`xclipSetFile(text/uri-list) failed: ${e}`)
+  }
+  try {
+    await execAsync(`printf 'copy\\n%s' '${uri.replace(/"/g, '\\"')}' | PATH=/usr/bin:/usr/local/bin xclip -selection clipboard -t x-special/gnome-copied-files -i >/dev/null 2>&1`, {
+      timeout: 5000,
+      env: DISPLAY_ENV
+    })
+    log('Fell back to x-special/gnome-copied-files')
+    return true
+  } catch (e2) {
+    warn(`xclipSetFile(gnome-copied-files) fallback also failed: ${e2}`)
     return false
   }
 }
@@ -404,6 +435,26 @@ export class LinuxSender implements IPlatformSender {
     const extra = Math.ceil((mb - 1) / 1) * 300
     const total = baseWait + extra
     return Math.min(total, cap)
+  }
+
+  /** 探测文件体积（仅 stat，微秒级）——视频/通用文件大小探测 */
+  private probeFileBytes(filePath: string): number | null {
+    try {
+      const fs = require('fs')
+      return fs.statSync(filePath).size
+    } catch { return null }
+  }
+
+  /**
+   * 视频粘贴后的等待：按体积自适应。
+   * P2 实测（2026-08-21）：2MB 视频 Ctrl+V 后 ≤1s 即可发送；
+   * 因输入区不渲染预览（§1.1 约束），等待仅用于让微信完成粘贴装载。
+   * 公式：2000ms 基线 + 每 10MB +500ms，封顶 videoPasteCapMs（默认 8000）。
+   */
+  private computeVideoPasteWait(bytes: number | null): number {
+    const base = bytes !== null && bytes > 0 ? 2000 + Math.floor(bytes / (10 * 1024 * 1024)) * 500 : 2000
+    const cap = Math.max(base, Math.floor(getConfigNumber('videoPasteCapMs', 8000)))
+    return Math.min(base, cap)
   }
 
   /** 触发图片粘贴熔断：冷却 30s */
@@ -563,8 +614,27 @@ export class LinuxSender implements IPlatformSender {
     await new Promise(r => setTimeout(r, this.delay.inputClick))
   }
 
-  private async pasteAndSend(content: string, wid: string, imagePath?: string): Promise<boolean> {
-    if (imagePath) {
+  private async pasteAndSend(content: string, wid: string, imagePath?: string, videoPath?: string): Promise<boolean> {
+    if (videoPath) {
+      log(`Pasting video: ${videoPath}`)
+      // 大小闸：视频不适用图片的 5MB/30s 熔断，超 videoMaxBytes 直接拒绝（S5）
+      const bytes = this.probeFileBytes(videoPath)
+      const max = Math.floor(getConfigNumber('videoMaxBytes', 100 * 1024 * 1024))
+      if (bytes === null || bytes > max) {
+        warn(`Video too large to paste (${bytes !== null ? Math.round(bytes / 1024 / 1024) : '?'}MB > ${Math.round(max / 1024 / 1024)}MB), rejected`)
+        return false
+      }
+      const ok = await xclipSetFile(videoPath)
+      if (!ok) {
+        warn('xclipSetFile failed')
+        return false
+      }
+      await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
+      await run(`xdotool key --window "${wid}" ctrl+v`)
+      log('Video pasted to clipboard successfully')
+      const effectiveWait = this.computeVideoPasteWait(bytes)
+      await new Promise(r => setTimeout(r, effectiveWait))
+    } else if (imagePath) {
       log(`Pasting image: ${imagePath}`)
       // 兜底：探测图片体积，>5MB 拒绝并触发熔断（防微信粘贴冻结）
       const bytes = this.probeImageBytes(imagePath)
@@ -612,14 +682,15 @@ export class LinuxSender implements IPlatformSender {
     contactName: string,
     imagePath?: string,
     atMentions?: Array<{ wxid: string; name: string }>,
-    skipSearch = false
+    skipSearch = false,
+    videoPath?: string
   ): Promise<{ success: boolean; error?: string }> {
     const wid = await this.findWeChatWindow()
     if (!wid) {
       return { success: false, error: '找不到微信窗口' }
     }
 
-    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions, skipSearch)
+    return this.doSendWithWindow(content, contactName, wid, imagePath, atMentions, skipSearch, videoPath)
   }
 
   private detectImageMime(imagePath: string): string {
@@ -637,7 +708,8 @@ export class LinuxSender implements IPlatformSender {
     wid: string,
     imagePath?: string,
     atMentions?: Array<{ wxid: string; name: string }>,
-    skipSearch = false
+    skipSearch = false,
+    videoPath?: string
   ): Promise<{ success: boolean; error?: string }> {
     const steps: Array<{ step: string; ms: number }> = []
     let t0 = Date.now()
@@ -668,14 +740,15 @@ export class LinuxSender implements IPlatformSender {
     }
 
     t0 = Date.now()
-    if (!await this.pasteAndSend(content, wid, imagePath)) {
+    if (!await this.pasteAndSend(content, wid, imagePath, videoPath)) {
       return { success: false, error: '粘贴发送失败' }
     }
     steps.push({ step: '粘贴发送', ms: Date.now() - t0 })
 
     this.lastSendSteps = steps
     this.lastSendTime = Date.now()
-    log(`Message type=${imagePath ? 'image' : 'text'} sent to "${contactName}"${atMentions && atMentions.length ? ` with @(${atMentions.length})` : ''}`)
+    const typeLabel = videoPath ? 'video' : imagePath ? 'image' : 'text'
+    log(`Message type=${typeLabel} sent to "${contactName}"${atMentions && atMentions.length ? ` with @(${atMentions.length})` : ''}`)
     return { success: true }
   }
 
@@ -710,7 +783,8 @@ export class LinuxSender implements IPlatformSender {
     content: string,
     contactName?: string,
     imagePath?: string,
-    atMentions?: Array<{ wxid: string; name: string }>
+    atMentions?: Array<{ wxid: string; name: string }>,
+    videoPath?: string
   ): Promise<{
     success: boolean; error?: string; method: string
   }> {
@@ -722,10 +796,10 @@ export class LinuxSender implements IPlatformSender {
     }
 
     return new Promise((resolve) => {
-      // 去重（sendDedup）：同联系人 + 同内容文本，且队列中已有待发 → 丢弃本次
-      if (!imagePath && !(atMentions && atMentions.length) && isQueueOptionEnabled('sendDedup')) {
+      // 去重（sendDedup）：同联系人 + 同内容文本，且队列中已有待发 → 丢弃本次（图片/视频/@ 不参与去重）
+      if (!imagePath && !videoPath && !(atMentions && atMentions.length) && isQueueOptionEnabled('sendDedup')) {
         const dup = this.queue.find(q =>
-          q.contactName === name && q.content === str && !q.imagePath && !(q.atMentions && q.atMentions.length)
+          q.contactName === name && q.content === str && !q.imagePath && !q.videoPath && !(q.atMentions && q.atMentions.length)
         )
         if (dup) {
           this.dedupCount++
@@ -740,6 +814,7 @@ export class LinuxSender implements IPlatformSender {
         content: str,
         contactName: name,
         imagePath,
+        videoPath,
         atMentions,
         resolve,
         retries: 0,
@@ -760,7 +835,7 @@ export class LinuxSender implements IPlatformSender {
         this.queue.push(item)
       }
 
-      log(`Queued message ${item.id} for "${name}"${imagePath ? ' [IMAGE]' : ''}${atMentions && atMentions.length ? ` [AT:${atMentions.length}]` : ''} (queue size: ${this.queue.length})`)
+      log(`Queued message ${item.id} for "${name}"${videoPath ? ' [VIDEO]' : imagePath ? ' [IMAGE]' : ''}${atMentions && atMentions.length ? ` [AT:${atMentions.length}]` : ''} (queue size: ${this.queue.length})`)
       this.processQueue()
     })
   }
@@ -797,7 +872,7 @@ export class LinuxSender implements IPlatformSender {
         this.lastMergeContact === item.contactName &&
         !(item.atMentions && item.atMentions.length)
 
-      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.imagePath ? ' [IMAGE]' : ''}${skipSearch ? ' [MERGED]' : ''}`)
+      log(`Processing message ${item.id} (attempt ${item.retries + 1}/${MAX_RETRIES})${item.videoPath ? ' [VIDEO]' : item.imagePath ? ' [IMAGE]' : ''}${skipSearch ? ' [MERGED]' : ''}`)
 
       // 图片粘贴熔断：冷却期内图片消息快速失败，不粘贴不重试，保证队列稳定
       if (item.imagePath && Date.now() < this.imagePasteCoolUntil) {
@@ -810,14 +885,15 @@ export class LinuxSender implements IPlatformSender {
 
       let result: { success: boolean; error?: string }
       try {
-        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions, skipSearch)
+        result = await this.doSend(item.content, item.contactName, item.imagePath, item.atMentions, skipSearch, item.videoPath)
       } catch (e: any) {
         result = { success: false, error: e?.message || 'Unknown error' }
       }
 
       if (result.success) {
+        const typeLabel = item.videoPath ? 'video' : item.imagePath ? 'image' : 'text'
         log(`Message ${item.id} sent successfully`)
-        log(`Message ${item.id} (${item.imagePath ? 'image' : 'text'}) sent successfully`)
+        log(`Message ${item.id} (${typeLabel}) sent successfully`)
         this.onSendSuccess()
         this.totalSent++
         this.lastMergeContact = item.contactName
@@ -947,7 +1023,7 @@ export class LinuxSender implements IPlatformSender {
         items: this.queue.slice(0, 50).map((it) => ({
           id: it.id,
           contactName: it.contactName,
-          type: it.imagePath ? 'image' : 'text',
+          type: it.videoPath ? 'video' : it.imagePath ? 'image' : 'text',
           atMentions: !!(it.atMentions && it.atMentions.length),
           contentPreview: it.content ? it.content.slice(0, 30) : '',
           queuedSeconds: Math.round((Date.now() - it.createdAt) / 1000)

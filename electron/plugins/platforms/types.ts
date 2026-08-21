@@ -14,6 +14,7 @@ export interface SendTask {
   createdAt: number
   sentAt?: number
   imagePath?: string
+  videoPath?: string
 }
 
 export interface SendProgress {

@@ -91,6 +91,10 @@ interface ConfigSchema {
   sendCooldownMs: number
   sendBackoffBaseMs: number
   imagePasteCapMs: number
+  videoSendEnabled: boolean
+  videoMaxBytes: number
+  videoPasteCapMs: number
+  videoUrlTimeoutMs: number
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -279,6 +283,10 @@ export class ConfigService {
       sendCooldownMs: 10000,
       sendBackoffBaseMs: 1500,
       imagePasteCapMs: 1500,
+      videoSendEnabled: true,
+      videoMaxBytes: 100 * 1024 * 1024,
+      videoPasteCapMs: 8000,
+      videoUrlTimeoutMs: 120000,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

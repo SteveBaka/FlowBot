@@ -15,6 +15,7 @@ import { wcdbService } from './services/wcdbService'
 import { chatService } from './services/chatService'
 import { imageDecryptService } from './services/imageDecryptService'
 import { imagePreloadService } from './services/imagePreloadService'
+import { prepareVideoForSend } from './services/outboundMediaService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
@@ -4539,7 +4540,7 @@ app.whenReady().then(async () => {
     try {
       const tmpDir = tmpdir()
       const files = await readdir(tmpDir)
-      const staleFiles = files.filter(f => f.startsWith('weflow_ob_'))
+      const staleFiles = files.filter(f => f.startsWith('weflow_ob_') || f.startsWith('weflow_obv_'))
       if (staleFiles.length === 0) return
 
       let deleted = 0
@@ -4626,6 +4627,7 @@ app.whenReady().then(async () => {
           var rawMsg = params.message || params.text || params.content || ''
           var content = ''
           var imageFileUrl: string | undefined
+          var videoFileUrl: string | undefined
           if (typeof rawMsg === 'string') {
             content = rawMsg
           } else if (Array.isArray(rawMsg)) {
@@ -4636,6 +4638,10 @@ app.whenReady().then(async () => {
             var imgSeg = rawMsg.find(function(s: any) { return s.type === 'image' })
             if (imgSeg && imgSeg.data && imgSeg.data.file) {
               imageFileUrl = imgSeg.data.file
+            }
+            var vidSeg = rawMsg.find(function(s: any) { return s.type === 'video' || s.type === 'file' })
+            if (vidSeg && vidSeg.data && vidSeg.data.file) {
+              videoFileUrl = vidSeg.data.file
             }
           } else if (rawMsg && typeof rawMsg === 'object') {
             content = String(rawMsg.text || rawMsg.content || '')
@@ -4648,7 +4654,16 @@ app.whenReady().then(async () => {
             preparedImage = await prepareImageForSend(imageFileUrl)
           }
 
-          if (!content && !preparedImage) {
+          var preparedVideo: { videoPath: string; mime: string } | null = null
+          if (videoFileUrl) {
+            try {
+              preparedVideo = await prepareVideoForSend(videoFileUrl)
+            } catch (e) {
+              console.warn('[App] prepareVideoForSend failed, skipping video:', e)
+            }
+          }
+
+          if (!content && !preparedImage && !preparedVideo) {
             console.warn('[App] Bot message empty, skipping')
             return
           }
@@ -4664,8 +4679,8 @@ app.whenReady().then(async () => {
                   contactName = resolvedName
                 }
               } catch {}
-              console.log('[App] Bot sending private msg to "' + contactName + '"'+ (preparedImage ? ' [IMAGE]' : '') + ': ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath)
+              console.log('[App] Bot sending private msg to "' + contactName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ': ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
               console.log('[App] Bot sendMessage result:', result)
             } else if (msg.action === 'send_group_msg') {
               var rawGroupId = params.group_id || params.group_name || ''
@@ -4693,8 +4708,8 @@ app.whenReady().then(async () => {
                   }
                 }
               } catch {}
-              console.log('[App] Bot sending group msg to "' + groupName + '"'+ (preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawGroupId + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath)
+              console.log('[App] Bot sending group msg to "' + groupName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawGroupId + '): ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
               console.log('[App] Bot sendMessage result:', result)
             } else if (msg.action === 'send_msg') {
               var rawTarget = params.group_id || params.user_id || params.target || ''
@@ -4730,12 +4745,13 @@ app.whenReady().then(async () => {
                   }
                 } catch {}
               }
-              console.log('[App] Bot sending msg to "' + target + '"'+ (preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawTarget + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, target, preparedImage?.imagePath)
+              console.log('[App] Bot sending msg to "' + target + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawTarget + '): ' + content.substring(0, 50))
+              var result = await sender.sendMessage(content, target, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
               console.log('[App] Bot sendMessage result:', result)
             }
           } finally {
             if (preparedImage) { scheduleImageCleanup(preparedImage.imagePath) }
+            if (preparedVideo) { scheduleImageCleanup(preparedVideo.videoPath) }
           }
         } catch (e) {
           console.error('[App] Bot message forwarding error:', e)
