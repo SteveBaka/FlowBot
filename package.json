@@ -61,7 +61,7 @@
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
     "vite-plugin-electron": "^0.28.8",
-    "vite-plugin-electron-renderer": "^0.14.6",
+    "vite-plugin-electron-renderer": "^1.0.0",
     "zustand": "^5.0.15"
   },
   "pnpm": {
