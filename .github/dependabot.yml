@@ -17,6 +17,11 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      # electron 跨大版本 = Chromium/Node 双跳，容器场景收益≈0、回归面全量（白屏修复/剪贴板链路实测在 41）
+      # 仅当出现影响所带 Chromium 的安全 CVE 时人工评估（届时删掉本条）
+      - dependency-name: "electron"
+        versions: [">=42"]
 
   - package-ecosystem: "github-actions"
     directory: "/"
@@ -32,8 +37,9 @@ updates:
       day: "monday"
     target-branch: "main"
     ignore:
-      # 微信 deb 与 22.04 的 glibc/apt 环境绑定，大版本升级必须人工评估，不收自动 PR
+      # 微信 deb 与 22.04 的 glibc/apt 环境绑定，版本号必须钉死：dependabot 按数值取下一 tag
+      # （22.04 的下一个是 EOL 临时版 22.10），任何变更都不收；22.04 标签内的安全补丁随标签自动滚动
       - dependency-name: "ubuntu"
-        versions: [">=23"]
+        versions: [">22.04"]
       # compose 里的 image: flowbot:latest 是本地构建镜像名，不是 registry 依赖
       - dependency-name: "flowbot"
