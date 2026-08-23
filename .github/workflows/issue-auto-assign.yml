@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Assign issue by selected platform
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         env:
           ASSIGNEE_WINDOWS: ${{ vars.ISSUE_ASSIGNEE_WINDOWS }}
           ASSIGNEE_MACOS: ${{ vars.ISSUE_ASSIGNEE_MACOS }}

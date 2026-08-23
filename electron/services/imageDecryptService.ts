@@ -267,7 +267,9 @@ export class ImageDecryptService {
         const localPath = this.resolveLocalPathForPayload(finalPath, payload.preferFilePath)
         this.emitCacheResolved(payload, cacheKey, this.resolveEmitPath(finalPath, payload.preferFilePath))
         this.emitDecryptProgress(payload, cacheKey, 'done', 100, 'done')
-        return { success: true, localPath }
+        // isThumb 必须回传：调用方（如消息推送重试）以 isThumb===false 判定"已是完整图"并提前结束重试，
+        // 缺省时 undefined 会被当成 false，导致缩略图被当作高清图直接推送
+        return { success: true, localPath, isThumb: this.isThumbnailPath(finalPath) }
       }
       if (cached && !this.isUsableImageCacheFile(cached)) {
         this.resolvedCache.delete(cacheKey)

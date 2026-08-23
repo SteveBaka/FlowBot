@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    target-branch: "dev"
+    target-branch: "main"
     groups:
       runtime-deps:
         dependency-type: "production"
@@ -16,4 +16,24 @@ updates:
         dependency-type: "development"
         update-types:
           - "minor"
-          - "patch"          
+          - "patch"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+
+  - package-ecosystem: "docker"
+    directory: "/docker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    target-branch: "main"
+    ignore:
+      # 微信 deb 与 22.04 的 glibc/apt 环境绑定，大版本升级必须人工评估，不收自动 PR
+      - dependency-name: "ubuntu"
+        versions: [">=23"]
+      # compose 里的 image: flowbot:latest 是本地构建镜像名，不是 registry 依赖
+      - dependency-name: "flowbot"

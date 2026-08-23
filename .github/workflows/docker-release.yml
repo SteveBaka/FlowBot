@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       version_override:
-        description: 'Override version (e.g. 1.3.0). Leave empty for auto-bump.'
+        description: 'Override version (e.g. 1.3.0). Leave empty to use docker/VERSION.'
         required: false
         type: string
       force_release:
-        description: 'Force release even without feat/fix commits'
+        description: 'Force build even if this version is already fully released (main pushes only)'
         required: false
         type: boolean
         default: false
@@ -25,83 +25,107 @@ env:
   IMAGE_NAME: ${{ github.repository_owner }}/flowbot
 
 jobs:
-  bump-version:
-    name: Resolve Version
+  build-electron:
+    name: Build Electron App (Linux)
     runs-on: ubuntu-latest
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     outputs:
       new_version: ${{ steps.version.outputs.new_version }}
-      should_release: ${{ steps.version.outputs.should_release }}
-      weflow_version: ${{ steps.version.outputs.weflow_version }}
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-
-      - name: Read version
-        id: version
-        shell: bash
-        run: |
-          if [ -f "docker/VERSION" ]; then
-            CURRENT=$(cat docker/VERSION | tr -d '[:space:]')
-          else
-            CURRENT="1.0.0"
-          fi
-
-          OVERRIDE="${{ inputs.version_override }}"
-          if [ -n "$OVERRIDE" ]; then
-            echo "Using manual version override: $OVERRIDE"
-            echo "new_version=$OVERRIDE" >> $GITHUB_OUTPUT
-          else
-            echo "Using version from docker/VERSION: $CURRENT"
-            echo "new_version=$CURRENT" >> $GITHUB_OUTPUT
-          fi
-          echo "should_release=true" >> $GITHUB_OUTPUT
-
-          WEFLOW_VERSION=$(node -e "console.log(require('./package.json').version)")
-          echo "weflow_version=${WEFLOW_VERSION}" >> $GITHUB_OUTPUT
-
-  build-electron:
-    name: Build Electron App (Linux)
-    runs-on: ubuntu-latest
-    needs: bump-version
-    if: needs.bump-version.outputs.should_release == 'true'
-
+      should_build: ${{ steps.version.outputs.should_build }}
     steps:
       - name: Check out git repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
-      - name: Install Node.js
-        uses: actions/setup-node@v5
-        with:
-          node-version: 24
-          cache: "npm"
-
-      - name: Install Dependencies
-        run: npm install
-
-      - name: Ensure linux key helper is executable
-        shell: bash
-        run: |
-          [ -f "resources/key/linux/x64/xkey_helper" ] && chmod +x "resources/key/linux/x64/xkey_helper" || echo "File not found"
-
-      - name: Type Check & Build Frontend
-        shell: bash
-        run: |
-          npx tsc
-          npx vite build
-
-      - name: Package Electron App (Linux)
+      # Version resolution + release gate (formerly the bump-version job).
+      # Gate skips only when this version's release is already complete
+      # (tarball uploaded); incomplete releases rebuild so failed runs can re-run.
+      - name: Resolve version and release gate
+        id: version
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npx electron-builder --linux --x64 '--config.npmRebuild=false'
+          CURRENT=$(cat docker/VERSION | tr -d '[:space:]')
+          OVERRIDE="${{ inputs.version_override }}"
+          NEW_VERSION="${OVERRIDE:-$CURRENT}"
+
+          SHOULD=true
+          if [ "${{ github.event_name }}" = "push" ] && [ "${{ inputs.force_release }}" != "true" ]; then
+            if gh release view "v$NEW_VERSION" --json assets >/dev/null 2>&1 \
+               && gh release view "v$NEW_VERSION" --json assets --jq '.assets[].name' 2>/dev/null | grep -qx 'flowbot-docker.tar.gz'; then
+              SHOULD=false
+              echo "Release v$NEW_VERSION already has flowbot-docker.tar.gz — skipping build."
+            fi
+          fi
+
+          echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
+          echo "should_build=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $NEW_VERSION (should_build=$SHOULD)"
+
+      - name: Install Node.js
+        if: steps.version.outputs.should_build == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: "npm"
+
+      # setup-node only caches ~/.npm; the electron dist zip (~110MB) and
+      # electron-builder tooling live in these caches and would re-download every run.
+      - name: Cache Electron binaries
+        if: steps.version.outputs.should_build == 'true'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-
+
+      - name: Install Dependencies
+        if: steps.version.outputs.should_build == 'true'
+        run: npm ci
+
+      - name: Ensure linux key helper is executable
+        if: steps.version.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          [ -f "resources/key/linux/x64/xkey_helper_linux" ] && chmod +x "resources/key/linux/x64/xkey_helper_linux" || echo "File not found"
+
+      # tsc is check-only (noEmit) and vite bundles independently — no data dependency.
+      - name: Type Check & Build Frontend (parallel)
+        if: steps.version.outputs.should_build == 'true'
+        shell: bash
+        run: |
+          set -uo pipefail
+          npx tsc &
+          TSC_PID=$!
+          npx vite build &
+          VITE_PID=$!
+          TSC_RC=0
+          VITE_RC=0
+          wait "$TSC_PID" || TSC_RC=$?
+          wait "$VITE_PID" || VITE_RC=$?
+          echo "tsc exit=$TSC_RC, vite exit=$VITE_RC"
+          if [ "$TSC_RC" -ne 0 ] || [ "$VITE_RC" -ne 0 ]; then
+            exit 1
+          fi
+
+      # --dir: only release/linux-unpacked/ is consumed by the Docker build;
+      # AppImage/tar.gz targets were produced and discarded before.
+      - name: Package Electron App (Linux, unpacked only)
+        if: steps.version.outputs.should_build == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx electron-builder --linux --x64 --dir
 
       - name: Upload linux-unpacked artifact
-        uses: actions/upload-artifact@v4
+        if: steps.version.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v7
         with:
           name: linux-unpacked
           path: release/linux-unpacked/
@@ -110,84 +134,134 @@ jobs:
   build-docker:
     name: Build and Publish Docker Image
     runs-on: ubuntu-latest
-    needs: [build-electron, bump-version]
-    if: needs.bump-version.outputs.should_release == 'true'
-
+    needs: build-electron
+    if: needs.build-electron.outputs.should_build == 'true'
     steps:
       - name: Check out git repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Download linux-unpacked artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: linux-unpacked
           path: release/linux-unpacked/
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Compute lowercase image name
         id: image-name
         shell: bash
         run: |
           LOWER_OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "name=${LOWER_OWNER}/flowbot" >> $GITHUB_OUTPUT
-          echo "full=${{ env.REGISTRY }}/${LOWER_OWNER}/flowbot" >> $GITHUB_OUTPUT
+          echo "name=${LOWER_OWNER}/flowbot" >> "$GITHUB_OUTPUT"
+          echo "full=${{ env.REGISTRY }}/${LOWER_OWNER}/flowbot" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/Dockerfile
           push: true
           tags: |
             ${{ steps.image-name.outputs.full }}:latest
-            ${{ steps.image-name.outputs.full }}:v${{ needs.bump-version.outputs.new_version }}
+            ${{ steps.image-name.outputs.full }}:v${{ needs.build-electron.outputs.new_version }}
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/flowbot:latest
-            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/flowbot:v${{ needs.bump-version.outputs.new_version }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/flowbot:v${{ needs.build-electron.outputs.new_version }}
           labels: |
             org.opencontainers.image.title=FlowBOT
             org.opencontainers.image.description=WeChat Linux container with OneBot v11 bridge
-            org.opencontainers.image.version=${{ needs.bump-version.outputs.new_version }}
+            org.opencontainers.image.version=${{ needs.build-electron.outputs.new_version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Export Docker image to tarball
+      # Re-export the same image locally via the same buildx builder (layer cache
+      # hit, no rebuild) instead of pulling 1.2GB back from the registry.
+      - name: Load image locally for tarball export
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          load: true
+          tags: ${{ steps.image-name.outputs.full }}:latest
+          cache-from: type=gha
+
+      - name: Export Docker image to tarball (pigz)
         shell: bash
         run: |
-          IMAGE_REF="${{ steps.image-name.outputs.full }}:latest"
-          docker pull "$IMAGE_REF"
-          docker save "$IMAGE_REF" | gzip > flowbot-docker.tar.gz
+          command -v pigz >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq pigz; }
+          docker save "${{ steps.image-name.outputs.full }}:latest" | pigz > flowbot-docker.tar.gz
+          ls -lh flowbot-docker.tar.gz
 
       - name: Get current date
         id: date
-        run: echo "date=$(date +'%Y%m%d-%H%M%S')" >> $GITHUB_OUTPUT
+        run: echo "date=$(date +'%Y%m%d-%H%M%S')" >> "$GITHUB_OUTPUT"
+
+      # Changelog: release-drafter's own $CHANGES (labelled PRs) is used when
+      # available; this hybrid fills the "No changes" case — merged PRs first
+      # (GitHub-native "- title (#N) by @author"), direct commits via the
+      # compare API as fallback.
+      - name: Generate changelog
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NEW_VERSION: ${{ needs.build-electron.outputs.new_version }}
+        run: |
+          set -euo pipefail
+
+          PREV_TAG=$(gh release list --limit 50 --json tagName,publishedAt \
+            --jq 'sort_by(.publishedAt) | reverse | .[].tagName' \
+            | grep -E '^v[0-9]+(\.[0-9]+)*$' | grep -vx "v$NEW_VERSION" | head -1 || true)
+          echo "Previous release tag: ${PREV_TAG:-<none>}"
+
+          CHANGELOG=""
+          if [ -n "$PREV_TAG" ]; then
+            PREV_DATE=$(gh release view "$PREV_TAG" --json publishedAt --jq .publishedAt)
+            CHANGELOG=$(gh pr list --state merged --base main --limit 100 \
+              --json number,title,author,mergedAt \
+              --jq ".[] | select(.mergedAt >= \"${PREV_DATE}\") | \"- \" + .title + \" (#\" + (.number|tostring) + \") by @\" + .author.login" || true)
+          fi
+
+          if [ -z "$CHANGELOG" ]; then
+            if [ -n "$PREV_TAG" ]; then
+              CHANGELOG=$(gh api "repos/$GITHUB_REPOSITORY/compare/$PREV_TAG...$GITHUB_SHA" \
+                --jq '.commits[] | select((.parents | length) <= 1) | "- " + (.commit.message | split("\n")[0] | sub("^([a-zA-Z]+)(\\([^)]*\\))?:[[:space:]]*"; "")) + " (" + .sha[0:7] + ")"' || true)
+            else
+              CHANGELOG=$(gh api "repos/$GITHUB_REPOSITORY/commits?per_page=20" \
+                --jq '.[] | "- " + (.commit.message | split("\n")[0] | sub("^([a-zA-Z]+)(\\([^)]*\\))?:[[:space:]]*"; "")) + " (" + .sha[0:7] + ")"' || true)
+            fi
+          fi
+
+          [ -n "$CHANGELOG" ] || CHANGELOG="- 首次发布"
+          printf '%s\n' "$CHANGELOG" > /tmp/changelog.md
+          echo "--- changelog ---"
+          cat /tmp/changelog.md
 
       - name: Draft Release
         id: release_drafter
-        uses: release-drafter/release-drafter@v6
+        uses: release-drafter/release-drafter@v7
         with:
+          # v7 重写版：token 必须走 with 输入（v6 的 env.GITHUB_TOKEN 传递方式已废弃）
+          token: ${{ secrets.GITHUB_TOKEN }}
           config-name: release-drafter.yml
-          tag: v${{ needs.bump-version.outputs.new_version }}
-          version: ${{ needs.bump-version.outputs.new_version }}
+          tag: v${{ needs.build-electron.outputs.new_version }}
+          version: ${{ needs.build-electron.outputs.new_version }}
           publish: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload tarball to release
         shell: bash
@@ -202,18 +276,9 @@ jobs:
         shell: bash
         run: |
           TAG="${{ steps.release_drafter.outputs.tag_name }}"
-          WEFLOW_VERSION=${{ needs.bump-version.outputs.weflow_version }}
-          IMAGE_REF="${{ steps.image-name.outputs.full }}:v${{ needs.bump-version.outputs.new_version }}"
+          WEFLOW_VERSION=$(jq -r .version package.json)
+          IMAGE_REF="${{ steps.image-name.outputs.full }}:v${{ needs.build-electron.outputs.new_version }}"
 
-          # Generate changelog from commits since last tag
-          PREV_TAG=$(gh release list --limit 2 --json tagName --jq '.[1].tagName // ""' 2>/dev/null || true)
-          if [ -n "$PREV_TAG" ] && git rev-parse "$PREV_TAG" >/dev/null 2>&1; then
-            git log "$PREV_TAG..HEAD" --oneline --no-merges --format="- %s" > /tmp/changelog.md
-          else
-            echo "首次发布" > /tmp/changelog.md
-          fi
-
-          # Fetch and patch release body
           gh release view "$TAG" --json body --jq '.body' \
             | sed "s/\$WEFLOW_VERSION/${WEFLOW_VERSION}/g" \
             | sed "s|\$DATE|${{ steps.date.outputs.date }}|g" \
@@ -221,14 +286,13 @@ jobs:
             | sed "s|\$IMAGE_REF|${IMAGE_REF}|g" \
             > /tmp/release_body.md
 
-          # Replace release-drafter's "No changes" with actual commit changelog
+          # Replace release-drafter's "No changes" placeholder with the hybrid changelog
           python3 -c "
-          import re
           with open('/tmp/release_body.md') as f:
               body = f.read()
           with open('/tmp/changelog.md') as f:
               changelog = f.read().strip()
-          body = re.sub(r'No changes', changelog, body)
+          body = body.replace('No changes', changelog, 1)
           with open('/tmp/release_body.md', 'w') as f:
               f.write(body)
           "

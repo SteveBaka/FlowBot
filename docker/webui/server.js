@@ -2,7 +2,7 @@ const http = require('http')
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { execSync } = require('child_process')
+const { execSync, spawn } = require('child_process')
 
 const PORT = process.env.WEBUI_PORT || 7300
 // 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
@@ -76,6 +76,19 @@ function isBodyTooLarge(req, limit) {
 
 function shell(cmd) {
   try { return execSync(cmd, { timeout: 5000, encoding: 'utf-8' }).trim() } catch { return '' }
+}
+
+// 后台拉起进程并继承本进程的 stdout/stderr（即 start.sh 的 tee 管道），
+// 保证重启后的输出继续进入 docker logs 与 container.log，不再重定向到 /tmp。
+function spawnDetached(cmd) {
+  try {
+    const child = spawn('/bin/sh', ['-c', cmd], { detached: true, stdio: ['ignore', 'inherit', 'inherit'] })
+    child.unref()
+    return true
+  } catch (e) {
+    console.error('[WebUI] spawn 失败:', (e && e.message) || e)
+    return false
+  }
 }
 
 function ensureDirSync(dir) {
@@ -883,21 +896,28 @@ const server = http.createServer(async (req, res) => {
     setTimeout(() => {
       try {
         if (target === 'wechat') {
-          console.log('[WebUI] 正在关闭微信...')
-          shell('pkill -9 -f /opt/wechat/wechat 2>/dev/null; sleep 1')
-          console.log('[WebUI] 微信已关闭，等待5秒后重启...')
+          console.log('[WebUI] 正在关闭微信（SIGTERM）...')
+          const wechatPid = shell("pgrep -f '^/opt/wechat/wechat$' | head -1")
+          if (wechatPid) shell('kill -TERM ' + wechatPid)
           setTimeout(() => {
-            shell('DISPLAY=:99 dbus-launch /opt/wechat/wechat > /tmp/wechat-restart.log 2>&1 &')
-            console.log('[WebUI] 微信重启命令已执行')
+            // 同一 PID 补刀，避免误杀守护循环已拉起的新实例（微信无守护循环，此处直接重启）
+            if (wechatPid) shell('kill -KILL ' + wechatPid + ' 2>/dev/null; true')
+            console.log('[WebUI] 微信已关闭，2 秒后重新启动...')
+            setTimeout(() => {
+              spawnDetached('cd /opt && DISPLAY=:99 LD_LIBRARY_PATH="/opt/wechat:$LD_LIBRARY_PATH" dbus-launch /opt/wechat/wechat')
+              console.log('[WebUI] 微信重启命令已执行（输出继续进入 docker logs）')
+            }, 2000)
           }, 5000)
         } else {
-          console.log('[WebUI] 正在关闭 WeFlow...')
-          shell('pkill -9 -f "weflow --no-s" 2>/dev/null; pkill -9 -f "weflow --no-sandbox" 2>/dev/null; sleep 1')
-          console.log('[WebUI] WeFlow 已关闭，等待5秒后重启...')
+          // WeFlow 由 start.sh 守护循环管理：这里只做优雅退出（先 TERM 后 KILL 同一 PID），
+          // 循环 3 秒后自动拉起，输出全程留在原管道。
+          console.log('[WebUI] 正在关闭 WeFlow（SIGTERM，守护循环将自动拉起）...')
+          const weflowPid = shell("pgrep -f '^\\./weflow --no-sandbox' | head -1")
+          if (weflowPid) shell('kill -TERM ' + weflowPid)
           setTimeout(() => {
-            shell('cd /opt/weflow && DISPLAY=:99 dbus-launch ./weflow --no-sandbox --disable-gpu > /tmp/weflow-restart.log 2>&1 &')
-            console.log('[WebUI] WeFlow 重启命令已执行')
-          }, 5000)
+            if (weflowPid) shell('kill -KILL ' + weflowPid + ' 2>/dev/null; true')
+            console.log('[WebUI] WeFlow 已关闭，start.sh 守护循环将自动拉起（日志不断流）')
+          }, 6000)
         }
       } catch (e) {
         console.error('[WebUI] 重启失败:', e.message || e)

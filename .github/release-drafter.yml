@@ -64,6 +64,7 @@ template: |
     -v /your_folder_here/FlowBOT/xwechat_files:/root/xwechat_files \
     -p 7100:7100 \
     -p 7300:7300 \
+    -p 7400:7400 \
     -p 7600:7600 \
     $IMAGE_REF
   ```
@@ -71,6 +72,7 @@ template: |
   ### Ports
   - **7100** - OneBot v11 API
   - **7300** - FlowBOT WebUI
+  - **7400** - AstrBot WebSocket（插件 API）
   - **7600** - noVNC virtual desktop
 
 version-resolver:

@@ -1,5 +1,6 @@
 import './preload-env'
 import { app, BrowserWindow, ipcMain, nativeTheme, session, Tray, Menu, nativeImage } from 'electron'
+import { initWindowRecovery, markQuitting } from './windowRecovery'
 import { Worker } from 'worker_threads'
 import { randomUUID } from 'crypto'
 import { join, dirname } from 'path'
@@ -46,6 +47,16 @@ import { imageDownloadService } from './services/imageDownloadService'
 // 配置自动更新
 autoUpdater.autoDownload = false
 autoUpdater.autoInstallOnAppQuit = true
+// 容器环境（Docker 默认 /dev/shm 仅 64MB）：把 Chromium 共享内存改到 /tmp，
+// 避免 renderer 在大量图片/合成负载下 SIGBUS 崩溃（白屏根因）。
+// 必须在 app ready 之前设置；桌面环境大 shm 下此开关无副作用。
+// WEFLOW_KEEP_SHM=1 可关闭此行为（A/B 归因用）。
+if (!process.env.WEFLOW_KEEP_SHM) {
+  app.commandLine.appendSwitch('disable-dev-shm-usage')
+}
+// 白屏自愈：render-process-gone 自动 reload、unresponsive/子进程异常落日志
+initWindowRecovery()
+
 autoUpdater.disableDifferentialDownload = true  // 禁用差分更新，强制全量下载
 // 更新通道策略：
 // - 稳定版（如 4.3.0）默认走 latest
@@ -4821,6 +4832,7 @@ const shutdownAppServices = async (): Promise<void> => {
 }
 
 app.on('before-quit', () => {
+  markQuitting()
   void shutdownAppServices()
 })
 

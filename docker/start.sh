@@ -55,6 +55,7 @@ session.screen0.tabs.usePixmap: false
 session.screen0.tabs.maxWidth: 200
 session.screen0.tabs.useFocus: true
 session.screen0.workspaces: 1
+session.screen0.rootCommand: fbsetroot -solid black
 EOF
 cat > /root/.fluxbox/keys << 'EOF'
 OnDesktop Mouse3 :RootMenu
@@ -63,9 +64,6 @@ cat > /root/.fluxbox/menu << 'EOF'
 [begin] (FlowBOT)
   [exec] (WeChat) {/opt/wechat/wechat} <wechat>
   [exec] (FlowBOT) {/opt/weflow/weflow --no-sandbox --disable-gpu} <weflow>
-  [submenu] (终端)
-    [exec] (Terminal) {xterm} <xterm>
-  [end]
   [separator]
   [exit] (退出)
 [end]
@@ -94,7 +92,7 @@ if [ -n "$VNC_PASSWORD" ]; then
   VNC_PID=$!
   sleep 1
   log INFO "Starting noVNC web client (port ${NOVNC_PORT:-7600})..."
-  websockify --web /usr/share/novnc ${NOVNC_PORT:-7600} localhost:5900 >/dev/null 2>&1 &
+  websockify --web /opt/novnc ${NOVNC_PORT:-7600} localhost:5900 >/dev/null 2>&1 &
   NOVNC_PID=$!
 else
   log WARN "VNC_PASSWORD not set, skipping VNC and noVNC"
@@ -108,9 +106,18 @@ DISPLAY=:99 /opt/wechat/wechat &
 WECHAT_PID=$!
 
 # Start FlowBOT Electron app (HTTP API on port 5031)
+# 守护循环：weflow 崩溃后 3 秒自动拉起；WebUI 的"重启 WeFlow"按钮只需优雅杀进程，
+# 循环负责重新启动。子 shell 内的 stdout 天然走本脚本的 tee 管道（docker logs 不断流）。
 log INFO "Starting FlowBOT Electron app (API port ${FLOW_API_PORT:-5031})..."
-cd /opt/weflow
-DISPLAY=:99 WEFLOW_DOCKER=1 ONEBOT_PORT=${ONEBOT_PORT:-7100} ./weflow --no-sandbox --disable-gpu &
+(
+  cd /opt/weflow
+  while true; do
+    DISPLAY=:99 WEFLOW_DOCKER=1 ONEBOT_PORT=${ONEBOT_PORT:-7100} ./weflow --no-sandbox --disable-gpu
+    RC=$?
+    echo "[$(date '+%m-%d %H:%M:%S')] [WARN] [FlowBOT] WeFlow exited (code $RC), restarting in 3s..."
+    sleep 3
+  done
+) &
 WEFLOW_PID=$!
 
 # Start WebUI server (port 7300, proxies to FlowBOT API on 5031)
@@ -122,8 +129,16 @@ WEBUI_PID=$!
 cleanup() {
     log INFO "Shutting down..."
     kill $WEBUI_PID 2>/dev/null || true
+    # WEFLOW_PID 现在是守护循环子 shell；先停循环，再优雅停 weflow 本体
     kill $WEFLOW_PID 2>/dev/null || true
+    pkill -TERM -f '^\./weflow --no-sandbox' 2>/dev/null || true
     kill $WECHAT_PID 2>/dev/null || true
+    # 给微信最多 5s 优雅退出：登录级设置（如「自动下载」开关）和 SQLite WAL
+    # 依赖进程正常退出时落盘，随容器被 SIGKILL 抢杀会丢失内存态
+    for _i in 1 2 3 4 5; do
+        kill -0 "$WECHAT_PID" 2>/dev/null || break
+        sleep 1
+    done
     kill $NOVNC_PID 2>/dev/null || true
     kill $VNC_PID 2>/dev/null || true
     kill $FLUXBOX_PID 2>/dev/null || true
