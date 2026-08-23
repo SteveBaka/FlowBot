@@ -1,4 +1,4 @@
-FROM ubuntu:22.04
+FROM ubuntu:22.10
 
 # apt-cacher-ng proxy (optional, pass --build-arg APT_PROXY=http://host:3142 to enable)
 ARG APT_PROXY=""
