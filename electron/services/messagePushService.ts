@@ -3,6 +3,7 @@ import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
 import { imageDecryptService } from './imageDecryptService'
+import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
 import { promises as fs } from 'fs'
@@ -76,7 +77,7 @@ class MessagePushService {
   private readonly debounceMs = 350
   private readonly lookbackSeconds = 2
   private readonly recentMessageTtlMs = 10 * 60 * 1000
-  private readonly groupNicknameCacheTtlMs = 5 * 60 * 1000
+  private readonly groupNicknameCacheTtlMs = 1 * 60 * 1000
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
@@ -179,6 +180,24 @@ class MessagePushService {
 
     const tableName = String(payload?.table || '').trim()
     const messageTableNames = this.collectMessageTableNamesFromPayload(payload)
+
+    // 联系人/群成员/群相关表变更 → 失效头像/昵称/群成员缓存，保证改头像/资料及时透出。
+    // 优先精确匹配表名；无法定位具体表时保守失效（非消息/会话变更都可能有身份数据变化）。
+    const isIdentityChange = (() => {
+      if (tableName) {
+        const t = tableName.toLowerCase()
+        return t.includes('contact') || t.includes('chatroom') ||
+          t.includes('group') || t.includes('member') || t.includes('avatar')
+      }
+      return false
+    })()
+    if (isIdentityChange) {
+      try { chatService.invalidateContactCaches() } catch {}
+      try { groupAnalyticsService.invalidateGroupMembersCache() } catch {}
+      this.groupNicknameCache.clear()
+      return
+    }
+
     if (this.isSessionTableChange(tableName)) {
       this.scheduleSync()
       return

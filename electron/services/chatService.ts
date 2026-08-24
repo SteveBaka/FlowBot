@@ -353,7 +353,7 @@ class ChatService {
   private readonly messageBatchDefault = 50
   private readonly messageCursorSessionLimit = 8
   private avatarCache: Map<string, ContactCacheEntry>
-  private readonly avatarCacheTtlMs = 10 * 60 * 1000
+  private readonly avatarCacheTtlMs = 2 * 60 * 1000
   private readonly defaultV1AesKey = 'cfcd208495d565ef'
   private readonly contactCacheService: ContactCacheService
   private readonly messageCacheService: MessageCacheService
@@ -7600,6 +7600,20 @@ class ChatService {
       return { success: false, error: errors.join('; ') }
     }
     return { success: true }
+  }
+
+  /**
+   * 联系人/群成员头像或资料变更时失效头像相关缓存（dbMonitor contact 变更事件触发）。
+   * 清空本服务 avatarCache + wcdbCore.avatarUrlCache，使下次访问立即回源 WCDB。
+   * contacts.json 持久化不立即清（磁盘重启兜底，TTL 到期自然回源）。
+   */
+  invalidateContactCaches(): void {
+    this.avatarCache.clear()
+    try {
+      void wcdbService.invalidateAvatarCache()
+    } catch {
+      // 失效失败静默，TTL 兜底
+    }
   }
 
   /**

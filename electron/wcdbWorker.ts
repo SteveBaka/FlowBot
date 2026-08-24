@@ -95,6 +95,10 @@ if (parentPort) {
                 case 'getAvatarUrls':
                     result = await core.getAvatarUrls(payload.usernames)
                     break
+                case 'clearAvatarUrlCache':
+                    core.clearAvatarUrlCache()
+                    result = { success: true }
+                    break
                 case 'getGroupMemberCount':
                     result = await core.getGroupMemberCount(payload.chatroomId)
                     break
