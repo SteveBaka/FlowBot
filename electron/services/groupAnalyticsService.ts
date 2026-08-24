@@ -76,7 +76,7 @@ interface GroupMemberContactInfo {
 
 class GroupAnalyticsService {
   private configService: ConfigService
-  private readonly groupMembersPanelCacheTtlMs = 10 * 60 * 1000
+  private readonly groupMembersPanelCacheTtlMs = 3 * 60 * 1000
   private readonly groupMembersPanelMembersTimeoutMs = 12 * 1000
   private readonly groupMembersPanelFullTimeoutMs = 25 * 1000
   private readonly groupMembersPanelCache = new Map<string, { updatedAt: number; data: GroupMembersPanelEntry[] }>()
@@ -1282,6 +1282,15 @@ class GroupAnalyticsService {
     } catch (e) {
       return { success: false, error: String(e) }
     }
+  }
+
+  /**
+   * 群成员/群资料变更时失效群成员面板缓存（dbMonitor 群相关事件触发），
+   * 使下次打开群成员面板立即回源 WCDB，避免展示旧成员列表。
+   */
+  invalidateGroupMembersCache(): void {
+    this.groupMembersPanelCache.clear()
+    this.groupMembersPanelInFlight.clear()
   }
 
   async getGroupMembers(chatroomId: string): Promise<{ success: boolean; data?: GroupMember[]; error?: string }> {

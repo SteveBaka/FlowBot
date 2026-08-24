@@ -328,6 +328,13 @@ export class WcdbService {
   }
 
   /**
+   * 清空头像 URL 内存缓存（联系人/群成员头像变更事件触发，下次访问立即回源 WCDB）
+   */
+  async invalidateAvatarCache(): Promise<{ success: boolean }> {
+    return this.callWorker('clearAvatarUrlCache', {})
+  }
+
+  /**
    * 获取群成员数量
    */
   async getGroupMemberCount(chatroomId: string): Promise<{ success: boolean; count?: number; error?: string }> {

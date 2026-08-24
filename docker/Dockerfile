@@ -80,6 +80,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends python3 python3
         "https://github.com/novnc/noVNC/archive/refs/tags/v${NOVNC_VERSION}.tar.gz" \
     && mkdir -p /opt/novnc \
     && tar -xzf /tmp/novnc.tar.gz -C /opt/novnc --strip-components=1 \
+    && printf '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n<meta http-equiv="refresh" content="0; url=./vnc.html">\n<title>noVNC</title>\n</head>\n<body style="margin:0;padding:0">\n<a href="./vnc.html" style="display:block;text-align:center;padding:40px;font:16px sans-serif">正在进入 noVNC…（若未跳转请点击）</a>\n</body>\n</html>\n' > /opt/novnc/index.html \
     && rm -f /tmp/novnc.tar.gz \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -c "import pypinyin" \

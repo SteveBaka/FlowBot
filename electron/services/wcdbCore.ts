@@ -138,7 +138,7 @@ export class WcdbCore {
 
 
   private avatarUrlCache: Map<string, { url?: string; updatedAt: number }> = new Map()
-  private readonly avatarCacheTtlMs = 10 * 60 * 1000
+  private readonly avatarCacheTtlMs = 2 * 60 * 1000
   private imageHardlinkCache: Map<string, { result: { success: boolean; data?: any; error?: string }; updatedAt: number }> = new Map()
   private videoHardlinkCache: Map<string, { result: { success: boolean; data?: any; error?: string }; updatedAt: number }> = new Map()
   private readonly hardlinkCacheTtlMs = 10 * 60 * 1000
@@ -1601,6 +1601,9 @@ export class WcdbCore {
       this.writeLog(`open ok handle=${handle}`, true)
       await this.dumpDbStatus('open')
       await this.runPostOpenDiagnostics(accountDir, dbStoragePath, sessionDbPath, wxid)
+      // 预热：exec_query 对 message 库需先 get_sessions 建立上下文，否则可能 -3。
+      // fire-and-forget，失败静默，不阻塞 open。
+      void this.getSessions()
       return true
     } catch (e) {
       console.error('打开数据库异常:', e)
@@ -2707,6 +2710,14 @@ export class WcdbCore {
       console.error('[wcdbCore] getAvatarUrls 异常:', e)
       return { success: false, error: String(e) }
     }
+  }
+
+  /**
+   * 清空头像 URL 内存缓存。联系人/群成员头像变更事件（dbMonitor）触发，
+   * 使下次 getAvatarUrls 立即回源 WCDB，避免 TTL 内继续返回旧头像。
+   */
+  clearAvatarUrlCache(): void {
+    this.avatarUrlCache.clear()
   }
 
   async getGroupMemberCount(chatroomId: string): Promise<{ success: boolean; count?: number; error?: string }> {
