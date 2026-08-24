@@ -30,7 +30,7 @@
     "ffmpeg-static": "^5.3.0",
     "fzstd": "^0.1.1",
     "jszip": "^3.10.1",
-    "koffi": "^2.9.0",
+    "koffi": "^3.1.5",
     "sherpa-onnx-node": "^1.13.6",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2",
@@ -60,8 +60,8 @@
     "sharp": "^0.35.3",
     "typescript": "^7.0.2",
     "vite": "^8.2.2",
-    "vite-plugin-electron": "^0.28.8",
-    "vite-plugin-electron-renderer": "^0.14.6",
+    "vite-plugin-electron": "^1.1.1",
+    "vite-plugin-electron-renderer": "^1.0.0",
     "zustand": "^5.0.15"
   },
   "pnpm": {
