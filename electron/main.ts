@@ -2454,7 +2454,7 @@ function registerIpcHandlers() {
       } catch {}
     }
 
-    const result = await sender.sendMessage(content, searchName, imagePath)
+    const result = await sender.sendMessage(content, searchName, imagePath, undefined, undefined, sessionId)
     return result
   })
 
@@ -4691,7 +4691,7 @@ app.whenReady().then(async () => {
                 }
               } catch {}
               console.log('[App] Bot sending private msg to "' + contactName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ': ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, rawUserId)
               console.log('[App] Bot sendMessage result:', result)
             } else if (msg.action === 'send_group_msg') {
               var rawGroupId = params.group_id || params.group_name || ''
@@ -4720,7 +4720,7 @@ app.whenReady().then(async () => {
                 }
               } catch {}
               console.log('[App] Bot sending group msg to "' + groupName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawGroupId + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, rawGroupId)
               console.log('[App] Bot sendMessage result:', result)
             } else if (msg.action === 'send_msg') {
               var rawTarget = params.group_id || params.user_id || params.target || ''
@@ -4757,7 +4757,7 @@ app.whenReady().then(async () => {
                 } catch {}
               }
               console.log('[App] Bot sending msg to "' + target + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawTarget + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, target, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, target, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, rawTarget)
               console.log('[App] Bot sendMessage result:', result)
             }
           } finally {

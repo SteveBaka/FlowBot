@@ -3,6 +3,7 @@ import { promisify } from 'util'
 import type { IPlatformSender } from '../enhancedMessageSender'
 import type { SendMode, SendTask, SendProgress } from './types'
 import { ConfigService } from '../../services/config'
+import { SendAckService, type SendAckFingerprint, type SendAckResult } from '../../services/sendAckService'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -179,7 +180,8 @@ interface QueuedMessage {
   imagePath?: string
   videoPath?: string
   atMentions?: Array<{ wxid: string; name: string }>
-  resolve: (result: { success: boolean; error?: string; method: string }) => void
+  sessionId?: string          // wxid（回执查询用；群聊为 xxx@chatroom）
+  resolve: (result: { success: boolean; error?: string; method: string; ack?: string; serverId?: number; messageId?: string }) => void
   retries: number
   createdAt: number
 }
@@ -784,9 +786,10 @@ export class LinuxSender implements IPlatformSender {
     contactName?: string,
     imagePath?: string,
     atMentions?: Array<{ wxid: string; name: string }>,
-    videoPath?: string
+    videoPath?: string,
+    sessionId?: string
   ): Promise<{
-    success: boolean; error?: string; method: string
+    success: boolean; error?: string; method: string; ack?: string; serverId?: number; messageId?: string
   }> {
     const str = String(content || '')
     const name = String(contactName || '')
@@ -816,6 +819,7 @@ export class LinuxSender implements IPlatformSender {
         imagePath,
         videoPath,
         atMentions,
+        sessionId,
         resolve,
         retries: 0,
         createdAt: Date.now()
@@ -894,10 +898,30 @@ export class LinuxSender implements IPlatformSender {
         const typeLabel = item.videoPath ? 'video' : item.imagePath ? 'image' : 'text'
         log(`Message ${item.id} sent successfully`)
         log(`Message ${item.id} (${typeLabel}) sent successfully`)
+
+        // 图片发送回执（SendAck 兜底，IMAGE-SEND-ACK-FALLBACK.md §四/§五）：
+        // 图片任务在 resolve 前等待 WCDB 回执（事件监听 ~2.5s / 轮询 5s 超时），
+        // 未确认则二次 Enter 兜底。回执期间队列占用 = 防下一条顶走卡框图片（期望行为）。
+        let ackResult: { success: boolean; status?: string; serverId?: number; messageId?: string; error?: string } | null = null
+        if (item.imagePath && item.sessionId) {
+          try {
+            ackResult = await this.waitForImageAck(item)
+          } catch (e: any) {
+            warn(`SendAck 异常（不阻塞发送）: ${e?.message || String(e)}`)
+          }
+        }
+
         this.onSendSuccess()
         this.totalSent++
         this.lastMergeContact = item.contactName
-        item.resolve({ success: true, method: this.currentMode })
+        item.resolve({
+          success: ackResult ? ackResult.success : true,
+          method: this.currentMode,
+          ack: ackResult?.status,
+          serverId: ackResult?.serverId,
+          messageId: ackResult?.messageId,
+          ...(ackResult && !ackResult.success ? { error: ackResult.error } : {})
+        })
         this.queue.shift()
       } else {
         item.retries++
@@ -918,6 +942,62 @@ export class LinuxSender implements IPlatformSender {
     }
 
     this.processing = false
+  }
+
+  /**
+   * 图片发送回执（SendAck）：Enter 后等待 WCDB 确认 isSend 行（IMAGE-SEND-ACK-FALLBACK.md §四/§五）。
+   * 事件监听为主（chatService.addDbMonitorListener）+ 轮询降级；超时未确认 → 二次 Enter（不清空）兜底。
+   */
+  private async waitForImageAck(item: QueuedMessage): Promise<SendAckResult> {
+    // 计算源图片 dat 名/md5 作旁证（尽力而为，取不到不影响主判据）
+    let imageDatName: string | undefined
+    let sourceMd5: string | undefined
+    if (item.imagePath) {
+      try {
+        const fs = require('fs')
+        const crypto = require('crypto')
+        sourceMd5 = crypto.createHash('md5').update(fs.readFileSync(item.imagePath)).digest('hex')
+        const base = require('path').basename(item.imagePath)
+        // dat 名：微信以 md5 命名缓存文件，源文件不一定有；留空由旁证逻辑跳过
+        imageDatName = undefined
+      } catch {}
+    }
+
+    const fp: SendAckFingerprint = {
+      sessionId: item.sessionId || '',
+      kind: 'image',
+      t0: this.lastSendTime || Date.now(),
+      imageDatName,
+      sourceMd5,
+      clientTag: item.id
+    }
+
+    // 二次 Enter 执行器：仅按 Enter（不清空不重贴），并更新 lastSendTime 供再次回执的时间窗
+    const doReEnter = async (): Promise<boolean> => {
+      const wid = await this.findWeChatWindow()
+      if (!wid) {
+        warn('二次 Enter 兜底失败：找不到微信窗口')
+        return false
+      }
+      await run(`xdotool key --window "${wid}" Return`)
+      this.lastSendTime = Date.now()
+      await new Promise(r => setTimeout(r, this.delay.postSendSettle))
+      return true
+    }
+
+    const ackSvc = new SendAckService({
+      getNewMessages: async (sessionId: string, minTime: number, limit?: number) => {
+        const { chatService } = require('../../services/chatService')
+        return chatService.getNewMessages(sessionId, minTime, limit)
+      },
+      addDbMonitorListener: (listener) => {
+        const { chatService } = require('../../services/chatService')
+        return chatService.addDbMonitorListener(listener)
+      },
+      doReEnter
+    })
+
+    return ackSvc.waitForImageAck(fp)
   }
 
   async sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress> {
