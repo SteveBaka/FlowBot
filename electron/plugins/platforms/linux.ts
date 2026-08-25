@@ -3,6 +3,7 @@ import { promisify } from 'util'
 import type { IPlatformSender } from '../enhancedMessageSender'
 import type { SendMode, SendTask, SendProgress } from './types'
 import { ConfigService } from '../../services/config'
+import { SendAckService, type SendAckFingerprint, type SendAckResult } from '../../services/sendAckService'
 
 const execAsync = promisify(exec)
 const execFileAsync = promisify(execFile)
@@ -179,7 +180,8 @@ interface QueuedMessage {
   imagePath?: string
   videoPath?: string
   atMentions?: Array<{ wxid: string; name: string }>
-  resolve: (result: { success: boolean; error?: string; method: string }) => void
+  sessionId?: string          // wxid（回执查询用；群聊为 xxx@chatroom）
+  resolve: (result: { success: boolean; error?: string; method: string; ack?: string; serverId?: number; messageId?: string }) => void
   retries: number
   createdAt: number
 }
@@ -195,6 +197,98 @@ async function run(cmd: string, timeout = 5000): Promise<string> {
     if (e.stderr) warn(`  stderr: ${e.stderr?.substring(0, 300)}`)
     return ''
   }
+}
+
+/**
+ * 输入框探针（SendAck 防误发辅助，IMAGE-SEND-ACK-FALLBACK.md §5.3）：
+ * 用 xwd 抓取指定窗口的像素，比对输入框 ROI 区域与基线是否一致。
+ * 基线=粘贴完成后、Enter 前抓取（媒体卡片必在框内）；超时时再抓一次——
+ * 相同 → 媒体仍在（卡框）；不同 → 已被微信取走（疑似已发出）。绝不靠几何/光标信号。
+ * X11 xwd 格式：大端头 25×u32，BGRX 每像素 4 字节，bytes_per_line 可能 > width×4（对齐）。
+ */
+
+interface XwdImage {
+  width: number
+  height: number
+  bytesPerLine: number
+  data: Buffer
+  dataStart: number
+}
+
+function parseXwd(buffer: Buffer): XwdImage | null {
+  try {
+    if (buffer.length < 100) return null
+    // 头 25 个 u32（大端）：header_size, version, format, depth, width, height, xoffset, byte_order,
+    // bitmap_unit, bitmap_bit_order, bitmap_pad, bits_per_pixel, bytes_per_line, visual_class, ...
+    const width = buffer.readUInt32BE(16)
+    const height = buffer.readUInt32BE(20)
+    const bytesPerLine = buffer.readUInt32BE(48)
+    const headerSize = buffer.readUInt32BE(0)
+    const ncolors = buffer.readUInt32BE(76)
+    if (width <= 0 || height <= 0 || bytesPerLine <= 0) return null
+    const dataStart = headerSize + ncolors * 12
+    const expected = dataStart + bytesPerLine * height
+    if (expected > buffer.length) return null
+    return { width, height, bytesPerLine, data: buffer, dataStart }
+  } catch {
+    return null
+  }
+}
+
+/** 抓取窗口像素（xwd，execFile 直取二进制 Buffer）。返回 null 表示不可用（工具缺失/窗口不可见）。 */
+async function captureWindowXwd(wid: string): Promise<XwdImage | null> {
+  try {
+    // encoding: 'buffer' 关键——xwd 输出二进制，默认 utf8 解码会破坏数据
+    const { stdout } = await execFileAsync('xwd', ['-id', wid, '-silent'], { timeout: 6000, env: DISPLAY_ENV, maxBuffer: 64 * 1024 * 1024, encoding: 'buffer' })
+    const buf: Buffer = Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout, 'binary')
+    const img = parseXwd(buf)
+    if (!img) return null
+    // 全黑（被遮挡/窗口不可见）视为抓取无效，避免误判
+    const bpl = img.bytesPerLine
+    let nonBlack = 0
+    for (let y = 0; y < img.height; y++) {
+      const off = img.dataStart + y * bpl
+      for (let x = 0; x < img.width; x++) {
+        const p = off + x * 4
+        if (img.data[p] !== 0 || img.data[p + 1] !== 0 || img.data[p + 2] !== 0) {
+          nonBlack++
+          if (nonBlack > 8) break
+        }
+      }
+      if (nonBlack > 8) break
+    }
+    if (nonBlack <= 8) return null
+    return img
+  } catch {
+    return null
+  }
+}
+
+/**
+ * 统计 ROI 内差异像素占比（BGRX 每像素 4 字节）。
+ * 同坐标像素值完全一致才视为相同；占比 = 不同像素数 / ROI 总像素数。
+ */
+function roidiff(prev: XwdImage, next: XwdImage, roi: { x: number; y: number; w: number; h: number }): number {
+  if (prev.width !== next.width || prev.height !== next.height) return 1
+  const { x, y, w, h } = roi
+  const x1 = Math.max(0, Math.min(prev.width, x + w))
+  const y1 = Math.max(0, Math.min(prev.height, y + h))
+  if (x1 <= x || y1 <= y) return 0
+  let diff = 0
+  let total = 0
+  for (let py = y; py < y1; py++) {
+    const pOff = prev.dataStart + py * prev.bytesPerLine + x * 4
+    const nOff = next.dataStart + py * next.bytesPerLine + x * 4
+    for (let px = x; px < x1; px++) {
+      const a = pOff + (px - x) * 4
+      const b = nOff + (px - x) * 4
+      if (prev.data[a] !== next.data[b] || prev.data[a + 1] !== next.data[b + 1] || prev.data[a + 2] !== next.data[b + 2]) {
+        diff++
+      }
+      total++
+    }
+  }
+  return total > 0 ? diff / total : 0
 }
 
 async function xclipSet(text: any): Promise<void> {
@@ -308,6 +402,10 @@ export class LinuxSender implements IPlatformSender {
   // 图片粘贴熔断：连续失败 ≥1 次 → 冷却 30s；冷却后仅再试一次，失败则不发送
   private imagePasteFails = 0
   private imagePasteCoolUntil = 0
+  // 输入框探针（SendAck 防误发辅助）：抓屏缓冲 + ROI 锁定
+  private probeBuffer: XwdImage | null = null
+  private probeWid = ''
+  private probeRoi: { x: number; y: number; w: number; h: number } | null = null
 
   constructor() {
     try {
@@ -411,6 +509,54 @@ export class LinuxSender implements IPlatformSender {
   }
 
   setMode(mode: SendMode): void { this.currentMode = mode }
+
+  // ─── 输入框探针（SendAck 防误发辅助，§5.3）────────────────────────────
+
+  /** 抓取当前微信窗口并锁定输入框 ROI（用于后续像素比对）。失败返回 false（探针不可用）。 */
+  private async captureProbeBaseline(): Promise<boolean> {
+    try {
+      const wid = await this.findWeChatWindow()
+      if (!wid) return false
+      const img = await captureWindowXwd(wid)
+      if (!img) return false
+      // 输入框 ROI：窗口底部约 7% 高度的窄条（实测微信 Linux 输入框位于 y≈93%~98%）。
+      // 不用"底部 15%"——范围太宽会把空白区域算进差异稀释信号，且大图渲染时整块都变。
+      const roi = {
+        x: 0,
+        y: Math.floor(img.height * 0.93),
+        w: img.width,
+        h: Math.max(1, img.height - Math.floor(img.height * 0.93))
+      }
+      this.probeBuffer = img
+      this.probeWid = wid
+      this.probeRoi = roi
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** 输入框探针查询：媒体是否仍在输入框。true=仍在（可放心 Enter）；false=已离开（禁止 Enter）；undefined=探针不可用 */
+  private async probeImageInInput(): Promise<boolean | undefined> {
+    try {
+      if (!this.probeWid) return undefined
+      const img = await captureWindowXwd(this.probeWid)
+      if (!img || !this.probeRoi || !this.probeBuffer) return undefined
+      const diff = roidiff(this.probeBuffer, img, this.probeRoi)
+      const threshold = Math.max(0, Math.min(1, Number(getConfigNumber('sendAckProbeDiffThreshold', 0.05))))
+      log(`探针 ROI 差异 ${(diff * 100).toFixed(1)}% (阈值 ${(threshold * 100).toFixed(0)}%)`)
+      return diff < threshold
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 清空探针缓冲（下一条媒体发送前重置基线） */
+  private clearProbeBaseline(): void {
+    this.probeBuffer = null
+    this.probeWid = ''
+    this.probeRoi = null
+  }
 
   /** 探测图片体积（仅 stat，微秒级） */
   private probeImageBytes(filePath: string): number | null {
@@ -614,7 +760,7 @@ export class LinuxSender implements IPlatformSender {
     await new Promise(r => setTimeout(r, this.delay.inputClick))
   }
 
-  private async pasteAndSend(content: string, wid: string, imagePath?: string, videoPath?: string): Promise<boolean> {
+  private async pasteAndSend(content: string, wid: string, imagePath?: string, videoPath?: string, onMediaPasted?: () => Promise<void>): Promise<boolean> {
     if (videoPath) {
       log(`Pasting video: ${videoPath}`)
       // 大小闸：视频不适用图片的 5MB/30s 熔断，超 videoMaxBytes 直接拒绝（S5）
@@ -670,6 +816,11 @@ export class LinuxSender implements IPlatformSender {
     }
 
     log(`Pressing Enter to send...`)
+    // 探针基线：Enter 前抓取（媒体卡片已渲染、尚未发送）——SendAck 超时时对比判定卡框/已发出。
+    // 必须在 Enter 前：Enter 后输入框已被微信清空，基线=空框会导致差异恒为 0 而误判"仍在输入框"。
+    if (onMediaPasted) {
+      await onMediaPasted()
+    }
     await run(`xdotool key --window "${wid}" Return`)
     await new Promise(r => setTimeout(r, this.delay.postSendSettle))
 
@@ -740,10 +891,17 @@ export class LinuxSender implements IPlatformSender {
     }
 
     t0 = Date.now()
-    if (!await this.pasteAndSend(content, wid, imagePath, videoPath)) {
+    // 探针基线在 Enter 前抓取（onMediaPasted 回调）：粘贴完成、媒体卡片已渲染、尚未发送。
+    // Enter 后输入框已被清空，此时抓基线会与超时空框一致 → 误判"仍在输入框"。移到 Enter 前修正。
+    const probeBaselineCb = (imagePath || videoPath) ? async () => { await this.captureProbeBaseline() } : undefined
+    if (!await this.pasteAndSend(content, wid, imagePath, videoPath, probeBaselineCb)) {
       return { success: false, error: '粘贴发送失败' }
     }
     steps.push({ step: '粘贴发送', ms: Date.now() - t0 })
+
+    if (!imagePath && !videoPath) {
+      this.clearProbeBaseline()
+    }
 
     this.lastSendSteps = steps
     this.lastSendTime = Date.now()
@@ -784,9 +942,10 @@ export class LinuxSender implements IPlatformSender {
     contactName?: string,
     imagePath?: string,
     atMentions?: Array<{ wxid: string; name: string }>,
-    videoPath?: string
+    videoPath?: string,
+    sessionId?: string
   ): Promise<{
-    success: boolean; error?: string; method: string
+    success: boolean; error?: string; method: string; ack?: string; serverId?: number; messageId?: string
   }> {
     const str = String(content || '')
     const name = String(contactName || '')
@@ -816,6 +975,7 @@ export class LinuxSender implements IPlatformSender {
         imagePath,
         videoPath,
         atMentions,
+        sessionId,
         resolve,
         retries: 0,
         createdAt: Date.now()
@@ -892,12 +1052,31 @@ export class LinuxSender implements IPlatformSender {
 
       if (result.success) {
         const typeLabel = item.videoPath ? 'video' : item.imagePath ? 'image' : 'text'
-        log(`Message ${item.id} sent successfully`)
         log(`Message ${item.id} (${typeLabel}) sent successfully`)
+
+        // 媒体发送回执（SendAck 兜底，IMAGE-SEND-ACK-FALLBACK.md §四/§五）：
+        // 图片/视频任务在 resolve 前等待 WCDB 回执（事件监听 ~2.5s / 轮询按 kind 超时），
+        // 未确认则二次 Enter 兜底。回执期间队列占用 = 防下一条顶走卡框媒体（期望行为）。
+        let ackResult: { success: boolean; status?: string; serverId?: number; messageId?: string; error?: string } | null = null
+        if ((item.imagePath || item.videoPath) && item.sessionId) {
+          try {
+            ackResult = await this.waitForAck(item)
+          } catch (e: any) {
+            warn(`SendAck 异常（不阻塞发送）: ${e?.message || String(e)}`)
+          }
+        }
+
         this.onSendSuccess()
         this.totalSent++
         this.lastMergeContact = item.contactName
-        item.resolve({ success: true, method: this.currentMode })
+        item.resolve({
+          success: ackResult ? ackResult.success : true,
+          method: this.currentMode,
+          ack: ackResult?.status,
+          serverId: ackResult?.serverId,
+          messageId: ackResult?.messageId,
+          ...(ackResult && !ackResult.success ? { error: ackResult.error } : {})
+        })
         this.queue.shift()
       } else {
         item.retries++
@@ -918,6 +1097,70 @@ export class LinuxSender implements IPlatformSender {
     }
 
     this.processing = false
+  }
+
+  /**
+   * 媒体发送回执（SendAck）：Enter 后等待 WCDB 确认 isSend 行（IMAGE-SEND-ACK-FALLBACK.md §四/§五）。
+   * 按任务类型取 kind（图片/视频），事件监听为主（chatService.addDbMonitorListener）+ 轮询降级；
+   * 超时未确认 → 二次 Enter（不清空）兜底。视频大文件不计算 md5（避免读盘耗时，旁证非主判据）。
+   */
+  private async waitForAck(item: QueuedMessage): Promise<SendAckResult> {
+    // 计算源文件旁证（尽力而为，取不到不影响主判据；视频大文件跳过 md5）
+    let imageDatName: string | undefined
+    let sourceMd5: string | undefined
+    if (item.imagePath) {
+      try {
+        const fs = require('fs')
+        const crypto = require('crypto')
+        sourceMd5 = crypto.createHash('md5').update(fs.readFileSync(item.imagePath)).digest('hex')
+        // dat 名：微信以 md5 命名缓存文件，源文件不一定有；留空由旁证逻辑跳过
+        imageDatName = undefined
+      } catch {}
+    }
+
+    const fp: SendAckFingerprint = {
+      sessionId: item.sessionId || '',
+      kind: item.videoPath ? 'video' : 'image',
+      t0: this.lastSendTime || Date.now(),
+      imageDatName,
+      sourceMd5,
+      clientTag: item.id,
+      // 体积（MB）：已 stat 过，直接带进指纹做超时自适应
+      sizeMb: (() => {
+        const mediaPath = item.imagePath || item.videoPath
+        if (!mediaPath) return undefined
+        const bytes = this.probeFileBytes(mediaPath)
+        return bytes !== null && bytes > 0 ? bytes / (1024 * 1024) : undefined
+      })()
+    }
+
+    // 二次 Enter 执行器：仅按 Enter（不清空不重贴），并更新 lastSendTime 供再次回执的时间窗
+    const doReEnter = async (): Promise<boolean> => {
+      const wid = await this.findWeChatWindow()
+      if (!wid) {
+        warn('二次 Enter 兜底失败：找不到微信窗口')
+        return false
+      }
+      await run(`xdotool key --window "${wid}" Return`)
+      this.lastSendTime = Date.now()
+      await new Promise(r => setTimeout(r, this.delay.postSendSettle))
+      return true
+    }
+
+    const ackSvc = new SendAckService({
+      getNewMessages: async (sessionId: string, minTime: number, limit?: number) => {
+        const { chatService } = require('../../services/chatService')
+        return chatService.getNewMessages(sessionId, minTime, limit)
+      },
+      addDbMonitorListener: (listener) => {
+        const { chatService } = require('../../services/chatService')
+        return chatService.addDbMonitorListener(listener)
+      },
+      doReEnter,
+      probeImageInInput: () => this.probeImageInInput()
+    })
+
+    return ackSvc.waitForAck(fp)
   }
 
   async sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress> {

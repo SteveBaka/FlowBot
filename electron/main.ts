@@ -2454,7 +2454,7 @@ function registerIpcHandlers() {
       } catch {}
     }
 
-    const result = await sender.sendMessage(content, searchName, imagePath)
+    const result = await sender.sendMessage(content, searchName, imagePath, undefined, undefined, sessionId)
     return result
   })
 
@@ -4683,82 +4683,107 @@ app.whenReady().then(async () => {
             if (msg.action === 'send_private_msg') {
               var rawUserId = params.user_id || ''
               var contactName = rawUserId
+              var sessionId = rawUserId
               try {
-                var { resolvePrivateSearchName } = require('./services/botManager')
-                var resolvedName = resolvePrivateSearchName(rawUserId)
+                var botMgr = require('./services/botManager')
+                var resolvedName = botMgr.resolvePrivateSearchName(rawUserId)
                 if (resolvedName) {
                   contactName = resolvedName
                 }
+                // OneBot 用数字 id，回执查 WCDB 必须用 wxid（身份库转换，否则 koffi 原生游标段错误）
+                var identity = botMgr.resolveIdentityByNumeric(rawUserId)
+                if (identity && identity.wxid) {
+                  sessionId = identity.wxid
+                }
               } catch {}
               console.log('[App] Bot sending private msg to "' + contactName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ': ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, contactName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, sessionId)
               console.log('[App] Bot sendMessage result:', result)
+              // 回传真实 SendAck 回执（messageId/ack/server_id）给 OneBot 客户端
+              try { require('./services/botManager').resolveSendAck(msg.botId, msg.echo, result) } catch {}
             } else if (msg.action === 'send_group_msg') {
               var rawGroupId = params.group_id || params.group_name || ''
               var groupName = rawGroupId
+              var sessionId = rawGroupId
               try {
-                var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
-                var resolvedName = resolveGroupSearchName(rawGroupId)
-                if (resolvedName) {
-                  groupName = resolvedName
+                var botMgr2 = require('./services/botManager')
+                var resolvedName2 = botMgr2.resolveGroupSearchName(rawGroupId)
+                if (resolvedName2) {
+                  groupName = resolvedName2
                 } else {
-                  var cached = getCachedGroupName(rawGroupId)
-                  if (cached) {
-                    groupName = cached
+                  var cached2 = botMgr2.getCachedGroupName(rawGroupId)
+                  if (cached2) {
+                    groupName = cached2
                   } else {
-                    var contact = await chatService.getContact(rawGroupId)
-                    if (contact) {
-                      groupName = contact.remark || contact.nickName || rawGroupId
+                    var contact2 = await chatService.getContact(rawGroupId)
+                    if (contact2) {
+                      groupName = contact2.remark || contact2.nickName || rawGroupId
                     }
                     if ((!groupName || groupName === rawGroupId) && rawGroupId.includes('@chatroom')) {
-                      var avatarInfo = await chatService.getContactAvatar(rawGroupId)
-                      if (avatarInfo?.displayName && avatarInfo.displayName !== rawGroupId) {
-                        groupName = avatarInfo.displayName
+                      var avatarInfo2 = await chatService.getContactAvatar(rawGroupId)
+                      if (avatarInfo2?.displayName && avatarInfo2.displayName !== rawGroupId) {
+                        groupName = avatarInfo2.displayName
                       }
                     }
                   }
                 }
+                // 群回执同样需 wxid（@chatroom），数字 id 经身份库转换
+                var groupIdentity = botMgr2.resolveIdentityByNumeric(rawGroupId)
+                if (groupIdentity && groupIdentity.wxid) {
+                  sessionId = groupIdentity.wxid
+                }
               } catch {}
               console.log('[App] Bot sending group msg to "' + groupName + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawGroupId + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, groupName, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, sessionId)
               console.log('[App] Bot sendMessage result:', result)
+              // 回传真实 SendAck 回执（messageId/ack/server_id）给 OneBot 客户端
+              try { require('./services/botManager').resolveSendAck(msg.botId, msg.echo, result) } catch {}
             } else if (msg.action === 'send_msg') {
               var rawTarget = params.group_id || params.user_id || params.target || ''
               var target = rawTarget
+              var sessionId = rawTarget
               if (params.group_id) {
                 try {
-                  var { resolveGroupSearchName, getCachedGroupName } = require('./services/botManager')
-                  var resolvedGroupName = resolveGroupSearchName(params.group_id)
-                  if (resolvedGroupName) {
-                    target = resolvedGroupName
+                  var botMgr3 = require('./services/botManager')
+                  var resolvedGroupName3 = botMgr3.resolveGroupSearchName(params.group_id)
+                  if (resolvedGroupName3) {
+                    target = resolvedGroupName3
                   } else {
-                    var cachedGroupName = getCachedGroupName(params.group_id)
-                    if (cachedGroupName) {
-                      target = cachedGroupName
+                    var cachedGroupName3 = botMgr3.getCachedGroupName(params.group_id)
+                    if (cachedGroupName3) {
+                      target = cachedGroupName3
                     } else {
-                      var gContact = await chatService.getContact(params.group_id)
-                      if (gContact) target = gContact.remark || gContact.nickName || rawTarget
+                      var gContact3 = await chatService.getContact(params.group_id)
+                      if (gContact3) target = gContact3.remark || gContact3.nickName || rawTarget
                       if ((!target || target === rawTarget) && params.group_id.includes('@chatroom')) {
-                        var gAvatarInfo = await chatService.getContactAvatar(params.group_id)
-                        if (gAvatarInfo?.displayName && gAvatarInfo.displayName !== rawTarget) {
-                          target = gAvatarInfo.displayName
+                        var gAvatarInfo3 = await chatService.getContactAvatar(params.group_id)
+                        if (gAvatarInfo3?.displayName && gAvatarInfo3.displayName !== rawTarget) {
+                          target = gAvatarInfo3.displayName
                         }
                       }
                     }
                   }
+                  // 群回执需 wxid（@chatroom），数字 id 经身份库转换
+                  var gIdentity3 = botMgr3.resolveIdentityByNumeric(params.group_id)
+                  if (gIdentity3 && gIdentity3.wxid) sessionId = gIdentity3.wxid
                 } catch {}
               } else if (params.user_id) {
                 try {
-                  var { resolvePrivateSearchName } = require('./services/botManager')
-                  var resolvedUserName = resolvePrivateSearchName(params.user_id)
-                  if (resolvedUserName) {
-                    target = resolvedUserName
+                  var botMgr4 = require('./services/botManager')
+                  var resolvedUserName4 = botMgr4.resolvePrivateSearchName(params.user_id)
+                  if (resolvedUserName4) {
+                    target = resolvedUserName4
                   }
+                  // 私聊回执需 wxid，数字 id 经身份库转换
+                  var pIdentity4 = botMgr4.resolveIdentityByNumeric(params.user_id)
+                  if (pIdentity4 && pIdentity4.wxid) sessionId = pIdentity4.wxid
                 } catch {}
               }
               console.log('[App] Bot sending msg to "' + target + '"'+ (preparedVideo ? ' [VIDEO]' : preparedImage ? ' [IMAGE]' : '') + ' (from ' + rawTarget + '): ' + content.substring(0, 50))
-              var result = await sender.sendMessage(content, target, preparedImage?.imagePath, undefined, preparedVideo?.videoPath)
+              var result = await sender.sendMessage(content, target, preparedImage?.imagePath, undefined, preparedVideo?.videoPath, sessionId)
               console.log('[App] Bot sendMessage result:', result)
+              // 回传真实 SendAck 回执（messageId/ack/server_id）给 OneBot 客户端
+              try { require('./services/botManager').resolveSendAck(msg.botId, msg.echo, result) } catch {}
             }
           } finally {
             if (preparedImage) { scheduleImageCleanup(preparedImage.imagePath) }

@@ -21,8 +21,9 @@ export interface IPlatformSender {
     contactName?: string,
     imagePath?: string,
     atMentions?: Array<{ wxid: string; name: string }>,
-    videoPath?: string
-  ): Promise<{ success: boolean; error?: string; method: string }>
+    videoPath?: string,
+    sessionId?: string
+  ): Promise<{ success: boolean; error?: string; method: string; ack?: string; serverId?: number; messageId?: string }>
   sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress>
   cancelPending(): number
   getProgress(): SendProgress

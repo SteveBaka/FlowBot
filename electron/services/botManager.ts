@@ -456,20 +456,23 @@ async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promis
       entry.error = 'Max reconnect attempts reached'
     })
 
-    client.on('api', (request: { action: string; params?: any; echo?: any }) => {
+    client.on('api', async (request: { action: string; params?: any; echo?: any }) => {
       log(`BotManager: Bot "${cfg.name}" received API: ${request.action}`)
       // 外部 server 发来的 API 请求 → 转发到 onMessageCallback
+      // echo 缺失时生成 requestId，供发送完成回填真实 messageId/ack（SendAck 回执透传）
+      const echo = request.echo ?? `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
       if (onMessageCallback) {
         onMessageCallback({
           action: request.action,
           botId: cfg.id,
           botName: cfg.name,
-          params: request.params || {}
+          params: request.params || {},
+          echo
         })
       }
-      // 返回响应
+      // 返回响应（send 系列等待异步发送完成，回传真实 messageId/ack）
       try {
-        const result = handleApiAction(request.action, request.params || {})
+        const result = await handleApiAction(request.action, request.params || {}, cfg.id, echo)
         client.sendResponse({
           retcode: 0,
           status: 'ok',
@@ -610,7 +613,43 @@ export function getBotStatus(): Array<{
   return result
 }
 
-function handleApiAction(action: string, params: any): any {
+/** SendAck 回执透传：send 系列 API 等待异步发送完成（main.ts handler 回填），
+ *  超时回退旧行为（假 message_id），避免 OneBot 请求挂死。 */
+const SEND_ACK_WAIT_MS = 15000
+const sendAckWaiters = new Map<string, { resolve: (v: any) => void; timer: NodeJS.Timeout }>()
+
+function waitSendAck(botId: string, echo: string): Promise<any> {
+  return new Promise((resolve) => {
+    const key = `${botId}:${echo}`
+    const timer = setTimeout(() => {
+      sendAckWaiters.delete(key)
+      resolve({ message_id: Date.now() })
+    }, SEND_ACK_WAIT_MS)
+    sendAckWaiters.set(key, { resolve, timer })
+  })
+}
+
+/** 发送完成回填（由 main.ts 的 OneBot handler 在 sender.sendMessage 后调用） */
+export function resolveSendAck(
+  botId: string,
+  echo: string | undefined,
+  result: { success: boolean; messageId?: string; ack?: string; serverId?: number; error?: string }
+): void {
+  if (!echo) return
+  const key = `${botId}:${echo}`
+  const waiter = sendAckWaiters.get(key)
+  if (!waiter) return
+  clearTimeout(waiter.timer)
+  sendAckWaiters.delete(key)
+  waiter.resolve({
+    message_id: result.messageId || `local_${Date.now()}`,
+    ...(result.ack ? { ack: result.ack } : {}),
+    ...(result.serverId ? { server_id: result.serverId } : {}),
+    ...(result.error ? { error: result.error } : {})
+  })
+}
+
+async function handleApiAction(action: string, params: any, botId: string, echo: string): Promise<any> {
   switch (action) {
     case 'get_status':
       return { online: true, good: true, client_count: bots.size, self_id: 'WeFlow' }
@@ -625,8 +664,8 @@ function handleApiAction(action: string, params: any): any {
     case 'send_private_msg':
     case 'send_group_msg':
     case 'send_msg':
-      // 消息发送已在 onMessageCallback 中处理
-      return { message_id: Date.now() }
+      // 消息发送已在 onMessageCallback（main.ts handler）中处理；等待真实回执
+      return await waitSendAck(botId, echo)
     case 'get_msg':
       return { message: null }
     default:

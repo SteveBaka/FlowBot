@@ -3007,7 +3007,7 @@ class HttpService {
       }
 
       const sender = getEnhancedMessageSender()
-      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined, atMentions, videoPath)
+      const result = await sender.sendMessage(content, displayName, targetImagePath || undefined, atMentions, videoPath, sessionId)
 
       if (targetImagePath) {
         this.scheduleTempImageCleanup(targetImagePath)
@@ -3019,11 +3019,15 @@ class HttpService {
       if (result.success) {
         this.sendJson(res, {
           success: true,
-          message_id: `local_${Date.now()}`,
+          // 有真实 WCDB messageId（serverId）时优先返回；否则回退本地时间戳（与现状一致）
+          message_id: (result as any).messageId || `local_${Date.now()}`,
+          ...((result as any).ack ? { ack: (result as any).ack } : {}),
+          ...((result as any).serverId ? { server_id: (result as any).serverId } : {}),
           timestamp: Date.now(),
         })
       } else {
-        this.sendError(res, 500, result.error || 'Failed to send message')
+        // 失败时带 ack 状态（如 ack_timeout），消费方可区分"卡框超时"vs"其他发送错误"
+        this.sendError(res, 500, result.error || 'Failed to send message', (result as any).ack ? { ack: (result as any).ack } : undefined)
       }
     } catch (error) {
       console.error('[HttpService] Linux send error:', error)
@@ -3581,7 +3585,24 @@ class HttpService {
                 'sendFailureThreshold',
                 'sendCooldownMs',
                 'sendBackoffBaseMs',
-                'imagePasteCapMs'
+                'imagePasteCapMs',
+                // SendAck 媒体回执（WebUI「发送管理」页读写）
+                'sendAckEnabled',
+                'sendAckUseEventMonitor',
+                'sendAckPollIntervalMs',
+                'sendAckTimeoutMsImage',
+                'sendAckTimeoutMsVideo',
+                'sendAckExtendWaitMs',
+                'sendAckRetryAction',
+                'sendAckImageFailOnTimeout',
+                'sendAckImageMaxRetries',
+                'sendAckVideoFailOnTimeout',
+                'sendAckVideoMaxRetries',
+                'sendAckRequireServerId',
+                'sendAckInputClearProbeEnabled',
+                'sendAckTimeoutPerMbMs',
+                'sendAckTimeoutMaxMs',
+                'sendAckProbeDiffThreshold'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {
@@ -3785,10 +3806,10 @@ class HttpService {
   /**
    * 发送错误响应
    */
-  private sendError(res: http.ServerResponse, code: number, message: string): void {
+  private sendError(res: http.ServerResponse, code: number, message: string, extra?: Record<string, unknown>): void {
     res.setHeader('Content-Type', 'application/json; charset=utf-8')
     res.writeHead(code)
-    res.end(JSON.stringify({ error: message }))
+    res.end(JSON.stringify(extra ? { error: message, ...extra } : { error: message }))
   }
 }
 
