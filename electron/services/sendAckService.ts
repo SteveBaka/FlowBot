@@ -210,6 +210,10 @@ export class SendAckService {
       if (!res.success || !Array.isArray(res.messages)) {
         return { matched: false }
       }
+      // 收集所有匹配候选，选 createTime 与 t0 绝对差最小的行。
+      // 同会话连发同类媒体时窗口内可能有多条匹配（getNewMessages 按时间线排序），
+      // "最近落库的才是本条"——clientTag 语义落地为最近时间差，避免误配到前一条。
+      let best: { matched: boolean; row?: any; diff: number } = { matched: false, diff: Infinity }
       for (const msg of res.messages) {
         const isSend = msg.isSend
         if (isSend !== 1) continue
@@ -226,9 +230,12 @@ export class SendAckService {
         if (createTime < minCreateTime) continue
         // 旁证：imageDatName/md5（可选，不强制——微信会重编码图片，md5 会变）
         if (fp.imageDatName && msg.imageDatName && msg.imageDatName !== fp.imageDatName) continue
-        return { matched: true, row: msg }
+        const diff = Math.abs(createTime - Math.floor(fp.t0 / 1000))
+        if (!best.matched || diff < best.diff) {
+          best = { matched: true, row: msg, diff }
+        }
       }
-      return { matched: false }
+      return best.matched ? { matched: true, row: best.row } : { matched: false }
     } catch (e) {
       warn(`queryAck 异常: ${String(e)}`)
       return { matched: false }

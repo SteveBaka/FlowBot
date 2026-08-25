@@ -3026,7 +3026,8 @@ class HttpService {
           timestamp: Date.now(),
         })
       } else {
-        this.sendError(res, 500, result.error || 'Failed to send message')
+        // 失败时带 ack 状态（如 ack_timeout），消费方可区分"卡框超时"vs"其他发送错误"
+        this.sendError(res, 500, result.error || 'Failed to send message', (result as any).ack ? { ack: (result as any).ack } : undefined)
       }
     } catch (error) {
       console.error('[HttpService] Linux send error:', error)
@@ -3788,10 +3789,10 @@ class HttpService {
   /**
    * 发送错误响应
    */
-  private sendError(res: http.ServerResponse, code: number, message: string): void {
+  private sendError(res: http.ServerResponse, code: number, message: string, extra?: Record<string, unknown>): void {
     res.setHeader('Content-Type', 'application/json; charset=utf-8')
     res.writeHead(code)
-    res.end(JSON.stringify({ error: message }))
+    res.end(JSON.stringify(extra ? { error: message, ...extra } : { error: message }))
   }
 }
 
