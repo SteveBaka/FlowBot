@@ -112,7 +112,7 @@ export class SendAckService {
     // 首次立即查一次（小图可能已落库）
     const first = await this.queryAck(fp)
     if (first.matched) {
-      return this.finish(first, Date.now() - t0)
+      return this.finish(first, Date.now() - t0, fp)
     }
 
     // 事件监听通道（主）：message 表变更 → 立即查
@@ -169,7 +169,7 @@ export class SendAckService {
 
     const waitedMs = Date.now() - t0
     if (last.matched) {
-      return this.finish(last, waitedMs)
+      return this.finish(last, waitedMs, fp)
     }
 
     // 超时未确认 → 兜底动作（§五）
@@ -211,7 +211,7 @@ export class SendAckService {
   }
 
   /** 命中后组装结果 */
-  private finish(match: { matched: boolean; row?: any }, waitedMs: number): SendAckResult {
+  private finish(match: { matched: boolean; row?: any }, waitedMs: number, fp?: SendAckFingerprint): SendAckResult {
     const row = match.row || {}
     const serverIdRaw = String(row.serverIdRaw || row.serverId || '')
     const serverId = Number(row.serverId || 0)
@@ -219,6 +219,7 @@ export class SendAckService {
 
     if (requireServerId && (!serverIdRaw || serverIdRaw === '0')) {
       // 严格模式：serverId=0 不算成功 → 继续等（但这里只在首次匹配时被调用；严格模式交给调用方处理）
+      log(`回执命中(submitted): session=${fp?.sessionId} kind=${fp?.kind} serverId=0（requireServerId 严格模式，等待 serverId） waitedMs=${waitedMs}ms`)
       return {
         success: true,
         status: 'submitted',
@@ -231,9 +232,11 @@ export class SendAckService {
     }
 
     const hasServerId = serverIdRaw && serverIdRaw !== '0'
+    const status = hasServerId ? 'acked' : 'submitted'
+    log(`回执命中(${status}): session=${fp?.sessionId} kind=${fp?.kind} localType=${row.localType} serverId=${serverIdRaw || '0'} waitedMs=${waitedMs}ms`)
     return {
       success: true,
-      status: hasServerId ? 'acked' : 'submitted',
+      status,
       serverId: serverId || undefined,
       serverIdRaw: serverIdRaw || undefined,
       localType: row.localType,
@@ -259,7 +262,7 @@ export class SendAckService {
         await new Promise((r) => setTimeout(r, extendWait))
         const retry = await this.queryAck(fp)
         if (retry.matched) {
-          return this.finish(retry, waitedMs + extendWait)
+          return this.finish(retry, waitedMs + extendWait, fp)
         }
         if (!failOnTimeout) {
           return { success: true, status: 'extended_timeout', waitedMs: waitedMs + extendWait, error: 'ACK 超时但疑似已发出（输入框已清空）' }
@@ -297,7 +300,7 @@ export class SendAckService {
           await new Promise((r) => setTimeout(r, this.cfgNum('sendAckPollIntervalMs', 500)))
         }
         if (reAck.matched) {
-          return this.finish(reAck, Date.now() - fp.t0)
+          return this.finish(reAck, Date.now() - fp.t0, fp)
         }
       }
       warn(`二次 Enter ${attempts} 次均未获得 WCDB 回执，可能卡框或微信异常`)
