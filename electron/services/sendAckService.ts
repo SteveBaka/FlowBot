@@ -28,6 +28,7 @@ export interface SendAckFingerprint {
   imageDatName?: string      // 源图片 dat 名（WCDB packed_info 里的 32 位 hex，旁证，图片专用）
   sourceMd5?: string         // 源文件 md5（旁证，非主键；视频大文件不计算，跳过）
   clientTag?: string         // 可选：队列消息 id，防并发误配
+  sizeMb?: number            // 媒体体积（MB）：>0 时超时按体积自适应加档（sendAckTimeoutPerMbMs）
 }
 
 export type SendAckStatus = 'submitted' | 'acked' | 'ack_timeout' | 'extended_timeout' | 'skipped' | 'error'
@@ -50,8 +51,8 @@ export interface SendAckDeps {
   addDbMonitorListener?: (listener: (type: string, json: string) => void) => () => void
   /** 二次 Enter 兜底执行器（由 linux.ts 注入，避免循环依赖） */
   doReEnter?: () => Promise<boolean>
-  /** 输入框探针：图片是否仍在输入框（undefined 表示探针不可用） */
-  probeImageInInput?: () => Promise<boolean>
+  /** 输入框探针：媒体是否仍在输入框。true=仍在（可放心 Enter）；false=已离开（疑似已发出，禁止 Enter）；undefined=探针不可用（保守 Enter） */
+  probeImageInInput?: () => Promise<boolean | undefined>
 }
 
 const log = (msg: string) => console.log(`[SendAck] ${msg}`)
@@ -128,7 +129,12 @@ export class SendAckService {
     }
 
     const isVideo = fp.kind === 'video'
-    const timeoutMs = isVideo ? this.cfgNum('sendAckTimeoutMsVideo', 10000) : this.cfgNum('sendAckTimeoutMsImage', 5000)
+    // 超时：kind 基准 + 体积自适应（大图/大视频微信压缩处理更久，Enter→落库延迟随体积增长）
+    const baseTimeout = isVideo ? this.cfgNum('sendAckTimeoutMsVideo', 10000) : this.cfgNum('sendAckTimeoutMsImage', 5000)
+    const timeoutMs = this.computeTimeout(baseTimeout, fp.sizeMb)
+    if (timeoutMs !== baseTimeout) {
+      log(`超时按体积自适应: ${baseTimeout} → ${timeoutMs}ms (sizeMb=${fp.sizeMb?.toFixed(2)})`)
+    }
     const pollInterval = this.cfgNum('sendAckPollIntervalMs', 500)
     const useEvent = this.cfgBool('sendAckUseEventMonitor', true)
 
@@ -197,6 +203,15 @@ export class SendAckService {
 
     // 超时未确认 → 兜底动作（§五）
     return this.handleTimeout(fp, timeoutMs, waitedMs)
+  }
+
+  /** 超时按体积自适应：base + 每超出 1MB 加 sendAckTimeoutPerMbMs（默认 800ms/MB），封顶 sendAckTimeoutMaxMs（默认 20000） */
+  private computeTimeout(base: number, sizeMb?: number): number {
+    const perMb = this.cfgNum('sendAckTimeoutPerMbMs', 800)
+    if (!sizeMb || sizeMb <= 1 || perMb <= 0) return base
+    const maxMs = this.cfgNum('sendAckTimeoutMaxMs', 20000)
+    const total = base + Math.ceil(sizeMb - 1) * perMb
+    return Math.min(total, Math.max(base, maxMs))
   }
 
   /** 查询一次回执 */
@@ -288,10 +303,13 @@ export class SendAckService {
     const label = kindLabel(fp.kind)
 
     // 探针可用时：区分"媒体已离开输入框"（疑似已发出，WCDB 延迟）vs "媒体仍在"（卡框）
-    if (probeEnabled && this.deps.probeImageInInput) {
-      const inInput = await this.deps.probeImageInInput()
-      if (!inInput) {
-        // 媒体已离开输入框 → 疑似已发出 → 扩展等待再查一次
+    const probeAvailable = probeEnabled && typeof this.deps.probeImageInInput === 'function'
+    if (probeAvailable) {
+      const inInput = await this.deps.probeImageInInput!()
+      if (inInput === undefined) {
+        log('输入框探针不可用（抓屏失败/被遮挡），退回保守处理')
+      } else if (!inInput) {
+        // 媒体已离开输入框 → 疑似已发出 → 扩展等待再查一次（绝不 Enter，防误发）
         warn(`超时未确认但输入框已清空（疑似已发出，WCDB 延迟），扩展等待 ${extendWait}ms`)
         await new Promise((r) => setTimeout(r, extendWait))
         const retry = await this.queryAck(fp)
@@ -301,7 +319,11 @@ export class SendAckService {
         if (!failOnTimeout) {
           return { success: true, status: 'extended_timeout', waitedMs: waitedMs + extendWait, error: 'ACK 超时但疑似已发出（输入框已清空）' }
         }
+        // failOnTimeout=true：输入框已空时 Enter 无意义（无内容可发）也不安全，直接按超时失败告警
+        warn(`扩展等待后仍未确认且输入框已空，不执行二次 Enter（无内容可发）`)
+        return { success: false, status: 'ack_timeout', waitedMs: waitedMs + extendWait, error: `${label}发送超时未确认，输入框已清空（疑似已发出但未落库）` }
       }
+      log('探针判定媒体仍在输入框（卡框），进入兜底动作')
     }
 
     if (retryAction === 'none' || maxRetries <= 0) {
@@ -313,6 +335,21 @@ export class SendAckService {
 
     // 二次 Enter 兜底（re-enter）——用户决策：不清空直接再 Enter
     if (retryAction === 're-enter' && this.deps.doReEnter) {
+      // 防误发保护（§5.2 步骤 2）：每次 Enter 前探输入框——已空则绝不 Enter（会把用户残留内容误发）
+      if (probeAvailable && this.deps.probeImageInInput) {
+        const still = await this.deps.probeImageInInput()
+        if (still === undefined) {
+          log('二次 Enter 前探针不可用，保守 Enter')
+        } else if (!still) {
+          warn('二次 Enter 前探针判定输入框已空，放弃 Enter（防误发残留内容），转扩展等待')
+          await new Promise((r) => setTimeout(r, extendWait))
+          const retry = await this.queryAck(fp)
+          if (retry.matched) {
+            return this.finish(retry, waitedMs + extendWait, fp)
+          }
+          return { success: true, status: 'extended_timeout', waitedMs: waitedMs + extendWait, error: 'ACK 超时但输入框已空（疑似已发出，已阻止二次 Enter）' }
+        }
+      }
       let attempts = 0
       while (attempts <= maxRetries) {
         attempts++

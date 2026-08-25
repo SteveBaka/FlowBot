@@ -109,6 +109,9 @@ interface ConfigSchema {
   sendAckVideoMaxRetries: number
   sendAckRequireServerId: boolean
   sendAckInputClearProbeEnabled: boolean
+  sendAckTimeoutPerMbMs: number
+  sendAckTimeoutMaxMs: number
+  sendAckProbeDiffThreshold: number
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
   httpApiEnabled: boolean
@@ -314,6 +317,9 @@ export class ConfigService {
       sendAckVideoMaxRetries: 1,
       sendAckRequireServerId: false,
       sendAckInputClearProbeEnabled: false,
+      sendAckTimeoutPerMbMs: 800,
+      sendAckTimeoutMaxMs: 20000,
+      sendAckProbeDiffThreshold: 0.05,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

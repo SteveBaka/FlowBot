@@ -3585,7 +3585,24 @@ class HttpService {
                 'sendFailureThreshold',
                 'sendCooldownMs',
                 'sendBackoffBaseMs',
-                'imagePasteCapMs'
+                'imagePasteCapMs',
+                // SendAck 媒体回执（WebUI「发送管理」页读写）
+                'sendAckEnabled',
+                'sendAckUseEventMonitor',
+                'sendAckPollIntervalMs',
+                'sendAckTimeoutMsImage',
+                'sendAckTimeoutMsVideo',
+                'sendAckExtendWaitMs',
+                'sendAckRetryAction',
+                'sendAckImageFailOnTimeout',
+                'sendAckImageMaxRetries',
+                'sendAckVideoFailOnTimeout',
+                'sendAckVideoMaxRetries',
+                'sendAckRequireServerId',
+                'sendAckInputClearProbeEnabled',
+                'sendAckTimeoutPerMbMs',
+                'sendAckTimeoutMaxMs',
+                'sendAckProbeDiffThreshold'
             ]
             const config: Record<string, any> = {}
             for (const key of keys) {

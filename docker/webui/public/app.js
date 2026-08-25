@@ -1028,6 +1028,7 @@ var SendManagerPage = {
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
     var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500 })
+    var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 5000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 20000, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
       queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
@@ -1080,6 +1081,18 @@ var SendManagerPage = {
         bpParams.cooldownMs = d.sendCooldownMs || 10000
         bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
         bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
+        ackParams.enabled = d.sendAckEnabled !== false
+        ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
+        ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 5000
+        ackParams.timeoutVideoMs = d.sendAckTimeoutMsVideo || 10000
+        ackParams.extendWaitMs = d.sendAckExtendWaitMs || 10000
+        ackParams.timeoutPerMbMs = d.sendAckTimeoutPerMbMs || 800
+        ackParams.timeoutMaxMs = d.sendAckTimeoutMaxMs || 20000
+        ackParams.maxRetriesImage = d.sendAckImageMaxRetries === undefined ? 1 : d.sendAckImageMaxRetries
+        ackParams.maxRetriesVideo = d.sendAckVideoMaxRetries === undefined ? 1 : d.sendAckVideoMaxRetries
+        ackParams.failOnTimeoutImage = d.sendAckImageFailOnTimeout !== false
+        ackParams.failOnTimeoutVideo = d.sendAckVideoFailOnTimeout !== false
+        ackParams.retryAction = d.sendAckRetryAction || 're-enter'
         custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
         initParams()
       }
@@ -1154,7 +1167,19 @@ var SendManagerPage = {
           sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
           sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
           sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
-          imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500)
+          imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
+          sendAckEnabled: !!ackParams.enabled,
+          sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
+          sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 5000),
+          sendAckTimeoutMsVideo: Math.max(500, Number(ackParams.timeoutVideoMs) || 10000),
+          sendAckExtendWaitMs: Math.max(0, Number(ackParams.extendWaitMs) || 10000),
+          sendAckTimeoutPerMbMs: Math.max(0, Number(ackParams.timeoutPerMbMs) || 800),
+          sendAckTimeoutMaxMs: Math.max(1000, Number(ackParams.timeoutMaxMs) || 20000),
+          sendAckImageMaxRetries: Math.max(0, Number(ackParams.maxRetriesImage) || 1),
+          sendAckVideoMaxRetries: Math.max(0, Number(ackParams.maxRetriesVideo) || 1),
+          sendAckImageFailOnTimeout: !!ackParams.failOnTimeoutImage,
+          sendAckVideoFailOnTimeout: !!ackParams.failOnTimeoutVideo,
+          sendAckRetryAction: ackParams.retryAction
         })
       })
       saving.value = false
@@ -1235,7 +1260,7 @@ var SendManagerPage = {
       mode: mode, params: params, status: status, saving: saving, autoDowngrade: autoDowngrade,
       mergeEnabled: mergeEnabled, dedupEnabled: dedupEnabled, priorityEnabled: priorityEnabled,
       backpressureEnabled: backpressureEnabled, dynamicIntervalEnabled: dynamicIntervalEnabled, bpParams: bpParams,
-      clearingQueue: clearingQueue, clearingPinyin: clearingPinyin,
+      clearingQueue: clearingQueue, clearingPinyin: clearingPinyin, ackParams: ackParams,
       profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
       clearQueue: clearQueue, clearPinyinCache: clearPinyinCache,
       onModeChange: onModeChange, fmtTime: fmtTime, stepSummary: stepSummary
@@ -1304,6 +1329,32 @@ var SendManagerPage = {
     '<div class="form-hint">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
     '<div class="form-row"><label>大图粘贴等待上限(ms)</label><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs" style="width:110px;text-align:right"></div>' +
     '<div class="form-hint">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>媒体发送回执（SendAck）</h2>' +
+    '<div class="form-row"><label>启用回执</label><toggle-switch v-model="ackParams.enabled" /></div>' +
+    '<div class="form-hint">图片/视频发送后等待 WCDB 回执确认是否真正发出；关闭则恢复“Enter 即成功”</div>' +
+    '<div class="form-row"><label>输入框探针（防误发）</label><toggle-switch v-model="ackParams.probeEnabled" /></div>' +
+    '<div class="form-hint">超时未确认时抓屏比对输入框是否仍含媒体：已清空则判定疑似已发出、禁止二次 Enter，防误发残留内容（默认关，需 xwd 可用）</div>' +
+    '<div class="form-row"><label>图片回执超时(ms)</label><input type="number" min="500" step="500" v-model.number="ackParams.timeoutImageMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">图片提交超时（默认 5000）；大图按体积自动加档</div>' +
+    '<div class="form-row"><label>视频回执超时(ms)</label><input type="number" min="500" step="500" v-model.number="ackParams.timeoutVideoMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">视频提交超时（默认 10000）</div>' +
+    '<div class="form-row"><label>体积加档(ms/MB)</label><input type="number" min="0" step="100" v-model.number="ackParams.timeoutPerMbMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">媒体每超 1MB 追加的超时（默认 800），0 关闭自适应</div>' +
+    '<div class="form-row"><label>超时封顶(ms)</label><input type="number" min="1000" step="1000" v-model.number="ackParams.timeoutMaxMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">自适应超时上限（默认 20000）</div>' +
+    '<div class="form-row"><label>扩展等待(ms)</label><input type="number" min="0" step="1000" v-model.number="ackParams.extendWaitMs" style="width:110px;text-align:right"></div>' +
+    '<div class="form-hint">探针判定“已发出但 WCDB 未确认”后的等待（默认 10000）</div>' +
+    '<div class="form-row"><label>图片失败重试</label><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesImage" style="width:110px;text-align:right"></div>' +
+    '<div class="form-row"><label>视频失败重试</label><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesVideo" style="width:110px;text-align:right"></div>' +
+    '<div class="form-row"><label>超时按失败处理(图)</label><toggle-switch v-model="ackParams.failOnTimeoutImage" /></div>' +
+    '<div class="form-row"><label>超时按失败处理(视频)</label><toggle-switch v-model="ackParams.failOnTimeoutVideo" /></div>' +
+    '<div class="form-row"><label>兜底动作</label>' +
+    '<select v-model="ackParams.retryAction"><option value="re-enter">二次 Enter（不清空，默认）</option><option value="clear-repaste">清空重贴（旧方案）</option><option value="none">只告警</option></select>' +
+    '</div>' +
+    '<div class="form-hint">未确认时的兜底动作；重试次数=对应 kind 的失败重试+1</div>' +
     '</div>' +
 
     '<div class="card">' +
