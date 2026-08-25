@@ -896,16 +896,15 @@ export class LinuxSender implements IPlatformSender {
 
       if (result.success) {
         const typeLabel = item.videoPath ? 'video' : item.imagePath ? 'image' : 'text'
-        log(`Message ${item.id} sent successfully`)
         log(`Message ${item.id} (${typeLabel}) sent successfully`)
 
-        // 图片发送回执（SendAck 兜底，IMAGE-SEND-ACK-FALLBACK.md §四/§五）：
-        // 图片任务在 resolve 前等待 WCDB 回执（事件监听 ~2.5s / 轮询 5s 超时），
-        // 未确认则二次 Enter 兜底。回执期间队列占用 = 防下一条顶走卡框图片（期望行为）。
+        // 媒体发送回执（SendAck 兜底，IMAGE-SEND-ACK-FALLBACK.md §四/§五）：
+        // 图片/视频任务在 resolve 前等待 WCDB 回执（事件监听 ~2.5s / 轮询按 kind 超时），
+        // 未确认则二次 Enter 兜底。回执期间队列占用 = 防下一条顶走卡框媒体（期望行为）。
         let ackResult: { success: boolean; status?: string; serverId?: number; messageId?: string; error?: string } | null = null
-        if (item.imagePath && item.sessionId) {
+        if ((item.imagePath || item.videoPath) && item.sessionId) {
           try {
-            ackResult = await this.waitForImageAck(item)
+            ackResult = await this.waitForAck(item)
           } catch (e: any) {
             warn(`SendAck 异常（不阻塞发送）: ${e?.message || String(e)}`)
           }
@@ -945,11 +944,12 @@ export class LinuxSender implements IPlatformSender {
   }
 
   /**
-   * 图片发送回执（SendAck）：Enter 后等待 WCDB 确认 isSend 行（IMAGE-SEND-ACK-FALLBACK.md §四/§五）。
-   * 事件监听为主（chatService.addDbMonitorListener）+ 轮询降级；超时未确认 → 二次 Enter（不清空）兜底。
+   * 媒体发送回执（SendAck）：Enter 后等待 WCDB 确认 isSend 行（IMAGE-SEND-ACK-FALLBACK.md §四/§五）。
+   * 按任务类型取 kind（图片/视频），事件监听为主（chatService.addDbMonitorListener）+ 轮询降级；
+   * 超时未确认 → 二次 Enter（不清空）兜底。视频大文件不计算 md5（避免读盘耗时，旁证非主判据）。
    */
-  private async waitForImageAck(item: QueuedMessage): Promise<SendAckResult> {
-    // 计算源图片 dat 名/md5 作旁证（尽力而为，取不到不影响主判据）
+  private async waitForAck(item: QueuedMessage): Promise<SendAckResult> {
+    // 计算源文件旁证（尽力而为，取不到不影响主判据；视频大文件跳过 md5）
     let imageDatName: string | undefined
     let sourceMd5: string | undefined
     if (item.imagePath) {
@@ -957,7 +957,6 @@ export class LinuxSender implements IPlatformSender {
         const fs = require('fs')
         const crypto = require('crypto')
         sourceMd5 = crypto.createHash('md5').update(fs.readFileSync(item.imagePath)).digest('hex')
-        const base = require('path').basename(item.imagePath)
         // dat 名：微信以 md5 命名缓存文件，源文件不一定有；留空由旁证逻辑跳过
         imageDatName = undefined
       } catch {}
@@ -965,7 +964,7 @@ export class LinuxSender implements IPlatformSender {
 
     const fp: SendAckFingerprint = {
       sessionId: item.sessionId || '',
-      kind: 'image',
+      kind: item.videoPath ? 'video' : 'image',
       t0: this.lastSendTime || Date.now(),
       imageDatName,
       sourceMd5,
@@ -997,7 +996,7 @@ export class LinuxSender implements IPlatformSender {
       doReEnter
     })
 
-    return ackSvc.waitForImageAck(fp)
+    return ackSvc.waitForAck(fp)
   }
 
   async sendBatch(tasks: Array<{ sessionId: string; content: string }>): Promise<SendProgress> {

@@ -1,27 +1,32 @@
 /**
- * sendAckService — 图片发送回执（SendAck）兜底模块
+ * sendAckService — 媒体发送回执（SendAck）兜底模块
  *
  * 定位（IMAGE-SEND-ACK-FALLBACK.md）：
- * 图片发送（GUI 自动化 xdotool 粘贴 + Enter）后，用 WCDB 回执确认图片是否真正发出，
- * 未确认则触发兜底动作（二次 Enter，不清空），确保图片能正常发送出去。
+ * 图片/视频发送（GUI 自动化 xdotool 粘贴 + Enter）后，用 WCDB 回执确认是否真正发出，
+ * 未确认则触发兜底动作（二次 Enter，不清空），确保媒体能正常发送出去。
  *
  * 设计要点：
  * - 事件监听为主（chatService.addDbMonitorListener，~2.5s 确认）+ 500ms 轮询降级双通道；
- * - 指纹匹配：sessionId + kind + 时间窗（createTime >= t0），imageDatName/md5 作旁证；
+ * - 指纹匹配：sessionId + kind + 时间窗（createTime >= t0-2s，对齐查询窗口），imageDatName/md5 作旁证；
  * - 状态机：submitted（isSend=1，主判据）→ acked（serverId≠0，异步补充）→ ack_timeout（兜底）；
- * - 兜底动作：二次 Enter（不清空）+ 防误发保护（探针"输入框已空则转扩展等待"）。
+ * - 兜底动作：二次 Enter（不清空）+ 防误发保护（探针"输入框已空则转扩展等待"）；
+ * - 超时/重试配置按 kind 分化（sendAck*Image* / sendAck*Video*），视频转码更慢、默认超时更长。
  *
  * 不 import linux.ts（避免循环依赖）；通过参数接收 getNewMessages / addDbMonitorListener 回调。
  */
 
 import { ConfigService } from './config'
 
+/** 回查窗口（秒）：Enter 往前看多久。与 messagePushService 的 lookbackSeconds=2 对齐。
+ *  微信写库时间戳可能比 Enter 早 0~2s（实测视频写库早于 GUI 响应），查询与过滤统一用它，避免误过滤。 */
+const LOOKBACK_S = 2
+
 export interface SendAckFingerprint {
   sessionId: string          // wxid（群聊为 xxx@chatroom）
   kind: 'text' | 'image' | 'video' | 'file'
   t0: number                 // Enter 按下时刻（Date.now()）
-  imageDatName?: string      // 源图片 dat 名（WCDB packed_info 里的 32 位 hex，旁证）
-  sourceMd5?: string         // 源文件 md5（旁证，非主键）
+  imageDatName?: string      // 源图片 dat 名（WCDB packed_info 里的 32 位 hex，旁证，图片专用）
+  sourceMd5?: string         // 源文件 md5（旁证，非主键；视频大文件不计算，跳过）
   clientTag?: string         // 可选：队列消息 id，防并发误配
 }
 
@@ -49,15 +54,31 @@ export interface SendAckDeps {
   probeImageInInput?: () => Promise<boolean>
 }
 
-const log = (msg: string) => console.log(`[ImageSendAck] ${msg}`)
-const warn = (msg: string) => console.warn(`[ImageSendAck] ${msg}`)
+const log = (msg: string) => console.log(`[SendAck] ${msg}`)
+const warn = (msg: string) => console.warn(`[SendAck] ${msg}`)
 
-/** 判断本地类型是否为图片（兼容高位 flag 变体） */
+/** kind → 中文标签（日志/报错用） */
+function kindLabel(kind: string): string {
+  if (kind === 'video') return '视频'
+  if (kind === 'image') return '图片'
+  if (kind === 'text') return '文本'
+  return kind
+}
+
+/** 判断本地类型是否为图片（兼容高位 flag 变体，localType & 0xFF = 3） */
 function isImageLocalType(localType: number | string | null | undefined): boolean {
   if (localType === null || localType === undefined) return false
   const n = Number(localType)
   if (!Number.isFinite(n)) return false
   return (n & 0xFF) === 3
+}
+
+/** 判断本地类型是否为视频（localType & 0xFF = 43，微信视频唯一类型；49 是文件/链接，不算） */
+function isVideoLocalType(localType: number | string | null | undefined): boolean {
+  if (localType === null || localType === undefined) return false
+  const n = Number(localType)
+  if (!Number.isFinite(n)) return false
+  return (n & 0xFF) === 43
 }
 
 export class SendAckService {
@@ -92,10 +113,11 @@ export class SendAckService {
   }
 
   /**
-   * 等待图片发送回执（主入口）。
-   * 在 doSend 返回成功后调用；resolve 前阻塞队列（期望行为，防顶走卡框图片）。
+   * 等待媒体发送回执（主入口）。
+   * 在 doSend 返回成功后调用；resolve 前阻塞队列（期望行为，防顶走卡框媒体）。
+   * 超时/重试配置按 fp.kind 分化：图片 sendAck*Image*，视频 sendAck*Video*。
    */
-  async waitForImageAck(fp: SendAckFingerprint): Promise<SendAckResult> {
+  async waitForAck(fp: SendAckFingerprint): Promise<SendAckResult> {
     const t0 = Date.now()
     if (!this.isEnabled()) {
       return { success: true, status: 'skipped', waitedMs: 0 }
@@ -105,7 +127,8 @@ export class SendAckService {
       return { success: true, status: 'skipped', waitedMs: Date.now() - t0 }
     }
 
-    const timeoutMs = this.cfgNum('sendAckTimeoutMsImage', 5000)
+    const isVideo = fp.kind === 'video'
+    const timeoutMs = isVideo ? this.cfgNum('sendAckTimeoutMsVideo', 10000) : this.cfgNum('sendAckTimeoutMsImage', 5000)
     const pollInterval = this.cfgNum('sendAckPollIntervalMs', 500)
     const useEvent = this.cfgBool('sendAckUseEventMonitor', true)
 
@@ -122,7 +145,7 @@ export class SendAckService {
       const r = await this.queryAck(fp)
       if (r.matched) {
         eventResolved = true
-        // 触发时通过 resolveAck 回调通知；waitForImageAck 的循环也会看到
+        // 触发时通过 resolveAck 回调通知；waitForAck 的循环也会看到
       }
     }
 
@@ -179,8 +202,11 @@ export class SendAckService {
   /** 查询一次回执 */
   private async queryAck(fp: SendAckFingerprint): Promise<{ matched: boolean; row?: any }> {
     try {
-      // 回查窗口：t0 往前 2s（对齐 lookbackSeconds=2），只认 Enter 之后的新行
-      const res = await this.deps.getNewMessages(fp.sessionId, Math.max(0, Math.floor(fp.t0 / 1000) - 2), 1000)
+      // 回查窗口：t0 往前 2s（对齐 lookbackSeconds=2）。
+      // 注意：微信写库时间戳可能比 Enter（t0）早 0~2s（实测视频写库早于 GUI 响应），
+      // 因此逐行过滤的下界必须与查询窗口一致（同用 LOOKBACK_S），否则会误过滤已落库的行。
+      const minCreateTime = Math.max(0, Math.floor(fp.t0 / 1000) - LOOKBACK_S)
+      const res = await this.deps.getNewMessages(fp.sessionId, minCreateTime, 1000)
       if (!res.success || !Array.isArray(res.messages)) {
         return { matched: false }
       }
@@ -188,17 +214,16 @@ export class SendAckService {
         const isSend = msg.isSend
         if (isSend !== 1) continue
         const localType = msg.localType
-        // 主判据：图片类型 + 时间窗
+        // 按 kind 匹配 localType（兼容高位 flag 变体：& 0xFF）
         if (fp.kind === 'image') {
           if (!isImageLocalType(localType)) continue
-        } else {
-          // 文本/视频/文件：类型宽松匹配（视频 43、文件 49、文本 1）
-          const n = Number(localType)
-          if (fp.kind === 'text' && (n & 0xFF) !== 1) continue
-          if (fp.kind === 'video' && (n & 0xFF) !== 43 && (n & 0xFF) !== 49) continue
+        } else if (fp.kind === 'video') {
+          if (!isVideoLocalType(localType)) continue
+        } else if (fp.kind === 'text') {
+          if ((Number(localType) & 0xFF) !== 1) continue
         }
         const createTime = Number(msg.createTime || 0)
-        if (createTime < Math.floor(fp.t0 / 1000)) continue
+        if (createTime < minCreateTime) continue
         // 旁证：imageDatName/md5（可选，不强制——微信会重编码图片，md5 会变）
         if (fp.imageDatName && msg.imageDatName && msg.imageDatName !== fp.imageDatName) continue
         return { matched: true, row: msg }
@@ -248,16 +273,18 @@ export class SendAckService {
   /** 超时兜底：二次 Enter（不清空）或扩展等待或失败 */
   private async handleTimeout(fp: SendAckFingerprint, timeoutMs: number, waitedMs: number): Promise<SendAckResult> {
     const retryAction = String(this.cfg('sendAckRetryAction') || 're-enter')
-    const failOnTimeout = this.cfgBool('sendAckImageFailOnTimeout', true)
-    const maxRetries = Math.max(0, Math.floor(this.cfgNum('sendAckImageMaxRetries', 1)))
+    const isVideo = fp.kind === 'video'
+    const failOnTimeout = isVideo ? this.cfgBool('sendAckVideoFailOnTimeout', true) : this.cfgBool('sendAckImageFailOnTimeout', true)
+    const maxRetries = Math.max(0, Math.floor(isVideo ? this.cfgNum('sendAckVideoMaxRetries', 1) : this.cfgNum('sendAckImageMaxRetries', 1)))
     const extendWait = this.cfgNum('sendAckExtendWaitMs', 10000)
     const probeEnabled = this.cfgBool('sendAckInputClearProbeEnabled', false)
+    const label = kindLabel(fp.kind)
 
-    // 探针可用时：区分"图片已离开输入框"（疑似已发出，WCDB 延迟）vs "图片仍在"（卡框）
+    // 探针可用时：区分"媒体已离开输入框"（疑似已发出，WCDB 延迟）vs "媒体仍在"（卡框）
     if (probeEnabled && this.deps.probeImageInInput) {
       const inInput = await this.deps.probeImageInInput()
       if (!inInput) {
-        // 图片已离开输入框 → 疑似已发出 → 扩展等待再查一次
+        // 媒体已离开输入框 → 疑似已发出 → 扩展等待再查一次
         warn(`超时未确认但输入框已清空（疑似已发出，WCDB 延迟），扩展等待 ${extendWait}ms`)
         await new Promise((r) => setTimeout(r, extendWait))
         const retry = await this.queryAck(fp)
@@ -274,7 +301,7 @@ export class SendAckService {
       if (!failOnTimeout) {
         return { success: true, status: 'ack_timeout', waitedMs, error: 'ACK 超时（未重发）' }
       }
-      return { success: false, status: 'ack_timeout', waitedMs, error: `图片发送 ${waitedMs}ms 未获得 WCDB 回执（sendAckRetryAction=${retryAction}）` }
+      return { success: false, status: 'ack_timeout', waitedMs, error: `${label}发送 ${waitedMs}ms 未获得 WCDB 回执（sendAckRetryAction=${retryAction}）` }
     }
 
     // 二次 Enter 兜底（re-enter）——用户决策：不清空直接再 Enter
@@ -304,7 +331,7 @@ export class SendAckService {
         }
       }
       warn(`二次 Enter ${attempts} 次均未获得 WCDB 回执，可能卡框或微信异常`)
-      return { success: false, status: 'ack_timeout', waitedMs: Date.now() - fp.t0, error: `图片发送 ${attempts} 次均未获得 WCDB 回执，可能卡框或微信异常` }
+      return { success: false, status: 'ack_timeout', waitedMs: Date.now() - fp.t0, error: `${label}发送 ${attempts} 次均未获得 WCDB 回执，可能卡框或微信异常` }
     }
 
     // clear-repaste：清空重贴（旧方案，文档标注不推荐）

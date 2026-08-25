@@ -95,15 +95,18 @@ interface ConfigSchema {
   videoMaxBytes: number
   videoPasteCapMs: number
   videoUrlTimeoutMs: number
-  // 图片发送回执（SendAck）兜底
+  // 媒体发送回执（SendAck）兜底
   sendAckEnabled: boolean
   sendAckUseEventMonitor: boolean
   sendAckPollIntervalMs: number
   sendAckTimeoutMsImage: number
+  sendAckTimeoutMsVideo: number
   sendAckExtendWaitMs: number
   sendAckRetryAction: 're-enter' | 'clear-repaste' | 'none'
   sendAckImageFailOnTimeout: boolean
   sendAckImageMaxRetries: number
+  sendAckVideoFailOnTimeout: boolean
+  sendAckVideoMaxRetries: number
   sendAckRequireServerId: boolean
   sendAckInputClearProbeEnabled: boolean
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
@@ -302,10 +305,13 @@ export class ConfigService {
       sendAckUseEventMonitor: true,
       sendAckPollIntervalMs: 500,
       sendAckTimeoutMsImage: 5000,
+      sendAckTimeoutMsVideo: 10000,
       sendAckExtendWaitMs: 10000,
       sendAckRetryAction: 're-enter',
       sendAckImageFailOnTimeout: true,
       sendAckImageMaxRetries: 1,
+      sendAckVideoFailOnTimeout: true,
+      sendAckVideoMaxRetries: 1,
       sendAckRequireServerId: false,
       sendAckInputClearProbeEnabled: false,
       messagePushFilterMode: 'all',
