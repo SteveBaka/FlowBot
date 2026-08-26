@@ -98,33 +98,56 @@ var ToggleSwitch = {
 var HomePage = {
   setup: function () {
     var cards = reactive({
-      login: { status: '检测中...', color: '', loading: true, sub: '' },
-      onebot: { status: '检测中...', color: '', loading: true, sub: '' },
-      account: { status: '检测中...', color: '', loading: true, sub: '' },
-      database: { status: '检测中...', color: '', loading: true, sub: '' },
-      system: { status: '检测中...', color: '', loading: true, sub: '' }
+      login: { status: '', color: '', loading: true, sub: '' },
+      onebot: { status: '', color: '', loading: true, sub: '' },
+      account: { status: '', color: '', loading: true, sub: '' },
+      database: { status: '', color: '', loading: true, sub: '' },
+      system: { cpu: 0, ram: 0, disk: 0, uptime: '-', cpuModel: '-', loading: true }
     })
+    var flowbotVersion = ref('-')
+    var weflowVersion = ref('-')
+    var wechatVersion = ref('4.1.1.7')
+
+    /* 链路节点：wechat / api / bot / db */
+    var chain = reactive([
+      { key: 'wechat', name: '微信进程', sub: '', state: 'loading', route: '/accounts' },
+      { key: 'api', name: 'FlowBOT API', sub: '', state: 'loading', route: '' },
+      { key: 'bot', name: 'Bot 连接', sub: '', state: 'loading', route: '/bot' },
+      { key: 'db', name: '数据库', sub: '', state: 'loading', route: '/settings' }
+    ])
+    var wechatRunning = ref(null) /* null=未知 */
+
+    /* 发送概况（15s 轻量轮询，瞬时值） */
+    var sendStats = reactive({ sent: 0, failed: 0, pending: 0, processing: false, samples: [], rate: null, lastMs: null })
 
     function dotColor(c) {
       if (c === 'green') return '#10b981'
       if (c === 'red') return '#ef4444'
       if (c === 'yellow') return '#fbbf24'
-      if (c === 'gray') return '#94a3b8'
       return '#94a3b8'
     }
+    function chainStateClass(n) { return 'chain-' + n.state }
+    function goRoute(r) { if (r) window.location.hash = '#' + r }
+
+    /* ── 总健康判定（优先级从高到低）────────────────────────────────── */
+    var overall = computed(function () {
+      var st = function (k) { return chain.find(function (n) { return n.key === k }).state }
+      if (st('wechat') === 'down') return { level: 'danger', text: '微信进程未运行', route: '/accounts', action: '去账号管理' }
+      if (st('api') === 'down') return { level: 'danger', text: 'FlowBOT API 失联', route: '', action: '查看日志', log: true }
+      if (st('db') === 'down') return { level: 'danger', text: '数据库未连接', route: '/settings', action: '去设置' }
+      if (st('bot') === 'down') return { level: 'danger', text: 'Bot 全部未连接', route: '/bot', action: '去 Bot 配置' }
+      if (st('bot') === 'warn') return { level: 'warn', text: '部分 Bot 未连接', route: '/bot', action: '去 Bot 配置' }
+      if (st('wechat') === 'warn') return { level: 'warn', text: '微信状态未知', route: '/accounts', action: '去账号管理' }
+      return { level: 'ok', text: '全部正常', text2: ' · 微信运行中 · ' + botConnectedCount.value + '/' + botTotalCount.value + ' 个 Bot 已连接', route: '', action: '' }
+    })
+    var botConnectedCount = ref(0)
+    var botTotalCount = ref(0)
 
     async function load() {
-      cards.login.loading = true
-      cards.onebot.loading = true
-      cards.account.loading = true
-      cards.database.loading = true
-      cards.system.loading = true
-
-      var healthStatus = 'N/A'
-      try {
-        var h = await api('/api/v1/health')
-        healthStatus = (!h.error && h.status === 'ok') ? '运行中' : (h.error || '异常')
-      } catch (_) { healthStatus = '无法连接' }
+      /* API 节点：本请求成功即在位 */
+      var h = await api('/api/v1/health')
+      chain[1].state = (!h.error && h.status === 'ok') ? 'up' : 'down'
+      chain[1].sub = chain[1].state === 'up' ? '运行中' : '无响应'
 
       var c = await api('/api/v1/mgmt/config')
       if (!c.error) {
@@ -133,174 +156,245 @@ var HomePage = {
         cards.login.loading = false
 
         cards.account.status = c.myWxid || '未设置'
-        cards.account.color = c.myWxid ? 'green' : 'yellow'
-        cards.account.sub = ''
         cards.account.loading = false
 
-        cards.database.status = c.dbPath ? '已连接' : '未连接'
-        cards.database.color = c.dbPath ? 'green' : 'red'
+        var dbUp = !!c.dbPath
+        chain[3].state = dbUp ? 'up' : 'down'
+        chain[3].sub = dbUp ? (c.dbPath.length > 28 ? '…' + c.dbPath.slice(-26) : c.dbPath) : '未配置'
+        cards.database.status = dbUp ? '已连接' : '未连接'
+        cards.database.color = dbUp ? 'green' : 'red'
         cards.database.sub = c.dbPath || ''
         cards.database.loading = false
 
         var bots = []
         try { bots = typeof c.bots === 'string' ? JSON.parse(c.bots) : (c.bots || []) } catch (_) { bots = [] }
         if (!Array.isArray(bots)) bots = []
+        botTotalCount.value = bots.length
         if (bots.length === 0) {
+          chain[2].state = 'warn'
+          chain[2].sub = '未配置 Bot'
           cards.onebot.status = '未配置'
           cards.onebot.color = 'gray'
           cards.onebot.sub = ''
+          botConnectedCount.value = 0
         } else {
           var botStatusResult = await api('/api/v1/mgmt/bots/status')
           var statusMap = {}
           var botList = []
-          if (!botStatusResult.error && botStatusResult.success && botStatusResult.bots) {
-            botList = botStatusResult.bots
-          } else if (Array.isArray(botStatusResult)) {
-            botList = botStatusResult
-          }
+          if (!botStatusResult.error && botStatusResult.success && botStatusResult.bots) botList = botStatusResult.bots
+          else if (Array.isArray(botStatusResult)) botList = botStatusResult
           botList.forEach(function (s) { statusMap[s.id] = s })
-
+          var connected = 0
           cards.onebot.sub = bots.map(function (b) {
             var s = statusMap[b.id]
             var st = s ? (s.connectionStatus || s.status || 'stopped') : 'stopped'
-            // 协议标签按 bot 实际类型适配：HTTP/插件API 显示 HTTP，WS 显示 WS
-            var label = (b.mode === 'http' || b.mode === 'plugin' ? 'HTTP' : 'WS') + ':' + b.name
-            return { label: label, status: st }
+            if (st === 'connected' || st === 'running') connected++
+            return { name: b.name, mode: (b.mode === 'http' || b.mode === 'plugin') ? 'http' : 'ws', status: st }
           })
-          var anyConnected = bots.some(function (b) {
-            var s = statusMap[b.id]
-            return s && (s.connectionStatus === 'connected' || s.status === 'running')
-          })
+          botConnectedCount.value = connected
+          chain[2].sub = connected + '/' + bots.length + ' 已连接'
+          if (connected === bots.length) chain[2].state = 'up'
+          else if (connected === 0) chain[2].state = 'down'
+          else chain[2].state = 'warn'
           cards.onebot.status = bots.length + ' 个 Bot'
-          cards.onebot.color = anyConnected ? 'green' : 'red'
+          cards.onebot.color = connected > 0 ? 'green' : 'red'
         }
         cards.onebot.loading = false
       } else {
-        cards.login.status = '无法获取配置'
-        cards.login.color = 'yellow'
-        cards.login.loading = false
-        cards.onebot.status = '无法获取配置'
-        cards.onebot.color = 'yellow'
-        cards.onebot.loading = false
-        cards.account.status = '无法获取配置'
-        cards.account.color = 'yellow'
-        cards.account.loading = false
-        cards.database.status = '无法获取配置'
-        cards.database.color = 'yellow'
-        cards.database.loading = false
+        chain[1].state = 'down'
+        chain[3].state = 'down'
+        cards.login.status = '无法获取配置'; cards.login.color = 'yellow'; cards.login.loading = false
+        cards.onebot.status = '无法获取配置'; cards.onebot.color = 'yellow'; cards.onebot.loading = false
+        cards.account.status = '无法获取配置'; cards.account.loading = false
+        cards.database.status = '无法获取配置'; cards.database.color = 'yellow'; cards.database.loading = false
       }
 
+      /* 微信进程：/api/processes 现有接口推导 */
+      var pr = await api('/api/processes')
+      var wechatUp = false
+      if (!pr.error && pr.processes) {
+        wechatUp = pr.processes.some(function (p) { return (p.cmd || '').indexOf('wechat') !== -1 })
+      }
+      wechatRunning.value = wechatUp
+      chain[0].state = wechatUp ? 'up' : 'down'
+      chain[0].sub = wechatUp ? '运行中' : '未检测到进程'
+
+      /* 系统资源 */
       var s = await api('/api/system')
       if (!s.error && s.system) {
         var sys = s.system
-        var cpuPercent = sys.cpuCores ? Math.min(Math.round((sys.cpuLoad / sys.cpuCores) * 100), 100) : 0
-        var memPercent = sys.memory && sys.memory.usedPercent ? sys.memory.usedPercent : 0
-        var diskPercent = sys.disk && typeof sys.disk === 'object' && sys.disk.usedPercent ? sys.disk.usedPercent : 0
-        cards.system.cpu = cpuPercent
-        cards.system.ram = memPercent
-        cards.system.disk = diskPercent
+        cards.system.cpu = sys.cpuCores ? Math.min(Math.round((sys.cpuLoad / sys.cpuCores) * 100), 100) : 0
+        cards.system.ram = sys.memory && sys.memory.usedPercent ? sys.memory.usedPercent : 0
+        cards.system.disk = sys.disk && typeof sys.disk === 'object' && sys.disk.usedPercent ? sys.disk.usedPercent : 0
         cards.system.uptime = sys.containerUptime || (sys.uptime || '').replace('up ', '') || '-'
         cards.system.cpuModel = sys.cpuModel || '-'
-        cards.system.color = 'green'
-        cards.flowbotVersion = sys.version || '-'
-        cards.version = sys.weflowVersion || '-'
-        cards.wechatVersion = sys.wechatVersion || '4.1.1.7'
+        cards.system.loading = false
+        flowbotVersion.value = sys.version || '-'
+        weflowVersion.value = sys.weflowVersion || '-'
+        wechatVersion.value = sys.wechatVersion || '4.1.1.7'
       } else {
-        cards.system.cpu = 0
-        cards.system.ram = 0
-        cards.system.disk = 0
-        cards.system.uptime = '-'
-        cards.system.cpuModel = '-'
-        cards.system.color = 'red'
-        cards.flowbotVersion = '-'
-        cards.version = '-'
-        cards.wechatVersion = '4.1.1.7'
+        cards.system.loading = false
       }
-      cards.system.loading = false
+
+      /* 发送概况（失败静默，不影响首页其他部分） */
+      var sd = await api('/api/v1/mgmt/send-status')
+      if (!sd.error && sd.status) {
+        sendStats.sent = (sd.status.stats && sd.status.stats.sent) || 0
+        sendStats.failed = (sd.status.stats && sd.status.stats.failed) || 0
+        sendStats.pending = (sd.status.queue && sd.status.queue.pending) || 0
+        sendStats.processing = !!(sd.status.queue && sd.status.queue.processing)
+        var tot = sendStats.sent + sendStats.failed
+        sendStats.rate = tot > 0 ? Math.round(sendStats.sent / tot * 100) : null
+        var steps = sd.status.lastSendSteps
+        if (Array.isArray(steps) && steps.length) {
+          var sum = 0
+          for (var si = 0; si < steps.length; si++) sum += (steps[si].ms || 0)
+          sendStats.lastMs = sum > 0 ? sum : null
+        } else {
+          sendStats.lastMs = null
+        }
+        var maxV = 1
+        sendStats.samples.push(Math.min(sendStats.sent + sendStats.failed, 999))
+        if (sendStats.samples.length > 12) sendStats.samples = sendStats.samples.slice(-12)
+        for (var i = 0; i < sendStats.samples.length; i++) maxV = Math.max(maxV, sendStats.samples[i])
+        sendStats.maxSample = maxV
+      }
+    }
+
+    var sendBars = computed(function () {
+      var maxV = sendStats.maxSample || 1
+      return sendStats.samples.map(function (v) {
+        return { h: Math.max(6, Math.round(v / maxV * 100)) }
+      })
+    })
+
+    function botChipClass(bs) {
+      var conn = bs.status === 'connected' || (bs.status === 'running')
+      var state = bs.status === 'stopped' ? 'off' : (conn ? 'conn' : 'on')
+      return 'chip-' + bs.mode + '-' + state
+    }
+    function botModeLabel(bs) { return bs.mode === 'http' ? 'HTTP' : 'WS' }
+    function botStatusLabel(bs) {
+      if (bs.status === 'connected') return '已连接'
+      if (bs.status === 'running') return '运行中'
+      if (bs.status === 'connecting') return '连接中'
+      return '未连接'
+    }
+    function resColor(pct) {
+      if (pct >= 90) return 'var(--danger)'
+      if (pct >= 70) return 'var(--warn)'
+      return 'var(--accent)'
     }
 
     var refreshTimer = null
+    var hiddenPaused = false
+    function startTimer() {
+      if (refreshTimer) return
+      refreshTimer = setInterval(function () {
+        if (!hiddenPaused) load()
+      }, 15000)
+    }
+    function stopTimer() {
+      if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null }
+    }
+    function onVisChange() {
+      hiddenPaused = document.hidden
+      if (!document.hidden) load()
+    }
     onMounted(function () {
       load()
-      refreshTimer = setInterval(load, 15000)
+      startTimer()
+      document.addEventListener('visibilitychange', onVisChange)
     })
-    onUnmounted(function () { if (refreshTimer) clearInterval(refreshTimer) })
-    return { cards: cards, dotColor: dotColor, load: load }
+    onUnmounted(function () {
+      stopTimer()
+      document.removeEventListener('visibilitychange', onVisChange)
+    })
+    return {
+      cards: cards, dotColor: dotColor, load: load,
+      chain: chain, chainStateClass: chainStateClass, goRoute: goRoute,
+      overall: overall, botConnectedCount: botConnectedCount, botTotalCount: botTotalCount,
+      sendStats: sendStats, sendBars: sendBars,
+      flowbotVersion: flowbotVersion, weflowVersion: weflowVersion, wechatVersion: wechatVersion,
+      resColor: resColor,
+      botChipClass: botChipClass, botModeLabel: botModeLabel, botStatusLabel: botStatusLabel
+    }
   },
   template: '<div>' +
     '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">首页</h1><p class="subtitle">系统状态概览</p></div>' +
+    '<div><h1 class="page-title" style="margin:0">首页</h1><p class="subtitle">系统状态总览</p></div>' +
     '<div class="header-actions"><button class="btn btn-secondary" @click="load">刷新</button></div></div>' +
 
-    '<div class="stats-grid">' +
+    '<transition name="fade-slide">' +
+    '<div v-if="overall.level !== \'ok\' || overall.text === \'全部正常\'" class="health-banner" :class="\'hb-\' + overall.level">' +
+    '<span class="hb-dot"></span>' +
+    '<span class="hb-text"><b>{{ overall.text }}</b>{{ overall.text2 || \'\' }}</span>' +
+    '<button v-if="overall.route || overall.action" class="btn btn-sm hb-action" @click="goRoute(overall.route)">{{ overall.action }} →</button>' +
+    '</div>' +
+    '</transition>' +
 
-    '<div class="stat-card">' +
-    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.login.color)}"></span><span class="stat-label">登录状态</span></div>' +
-    '<div class="stat-value">{{ cards.login.status }}</div>' +
+    '<div class="chain-bar">' +
+    '<template v-for="(n, i) in chain" :key="n.key">' +
+    '<div class="chain-node" :class="chainStateClass(n)" @click="goRoute(n.route)">' +
+    '<span class="chain-dot"></span>' +
+    '<div class="chain-node-text"><div class="chain-name">{{ n.name }}</div><div class="chain-sub">{{ n.sub || (n.state === "loading" ? "检测中…" : " ") }}</div></div>' +
+    '</div>' +
+    '<div v-if="i < chain.length - 1" class="chain-link" :class="{ broken: n.state === \'down\' || chain[i + 1].state === \'down\' }"></div>' +
+    '</template>' +
     '</div>' +
 
-    '<div class="stat-card">' +
-    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">Bot 状态</span></div>' +
-    '<div class="stat-value">{{ typeof cards.onebot.sub === \'object\' ? cards.onebot.status : cards.onebot.status }}</div>' +
-    '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" style="margin-top:4px">' +
-    '<div v-for="bs in cards.onebot.sub" :key="bs.label" style="font-size:13px;display:flex;align-items:center;gap:6px">' +
-    '<span style="font-family:monospace;font-weight:500">{{ bs.label }}</span>' +
-    '<span style="font-size:12px" :style="{color: (bs.status===\'connected\'||bs.status===\'running\')?\'var(--success)\':\'var(--danger)\'}">{{ bs.status===\'connected\'?\'已连接\':bs.status===\'running\'?\'运行中\':\'未连接\' }}</span>' +
+    '<div class="stats-grid home-grid">' +
+
+    '<div class="stat-card clickable" @click="goRoute(\'/send\')">' +
+    '<div class="stat-header"><span class="stat-dot" :style="{background: sendStats.failed > sendStats.sent * 0.2 && (sendStats.sent + sendStats.failed) > 0 ? \'#ef4444\' : \'#10b981\'}"></span><span class="stat-label">发送概况</span><span class="stat-go">→</span></div>' +
+    '<div class="home-send-row">' +
+    '<div class="home-send-nums">' +
+    '<div class="home-send-big">{{ sendStats.sent }}<span class="home-send-fail" v-if="sendStats.failed"> / {{ sendStats.failed }}</span></div>' +
+    '<div class="home-send-meta">' +
+    '<span v-if="sendStats.rate !== null">成功率 <b>{{ sendStats.rate }}%</b></span>' +
+    '<span v-if="sendStats.lastMs">最近 <b>~{{ (Math.round(sendStats.lastMs / 100) / 10).toFixed(1) }}s</b></span>' +
+    '</div>' +
+    '<div class="stat-sub">待发 {{ sendStats.pending }}{{ sendStats.processing ? " · 发送中" : " · 空闲" }}</div>' +
+    '</div>' +
+    '<div class="home-send-bars">' +
+    '<div v-for="(b, i) in sendBars" :key="i" class="home-send-bar" :style="{ height: b.h + \'%\' }"></div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="stat-card clickable" @click="goRoute(\'/bot\')">' +
+    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">Bot 状态</span><span class="stat-go">→</span></div>' +
+    '<div class="stat-value">{{ cards.onebot.status || "检测中…" }}</div>' +
+    '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" class="bot-chip-flow">' +
+    '<div v-for="(bs, bi) in cards.onebot.sub" :key="bi" class="bot-chip" :class="botChipClass(bs)" :title="bs.name + \' | \' + botStatusLabel(bs)">' +
+    '<span class="bot-chip-mode">{{ botModeLabel(bs) }}</span>' +
+    '<span class="bot-chip-name">{{ bs.name }}</span>' +
+    '<span class="bot-chip-status">{{ botStatusLabel(bs) }}</span>' +
     '</div>' +
     '</div>' +
     '<div v-else-if="typeof cards.onebot.sub === \'string\' && cards.onebot.sub" class="stat-sub">{{ cards.onebot.sub }}</div>' +
     '</div>' +
 
     '<div class="stat-card">' +
-    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.account.color)}"></span><span class="stat-label">账号信息</span></div>' +
-    '<div class="stat-value" style="font-size:14px;word-break:break-all">{{ cards.account.status }}</div>' +
+    '<div class="stat-header"><span class="stat-dot" :style="{background: resColor(cards.system.cpu) === \'var(--danger)\' || resColor(cards.system.ram) === \'var(--danger)\' || resColor(cards.system.disk) === \'var(--danger)\' ? \'#ef4444\' : (resColor(cards.system.cpu) === \'var(--warn)\' || resColor(cards.system.ram) === \'var(--warn)\' || resColor(cards.system.disk) === \'var(--warn)\' ? \'#fbbf24\' : \'#10b981\')}"></span><span class="stat-label">资源水位</span></div>' +
+    '<div class="home-res-row">' +
+    '<div class="home-res-item"><span class="home-res-name">CPU</span><span class="home-res-val" :style="{color: resColor(cards.system.cpu)}">{{ cards.system.cpu }}%</span></div>' +
+    '<div class="home-res-item"><span class="home-res-name">内存</span><span class="home-res-val" :style="{color: resColor(cards.system.ram)}">{{ cards.system.ram }}%</span></div>' +
+    '<div class="home-res-item"><span class="home-res-name">存储</span><span class="home-res-val" :style="{color: resColor(cards.system.disk)}">{{ cards.system.disk }}%</span></div>' +
+    '</div>' +
+    '<div class="home-res-bar"><span class="home-res-bar-label">CPU</span><span class="home-res-bar-value" :title="cards.system.cpuModel">{{ cards.system.cpuModel }}</span></div>' +
+    '<div class="home-res-bar"><span class="home-res-bar-label">运行</span><span class="home-res-bar-value">{{ cards.system.uptime }}</span></div>' +
     '</div>' +
 
     '<div class="stat-card">' +
-    '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.database.color)}"></span><span class="stat-label">数据库连接</span></div>' +
-    '<div class="stat-value">{{ cards.database.status }}</div>' +
-    '<div v-if="cards.database.sub" class="stat-sub" style="word-break:break-all">{{ cards.database.sub }}</div>' +
+    '<div class="stat-header"><span class="stat-dot" style="background:#3498db"></span><span class="stat-label">版本与账号</span></div>' +
+    '<div class="version-row"><span class="version-label">账号</span><span class="version-val">{{ cards.account.status || "检测中…" }}</span></div>' +
+    '<div class="version-row"><span class="version-label">FlowBot</span><span class="version-val">{{ flowbotVersion }}</span></div>' +
+    '<div class="version-row"><span class="version-label">WeFlow</span><span class="version-val">{{ weflowVersion }}</span></div>' +
+    '<div class="version-row"><span class="version-label">微信</span><span class="version-val">{{ wechatVersion }}</span></div>' +
     '</div>' +
 
-    '<div class="stat-card system-info-card">' +
-    '<div class="system-top">' +
-    '<div class="system-ring">' +
-    '<svg viewBox="0 0 36 36" class="ring-svg">' +
-    '<circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--bg-input)" stroke-width="3"/>' +
-    '<circle cx="18" cy="18" r="15.9" fill="none" stroke="var(--accent)" stroke-width="3" ' +
-    ':stroke-dasharray="cards.system.cpu + \', 100\'" stroke-linecap="round" transform="rotate(-90 18 18)"/>' +
-    '</svg>' +
-    '<div class="ring-label">CPU</div>' +
-    '<div class="ring-text">{{ cards.system.cpu }}<span>%</span></div>' +
-    '</div>' +
-    '<div class="system-bars">' +
-    '<div class="system-bar-row">' +
-    '<div class="bar-label">RAM</div>' +
-    '<div class="bar-track"><div class="bar-fill" :style="{width: cards.system.ram + \'%\'}"></div></div>' +
-    '<div class="bar-text">{{ cards.system.ram }}%</div>' +
-    '</div>' +
-    '<div class="system-bar-row">' +
-    '<div class="bar-label">存储</div>' +
-    '<div class="bar-track"><div class="bar-fill bar-fill-disk" :style="{width: cards.system.disk + \'%\'}"></div></div>' +
-    '<div class="bar-text">{{ cards.system.disk }}%</div>' +
-    '</div>' +
-    '</div>' +
-    '</div>' +
-    '<div class="system-meta">' +
-    '<span class="meta-item"><span class="meta-label">运行时间</span>{{ cards.system.uptime }}</span>' +
-    '<span class="meta-item"><span class="meta-label">CPU</span>{{ cards.system.cpuModel }}</span>' +
-    '</div>' +
-    '</div>' +
-
-    '<div class="stat-card version-card">' +
-    '<div class="stat-header"><span class="stat-dot" style="background:#3498db"></span><span class="stat-label">版本信息</span></div>' +
-    '<div class="version-row"><span class="version-label">FlowBot</span><span class="version-val">{{ cards.flowbotVersion }}</span></div>' +
-    '<div class="version-row"><span class="version-label">WeFlow</span><span class="version-val">{{ cards.version }}</span></div>' +
-    '<div class="version-row"><span class="version-label">微信</span><span class="version-val">{{ cards.wechatVersion }}</span></div>' +
-    '</div>' +
-
-    '</div></div>' +
-    '<style>.ring-label{position:absolute;top:28%;left:50%;transform:translateX(-50%);font-size:9px;font-weight:600;color:var(--text-muted);pointer-events:none}.ring-text{position:absolute;top:62%;left:50%;transform:translate(-50%,-50%);font-size:15px;font-weight:700;color:var(--accent);pointer-events:none}.ring-text span{font-size:9px;font-weight:500}</style>'
+    '</div></div>'
 }
 
 var BotPage = {
@@ -339,7 +433,9 @@ var BotPage = {
       } catch (e) {}
     }
 
-    setInterval(function () {
+    var botStatusTimer = null
+    onMounted(function () {
+      botStatusTimer = setInterval(function () {
       if (!bots.value.length) return
       api('/api/v1/mgmt/bots/status').then(function (st) {
         if (st && st.success && Array.isArray(st.bots)) {
@@ -352,7 +448,11 @@ var BotPage = {
           })
         }
       }).catch(function () {})
-    }, 5000)
+      }, 5000)
+    })
+    onUnmounted(function () {
+      if (botStatusTimer) clearInterval(botStatusTimer)
+    })
 
     function openAddPanel() {
       editingBotId.value = null
@@ -925,7 +1025,7 @@ var SendManagerPage = {
     var status = reactive({
       mode: 'standard',
       queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
-      backpressure: { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true },
+      backpressure: { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true, failureThreshold: 3 },
       options: { merge: false, dedup: false, priority: false, dynamicInterval: false },
       dedupCount: 0,
       stats: { sent: 0, failed: 0 },
@@ -951,6 +1051,175 @@ var SendManagerPage = {
       { key: 'imagePasteSettle', label: '图片粘贴后发送' },
       { key: 'postSendSettle', label: '发送后稳定' }
     ]
+
+    /* ── 采样器：3s 轮询差分 → 5 分钟环形缓冲（100 点）────────────────── */
+    var samples = ref([])
+    var sessionSent = ref(0)
+    var sessionFailed = ref(0)
+    var prevStats = null
+
+    function pushSample() {
+      var s = status.stats
+      if (prevStats) {
+        var dSent = Math.max(0, s.sent - prevStats.sent)
+        var dFail = Math.max(0, s.failed - prevStats.failed)
+        sessionSent.value += dSent
+        sessionFailed.value += dFail
+        var arr = samples.value.concat([{ t: Date.now(), sent: dSent, fail: dFail, pending: status.queue.pending }])
+        if (arr.length > 100) arr = arr.slice(arr.length - 100)
+        samples.value = arr
+      }
+      prevStats = { sent: s.sent, failed: s.failed }
+    }
+
+    /* ── 健康环：红绿灯判定（冷却 > 不稳定 > 积压 > 发送中 > 空闲）────── */
+    var health = computed(function () {
+      var bp = status.backpressure
+      if (bp.coolRemainingMs > 0) {
+        return { level: 'danger', label: '冷却中', detail: Math.ceil(bp.coolRemainingMs / 1000) + 's 后恢复' }
+      }
+      var threshold = bp.failureThreshold || bpParams.threshold || 3
+      if (bp.consecutiveFailures >= Math.max(1, Math.ceil(threshold * 0.6))) {
+        return { level: 'warn', label: '不稳定', detail: '连续失败 ' + bp.consecutiveFailures + ' 次' }
+      }
+      if (status.queue.pending > 20) {
+        return { level: 'warn', label: '队列积压', detail: '待发 ' + status.queue.pending + ' 条' }
+      }
+      if (status.queue.processing) {
+        return { level: 'ok', label: '发送中', detail: status.batch.contact || '' }
+      }
+      return { level: 'ok', label: '空闲正常', detail: '队列空' }
+    })
+    var healthClass = computed(function () {
+      return 'health-' + health.value.level + (status.queue.processing && health.value.level === 'ok' ? ' processing' : '')
+    })
+
+    /* ── 成功/失败 donut（本次会话增量）───────────────────────────────── */
+    var donut = computed(function () {
+      var total = sessionSent.value + sessionFailed.value
+      if (!total) return null
+      var c = 2 * Math.PI * 36
+      var frac = sessionSent.value / total
+      return {
+        rate: Math.round(frac * 100),
+        segs: [
+          { color: 'var(--accent)', dasharray: (c * frac).toFixed(2) + ' ' + c.toFixed(2), dashoffset: 0 },
+          { color: 'var(--danger)', dasharray: (c * (1 - frac)).toFixed(2) + ' ' + c.toFixed(2), dashoffset: (-c * frac).toFixed(2) }
+        ]
+      }
+    })
+
+    /* ── 队列积压迷你柱（最近 26 个采样）──────────────────────────────── */
+    var queueBars = computed(function () {
+      var arr = samples.value.slice(-26)
+      if (!arr.length) return []
+      var maxP = 1
+      for (var i = 0; i < arr.length; i++) maxP = Math.max(maxP, arr[i].pending)
+      var out = []
+      for (var j = 0; j < arr.length; j++) {
+        out.push({ h: Math.max(4, Math.round(arr[j].pending / maxP * 100)), warn: arr[j].pending > 20 })
+      }
+      return out
+    })
+
+    /* ── 吞吐趋势面积图（SVG path）────────────────────────────────────── */
+    var trend = computed(function () {
+      var arr = samples.value
+      if (arr.length < 2) return null
+      var W = 560, H = 140, pad = 6
+      var maxS = 1, maxP = 1
+      for (var i = 0; i < arr.length; i++) {
+        maxS = Math.max(maxS, arr[i].sent + arr[i].fail)
+        maxP = Math.max(maxP, arr[i].pending)
+      }
+      var stepX = W / (arr.length - 1)
+      var line = '', pend = ''
+      for (var j = 0; j < arr.length; j++) {
+        var x = (j * stepX).toFixed(1)
+        line += (j ? ' L ' : 'M ') + x + ' ' + (H - pad - (arr[j].sent / maxS) * (H - pad * 2)).toFixed(1)
+        pend += (j ? ' L ' : 'M ') + x + ' ' + (H - pad - (arr[j].pending / maxP) * (H - pad * 2)).toFixed(1)
+      }
+      return { line: line, area: line + ' L ' + W + ' ' + H + ' L 0 ' + H + ' Z', pend: pend, maxS: maxS, maxP: maxP }
+    })
+
+    /* ── 发送耗时流水线（lastSendSteps → 分段条）──────────────────────── */
+    var PIPE_COLORS = [
+      { keys: ['激活窗口'], color: '#60a5fa' },
+      { keys: ['搜索联系人', '聚焦输入框'], color: '#a78bfa' },
+      { keys: ['粘贴发送'], color: 'var(--accent)' }
+    ]
+    function pipeColor(step) {
+      for (var i = 0; i < PIPE_COLORS.length; i++) {
+        if (PIPE_COLORS[i].keys.indexOf(step) !== -1) return PIPE_COLORS[i].color
+      }
+      return 'var(--success)'
+    }
+    var pipeline = computed(function () {
+      var steps = status.lastSendSteps
+      if (!steps || !steps.length) return null
+      var total = 0
+      for (var i = 0; i < steps.length; i++) total += (steps[i].ms || 0)
+      if (!total) return null
+      var segs = []
+      for (var j = 0; j < steps.length; j++) {
+        segs.push({
+          title: steps[j].step + ' ' + steps[j].ms + 'ms',
+          pct: Math.max(1.5, (steps[j].ms / total) * 100),
+          color: pipeColor(steps[j].step)
+        })
+      }
+      return { segs: segs, total: (Math.round(total / 100) / 10) + 's' }
+    })
+
+    /* ── 队列辅助 ─────────────────────────────────────────────────────── */
+    var nowElapsed = computed(function () {
+      return status.queue.items.length ? status.queue.items[0].queuedSeconds : 0
+    })
+    function typeLabel(t) { return t === 'image' ? '图' : t === 'video' ? '视频' : '文' }
+    function urgencyClass(item) { return item.queuedSeconds > 60 ? 'danger' : item.queuedSeconds > 30 ? 'warn' : '' }
+
+    /* ── 档位胶囊 ─────────────────────────────────────────────────────── */
+    var tiers = [
+      { key: 'safe', name: '安全', desc: '慢速 · 最稳', icon: '🛡' },
+      { key: 'standard', name: '标准', desc: '平衡之选', icon: '⚡' },
+      { key: 'aggressive', name: '激进', desc: '快速 · 高风险', icon: '🚀' }
+    ]
+    var TIER_NAMES = { safe: '安全', standard: '标准', aggressive: '激进' }
+    function tierName(m) { return TIER_NAMES[m] || m }
+    function setTier(key) {
+      mode.value = key
+      custom.value = {}
+      customEditing.value = false
+      initParams()
+    }
+    var customEditing = ref(false)
+    var overriddenKeys = computed(function () {
+      var preset = PRESETS[mode.value] || PRESETS.standard
+      var out = {}
+      for (var i = 0; i < profileLabels.length; i++) {
+        var k = profileLabels[i].key
+        if (params[k] !== undefined && params[k] !== '' && Number(params[k]) !== preset[k]) out[k] = true
+      }
+      return out
+    })
+
+    /* ── 折叠区与摘要 ─────────────────────────────────────────────────── */
+    var secRhythm = ref(false)
+    var secStrategy = ref(false)
+    var secBp = ref(false)
+    var secAck = ref(false)
+    var strategySummary = computed(function () {
+      var n = (mergeEnabled.value ? 1 : 0) + (dedupEnabled.value ? 1 : 0) + (priorityEnabled.value ? 1 : 0) + (dynamicIntervalEnabled.value ? 1 : 0)
+      return '开启 ' + n + ' / 4 项'
+    })
+    var bpSummary = computed(function () {
+      if (status.backpressure.coolRemainingMs > 0) return '冷却中 ' + Math.ceil(status.backpressure.coolRemainingMs / 1000) + 's'
+      return backpressureEnabled.value ? '阈值 ' + bpParams.threshold + ' · 冷却 ' + Math.round(bpParams.cooldownMs / 1000) + 's' : '已关闭'
+    })
+    var ackSummary = computed(function () {
+      if (!ackParams.enabled) return '已关闭'
+      return '图 ' + Math.round(ackParams.timeoutImageMs / 1000) + 's · 视频 ' + Math.round(ackParams.timeoutVideoMs / 1000) + 's'
+    })
 
     function initParams() {
       var preset = PRESETS[mode.value] || PRESETS.standard
@@ -988,11 +1257,8 @@ var SendManagerPage = {
         ackParams.retryAction = d.sendAckRetryAction || 're-enter'
         custom.value = (d.sendDelayCustom && typeof d.sendDelayCustom === 'object') ? d.sendDelayCustom : {}
         initParams()
+        markBaseline()
       }
-    }
-
-    function onModeChange() {
-      initParams()
     }
 
     async function loadStatus() {
@@ -1007,8 +1273,9 @@ var SendManagerPage = {
         status.backpressure = (d.status.backpressure && {
           consecutiveFailures: d.status.backpressure.consecutiveFailures || 0,
           coolRemainingMs: d.status.backpressure.coolRemainingMs || 0,
-          autoDowngrade: d.status.backpressure.autoDowngrade !== false
-        }) || { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true }
+          autoDowngrade: d.status.backpressure.autoDowngrade !== false,
+          failureThreshold: d.status.backpressure.failureThreshold || 3
+        }) || { consecutiveFailures: 0, coolRemainingMs: 0, autoDowngrade: true, failureThreshold: 3 }
         status.options = (d.status.options && {
           merge: d.status.options.merge === true,
           dedup: d.status.options.dedup === true,
@@ -1027,6 +1294,8 @@ var SendManagerPage = {
           size: d.status.batch.size || 0
         }) || { contact: null, size: 0 }
         status.pinyinCacheSize = d.status.pinyinCacheSize || 0
+        pushSample()
+        if (status.backpressure.coolRemainingMs > 0) secBp.value = true
       }
     }
 
@@ -1043,42 +1312,56 @@ var SendManagerPage = {
       return out
     }
 
+    function buildConfigPayload() {
+      return {
+        sendDelayMode: mode.value,
+        sendDelayCustom: buildCustom(),
+        sendAutoDowngrade: autoDowngrade.value,
+        sendMerge: mergeEnabled.value,
+        sendDedup: dedupEnabled.value,
+        sendPriority: priorityEnabled.value,
+        sendBackpressureEnabled: backpressureEnabled.value,
+        sendDynamicInterval: dynamicIntervalEnabled.value,
+        sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
+        sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
+        sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
+        imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
+        sendAckEnabled: !!ackParams.enabled,
+        sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
+        sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 5000),
+        sendAckTimeoutMsVideo: Math.max(500, Number(ackParams.timeoutVideoMs) || 10000),
+        sendAckExtendWaitMs: Math.max(0, Number(ackParams.extendWaitMs) || 10000),
+        sendAckTimeoutPerMbMs: Math.max(0, Number(ackParams.timeoutPerMbMs) || 800),
+        sendAckTimeoutMaxMs: Math.max(1000, Number(ackParams.timeoutMaxMs) || 20000),
+        sendAckImageMaxRetries: Math.max(0, Number(ackParams.maxRetriesImage) || 1),
+        sendAckVideoMaxRetries: Math.max(0, Number(ackParams.maxRetriesVideo) || 1),
+        sendAckImageFailOnTimeout: !!ackParams.failOnTimeoutImage,
+        sendAckVideoFailOnTimeout: !!ackParams.failOnTimeoutVideo,
+        sendAckRetryAction: ackParams.retryAction
+      }
+    }
+
+    /* ── 脏跟踪：修改后悬浮保存条 ─────────────────────────────────────── */
+    var baseline = ref('')
+    function markBaseline() { baseline.value = JSON.stringify(buildConfigPayload()) }
+    var dirty = computed(function () {
+      if (!baseline.value) return false
+      return JSON.stringify(buildConfigPayload()) !== baseline.value
+    })
+    function discardChanges() { loadMode() }
+
     async function saveMode() {
       saving.value = true
       var d = await api('/api/v1/mgmt/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sendDelayMode: mode.value,
-          sendDelayCustom: buildCustom(),
-          sendAutoDowngrade: autoDowngrade.value,
-          sendMerge: mergeEnabled.value,
-          sendDedup: dedupEnabled.value,
-          sendPriority: priorityEnabled.value,
-          sendBackpressureEnabled: backpressureEnabled.value,
-          sendDynamicInterval: dynamicIntervalEnabled.value,
-          sendFailureThreshold: Math.max(1, Number(bpParams.threshold) || 3),
-          sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
-          sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
-          imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
-          sendAckEnabled: !!ackParams.enabled,
-          sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
-          sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 5000),
-          sendAckTimeoutMsVideo: Math.max(500, Number(ackParams.timeoutVideoMs) || 10000),
-          sendAckExtendWaitMs: Math.max(0, Number(ackParams.extendWaitMs) || 10000),
-          sendAckTimeoutPerMbMs: Math.max(0, Number(ackParams.timeoutPerMbMs) || 800),
-          sendAckTimeoutMaxMs: Math.max(1000, Number(ackParams.timeoutMaxMs) || 20000),
-          sendAckImageMaxRetries: Math.max(0, Number(ackParams.maxRetriesImage) || 1),
-          sendAckVideoMaxRetries: Math.max(0, Number(ackParams.maxRetriesVideo) || 1),
-          sendAckImageFailOnTimeout: !!ackParams.failOnTimeoutImage,
-          sendAckVideoFailOnTimeout: !!ackParams.failOnTimeoutVideo,
-          sendAckRetryAction: ackParams.retryAction
-        })
+        body: JSON.stringify(buildConfigPayload())
       })
       saving.value = false
       if (d.success) {
         toast('发送配置已保存，下一条消息生效')
         custom.value = buildCustom()
+        markBaseline()
         loadStatus()
       } else {
         toast('保存失败: ' + (d.error || '未知错误'), 'error')
@@ -1088,6 +1371,7 @@ var SendManagerPage = {
     function resetCustom() {
       custom.value = {}
       initParams()
+      customEditing.value = false
     }
 
     async function clearQueue() {
@@ -1127,18 +1411,6 @@ var SendManagerPage = {
       return new Date(ts).toLocaleTimeString()
     }
 
-    function stepSummary() {
-      var steps = status.lastSendSteps
-      if (!steps || !steps.length) return '-'
-      var total = 0
-      var parts = []
-      for (var i = 0; i < steps.length; i++) {
-        total += steps[i].ms || 0
-        parts.push(steps[i].step + ' ' + steps[i].ms + 'ms')
-      }
-      return parts.join(' / ') + '（总计 ~' + Math.round(total / 100) / 10 + 's）'
-    }
-
     var timer = null
     onMounted(function () {
       loadMode()
@@ -1156,115 +1428,303 @@ var SendManagerPage = {
       clearingQueue: clearingQueue, clearingPinyin: clearingPinyin, ackParams: ackParams,
       profileLabels: profileLabels, saveMode: saveMode, resetCustom: resetCustom,
       clearQueue: clearQueue, clearPinyinCache: clearPinyinCache,
-      onModeChange: onModeChange, fmtTime: fmtTime, stepSummary: stepSummary
+      fmtTime: fmtTime,
+      health: health, healthClass: healthClass, donut: donut, sessionSent: sessionSent, sessionFailed: sessionFailed,
+      queueBars: queueBars, trend: trend, pipeline: pipeline,
+      nowElapsed: nowElapsed, typeLabel: typeLabel, urgencyClass: urgencyClass,
+      tiers: tiers, tierName: tierName, setTier: setTier, customEditing: customEditing, overriddenKeys: overriddenKeys,
+      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck,
+      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary,
+      dirty: dirty, discardChanges: discardChanges
     }
   },
   template: '<div>' +
-    '<h1 class="page-title">发送管理</h1>' +
+    '<div class="page-header">' +
+    '<div><h1 class="page-title" style="margin:0">发送管理</h1><p class="subtitle">发送流水线状态与节律配置</p></div>' +
+    '</div>' +
 
-    '<div class="card">' +
-    '<h2>当前运行状态</h2>' +
-    '<div class="form-row"><label>当前档位</label><span>{{ status.mode }}</span></div>' +
-    '<div class="form-row"><label>队列待发</label><span>{{ status.queue.pending }}</span></div>' +
-    '<div class="form-row"><label>当前批次</label><span>{{ status.batch.contact ? status.batch.contact + "（" + status.batch.size + " 条）" : "-" }}</span></div>' +
-    '<div class="form-row"><label>正在发送</label><span class="status-badge" :class="status.queue.processing ? \'connected\' : \'disconnected\'">{{ status.queue.processing ? "是" : "否" }}</span></div>' +
-    '<div class="form-row"><label>队列冷却</label><span :class="status.backpressure.coolRemainingMs > 0 ? \'status-badge disconnected\' : \'\'">{{ status.backpressure.coolRemainingMs > 0 ? "冷却中 " + Math.ceil(status.backpressure.coolRemainingMs / 1000) + "s" : "无" }}</span></div>' +
-    '<div class="form-row"><label>连续失败</label><span>{{ status.backpressure.consecutiveFailures }} 次</span></div>' +
-    '<div class="form-row"><label>连续成功</label><span>{{ status.successStreak }} 次</span></div>' +
-    '<div class="form-row"><label>已去重</label><span>{{ status.dedupCount }} 条</span></div>' +
-    '<div class="form-row"><label>吞吐统计</label><span>已发 {{ status.stats.sent }} / 失败 {{ status.stats.failed }}</span></div>' +
-    '<div class="form-row"><label>最近发送耗时</label><span style="font-size:12px;text-align:right">{{ stepSummary() }}</span></div>' +
-    '<div class="form-row"><label>最近发送</label><span>{{ fmtTime(status.queue.lastSendTime) }}</span></div>' +
-    '<div class="form-row"><label>拼音缓存</label><span>{{ status.pinyinCacheSize }} 条 <button class="btn btn-secondary btn-sm" style="margin-left:8px" :disabled="clearingPinyin" @click="clearPinyinCache">{{ clearingPinyin ? "清空中..." : "清空" }}</button></span></div>' +
+    '<transition name="fade-slide">' +
+    '<div v-if="health.level === \'danger\'" class="bp-alert-banner">' +
+    '<span class="bp-alert-icon">⚠</span>' +
+    '<span>队列冷却中 · <b>{{ Math.ceil(status.backpressure.coolRemainingMs / 1000) }}s</b> 后恢复 · 连续失败 {{ status.backpressure.consecutiveFailures }} 次 · 自动降档：{{ status.backpressure.autoDowngrade ? "已启用" : "未启用" }}</span>' +
+    '</div>' +
+    '</transition>' +
+
+    '<div class="send-dashboard">' +
+    '<div class="stat-card dash-card" :class="healthClass">' +
+    '<div class="ring-wrap">' +
+    '<svg class="health-ring" viewBox="0 0 120 120">' +
+    '<circle class="ring-track" cx="60" cy="60" r="44"></circle>' +
+    '<circle class="ring-fill" cx="60" cy="60" r="44"></circle>' +
+    '</svg>' +
+    '<div class="ring-center"><div class="ring-label">{{ health.label }}</div><div class="ring-detail">{{ health.detail }}</div></div>' +
+    '</div>' +
+    '<div class="dash-caption">系统状态</div>' +
+    '</div>' +
+
+    '<div class="stat-card dash-card">' +
+    '<div class="ring-wrap">' +
+    '<svg class="donut" viewBox="0 0 100 100">' +
+    '<circle class="ring-track" cx="50" cy="50" r="36"></circle>' +
+    '<circle v-for="(s, i) in (donut ? donut.segs : [])" :key="i" class="donut-seg" :stroke="s.color" :stroke-dasharray="s.dasharray" :stroke-dashoffset="s.dashoffset"></circle>' +
+    '</svg>' +
+    '<div class="ring-center"><div class="ring-label">{{ donut ? donut.rate + "%" : "—" }}</div><div class="ring-detail">成功率</div></div>' +
+    '</div>' +
+    '<div class="dash-caption">已发 {{ sessionSent }} · 失败 {{ sessionFailed }}<br><span style="font-size:11px">本次会话增量</span></div>' +
+    '</div>' +
+
+    '<div class="stat-card dash-card">' +
+    '<div class="queue-bars">' +
+    '<div v-for="(b, i) in queueBars" :key="i" class="queue-bar" :class="{ warn: b.warn }" :style="{ height: b.h + \'%\' }"></div>' +
+    '<div v-if="!queueBars.length" class="chart-empty">采集中…</div>' +
+    '</div>' +
+    '<div class="dash-caption">队列积压走势 · 待发 <b>{{ status.queue.pending }}</b></div>' +
+    '</div>' +
+
+    '<div class="stat-card dash-card dash-misc">' +
+    '<div class="misc-row"><span>连续成功</span><b class="ok-text">{{ status.successStreak }}</b></div>' +
+    '<div class="misc-row"><span>连续失败</span><b :class="status.backpressure.consecutiveFailures ? \'bad-text\' : \'\'">{{ status.backpressure.consecutiveFailures }}</b></div>' +
+    '<div class="misc-row"><span>累计吞吐</span><b>{{ status.stats.sent }} / {{ status.stats.failed }}</b></div>' +
+    '<div class="misc-row"><span>已去重</span><b>{{ status.dedupCount }}</b></div>' +
+    '<div class="misc-row"><span>最近发送</span><b>{{ fmtTime(status.queue.lastSendTime) }}</b></div>' +
+    '<div class="misc-row"><span>拼音缓存</span><span><b>{{ status.pinyinCacheSize }}</b> <button class="btn btn-secondary btn-sm" style="margin-left:6px" :disabled="clearingPinyin" @click="clearPinyinCache">{{ clearingPinyin ? "清空中…" : "清空" }}</button></span></div>' +
+    '</div>' +
     '</div>' +
 
     '<div class="card">' +
-    '<h2>发送延时档位</h2>' +
-    '<div class="form-row"><label>延时档位</label>' +
-    '<select v-model="mode" @change="onModeChange"><option value="safe">安全（慢，更稳）</option><option value="standard">标准</option><option value="aggressive">激进（快，风险高）</option></select>' +
+    '<h2>吞吐趋势 <span class="chart-sub">最近 5 分钟 · 3s 采样</span></h2>' +
+    '<svg v-if="trend" class="trend-chart" viewBox="0 0 560 140" preserveAspectRatio="none">' +
+    '<path :d="trend.area" class="trend-area"></path>' +
+    '<path :d="trend.pend" class="trend-pend"></path>' +
+    '<path :d="trend.line" class="trend-line"></path>' +
+    '</svg>' +
+    '<div v-else class="chart-empty" style="height:140px;display:flex;align-items:center;justify-content:center">采集中，约 10 秒后出图…</div>' +
+    '<div class="trend-legend">' +
+    '<span><span class="legend-dot accent"></span>成功发送</span>' +
+    '<span><span class="legend-dot muted"></span>队列待发</span>' +
+    '<span style="margin-left:auto">峰值：{{ trend ? "吞吐 " + trend.maxS + "/3s · 队列 " + trend.maxP : "—" }}</span>' +
     '</div>' +
-    '<div class="form-row"><label>失败自动降档</label><toggle-switch v-model="autoDowngrade" /></div>' +
+    '</div>' +
+
+    '<div class="card">' +
+    '<h2>最近一次发送耗时 <span v-if="status.queue.lastSendTime" class="chart-sub">{{ fmtTime(status.queue.lastSendTime) }}</span></h2>' +
+    '<template v-if="pipeline">' +
+    '<div class="pipeline">' +
+    '<div v-for="(s, i) in pipeline.segs" :key="i" class="pipe-seg" :style="{ width: s.pct + \'%\', background: s.color }" :title="s.title"></div>' +
+    '</div>' +
+    '<div class="pipeline-legend">' +
+    '<span><span class="legend-dot" style="background:#60a5fa"></span>激活</span>' +
+    '<span><span class="legend-dot" style="background:#a78bfa"></span>搜索/聚焦</span>' +
+    '<span><span class="legend-dot" style="background:var(--accent)"></span>粘贴发送</span>' +
+    '<span><span class="legend-dot" style="background:var(--success)"></span>其他</span>' +
+    '<span class="pipe-total">总计 ~{{ pipeline.total }}</span>' +
+    '</div>' +
+    '</template>' +
+    '<div v-else class="chart-empty" style="padding:18px 0">暂无发送记录，发送一条消息后显示耗时分解</div>' +
+    '</div>' +
+
+    '<div class="card queue-card">' +
+    '<div class="queue-head">' +
+    '<h2>实时队列 <span v-if="status.queue.pending" class="queue-count-badge">{{ status.queue.pending }}</span></h2>' +
+    '<button class="btn btn-danger btn-sm" :disabled="clearingQueue || !status.queue.items.length" @click="clearQueue">{{ clearingQueue ? "清空中…" : "清空队列" }}</button>' +
+    '</div>' +
+    '<div v-if="status.queue.processing" class="now-sending">' +
+    '<span class="pulse-dot"></span>' +
+    '<div class="now-main">' +
+    '<div class="now-contact">{{ (status.queue.items[0] && status.queue.items[0].contactName) || status.batch.contact || "发送中" }}</div>' +
+    '<div class="now-content">{{ status.queue.currentContent || "媒体消息" }}</div>' +
+    '</div>' +
+    '<div class="now-elapsed">{{ nowElapsed }}s</div>' +
+    '</div>' +
+    '<div class="queue-list">' +
+    '<div v-for="item in status.queue.items" :key="item.id" class="queue-item" :class="urgencyClass(item)">' +
+    '<span class="badge" :class="item.type === \'image\' ? \'warn\' : (item.type === \'video\' ? \'video\' : \'ok\')">{{ typeLabel(item.type) }}</span>' +
+    '<span class="queue-contact">{{ item.contactName }}</span>' +
+    '<span class="queue-preview">{{ item.contentPreview || "—" }}</span>' +
+    '<span class="queue-wait">{{ item.queuedSeconds }}s</span>' +
+    '</div>' +
+    '<div v-if="!status.queue.items.length" class="chart-empty" style="padding:10px 0">队列为空</div>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secRhythm = !secRhythm">' +
+    '<span class="chev" :class="{ open: secRhythm }">▸</span>' +
+    '<span class="config-title">发送节奏</span>' +
+    '<span class="config-summary">{{ tierName(mode) }} · 降档 {{ autoDowngrade ? "开" : "关" }}</span>' +
+    '</button>' +
+    '<div v-show="secRhythm" class="config-body">' +
+    '<div class="tier-capsules">' +
+    '<button v-for="t in tiers" :key="t.key" type="button" class="tier-card" :class="{ active: mode === t.key }" @click="setTier(t.key)">' +
+    '<span class="tier-icon">{{ t.icon }}</span>' +
+    '<span class="tier-name">{{ t.name }}</span>' +
+    '<span class="tier-desc">{{ t.desc }}</span>' +
+    '</button>' +
+    '</div>' +
+    '<div class="config-opt-grid cols1" style="margin-top:6px">' +
+    '<div class="strategy-card" :class="{ on: autoDowngrade }">' +
+    '<div class="strategy-top"><span class="strategy-name">失败自动降档</span><toggle-switch v-model="autoDowngrade" /></div>' +
+    '<div class="strategy-desc">熔断触发时自动切换到更慢的延时档位，避免持续失败；恢复后可手动切回</div>' +
+    '</div>' +
+    '</div>' +
     '<div class="delay-grid">' +
     '<template v-for="(item, idx) in profileLabels" :key="item.key">' +
     '<div class="delay-group-title" v-if="idx === 6">粘贴发送（剪贴板/粘贴/发送稳定，建议 ≥ 当前值）</div>' +
     '<div class="delay-item">' +
-    '<div class="delay-item-label">{{ item.label }}</div>' +
+    '<div class="delay-item-label">{{ item.label }}<span class="override-dot" v-if="overriddenKeys[item.key]" title="自定义值"></span></div>' +
     '<div class="delay-item-input">' +
-    '<input type="number" min="0" step="10" v-model.number="params[item.key]">' +
+    '<input type="number" min="0" step="10" v-model.number="params[item.key]" :disabled="!customEditing">' +
     '<span class="ms">ms</span>' +
     '</div>' +
     '</div>' +
     '</template>' +
     '</div>' +
+    '<div class="custom-edit-bar">' +
+    '<span style="font-size:12px;color:var(--text-muted)">{{ customEditing ? "自定义模式：修改值差异项将保存为覆盖参数" : "当前为「" + tierName(mode) + "」预设值" }}</span>' +
+    '<button v-if="!customEditing" class="btn btn-secondary btn-sm" @click="customEditing = true">自定义参数</button>' +
+    '</div>' +
     '<div style="margin-top:12px">' +
-    '<button class="btn btn-secondary" style="margin-right:8px" @click="resetCustom">恢复预设值</button>' +
-    '<button class="btn btn-primary" :disabled="saving" @click="saveMode">{{ saving ? "保存中..." : "保存配置" }}</button>' +
+    '<button class="btn btn-secondary" @click="resetCustom">恢复预设值</button>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secStrategy = !secStrategy">' +
+    '<span class="chev" :class="{ open: secStrategy }">▸</span>' +
+    '<span class="config-title">队列策略</span>' +
+    '<span class="config-summary">{{ strategySummary }}</span>' +
+    '</button>' +
+    '<div v-show="secStrategy" class="config-body">' +
+    '<div class="strategy-grid">' +
+    '<div class="strategy-card" :class="{ on: mergeEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">连续文本合并</span><toggle-switch v-model="mergeEnabled" /></div>' +
+    '<div class="strategy-desc">同一联系人的连续消息复用已打开的聊天窗口，仅首条搜索联系人，后续直接粘贴发送，更快</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: dedupEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">消息去重</span><toggle-switch v-model="dedupEnabled" /></div>' +
+    '<div class="strategy-desc">同一联系人同时待发的相同文本只保留第一条，避免重复发送</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: priorityEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">联系人分组优先</span><toggle-switch v-model="priorityEnabled" /></div>' +
+    '<div class="strategy-desc">同一联系人的消息（文字+图片）在队列中连续排列，避免图文发送割裂</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: dynamicIntervalEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">动态缩间隔</span><toggle-switch v-model="dynamicIntervalEnabled" /></div>' +
+    '<div class="strategy-desc">连续成功时自动缩短消息间隔（下限 300ms），失败后复位</div>' +
+    '</div>' +
+    '</div>' +
     '</div>' +
     '</div>' +
 
-    '<div class="card">' +
-    '<h2>队列优化</h2>' +
-    '<div class="form-row"><label>连续文本合并</label><toggle-switch v-model="mergeEnabled" /></div>' +
-    '<div class="form-hint">同一联系人的连续消息将复用已打开的聊天窗口，仅首条搜索联系人，后续直接粘贴发送，发送更快</div>' +
-    '<div class="form-row"><label>消息去重</label><toggle-switch v-model="dedupEnabled" /></div>' +
-    '<div class="form-hint">同一联系人同时待发的相同文本只保留第一条，避免重复发送</div>' +
-    '<div class="form-row"><label>联系人分组优先</label><toggle-switch v-model="priorityEnabled" /></div>' +
-    '<div class="form-hint">同一联系人的消息（文字+图片）在队列中连续排列，按首次出现顺序分发，避免图文发送割裂</div>' +
-    '<div class="form-row"><label>自适应背压</label><toggle-switch v-model="backpressureEnabled" /></div>' +
-    '<div class="form-hint">发送连续失败达到阈值时暂停队列冷却，并自动降档保护；默认关闭</div>' +
-    '<div class="form-row"><label>动态缩间隔</label><toggle-switch v-model="dynamicIntervalEnabled" /></div>' +
-    '<div class="form-hint">连续成功时自动缩短消息间隔（下限 300ms），失败后复位；默认关闭</div>' +
-    '<div class="form-row"><label>失败阈值</label><input type="number" min="1" step="1" v-model.number="bpParams.threshold" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">连续失败达到该次数触发队列冷却（默认 3）</div>' +
-    '<div class="form-row"><label>冷却时长(ms)</label><input type="number" min="1000" step="1000" v-model.number="bpParams.cooldownMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">队列暂停时长，默认 10000（10 秒）</div>' +
-    '<div class="form-row"><label>退避基数(ms)</label><input type="number" min="100" step="100" v-model.number="bpParams.backoffBaseMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
-    '<div class="form-row"><label>大图粘贴等待上限(ms)</label><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
+    '<div class="card config-section" :class="{ \'section-alert\': status.backpressure.coolRemainingMs > 0 }">' +
+    '<button type="button" class="config-head" @click="secBp = !secBp">' +
+    '<span class="chev" :class="{ open: secBp }">▸</span>' +
+    '<span class="config-title">熔断保护</span>' +
+    '<span class="config-summary">{{ bpSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secBp" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: backpressureEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">自适应背压</span><toggle-switch v-model="backpressureEnabled" /></div>' +
+    '<div class="strategy-desc">发送连续失败达到阈值时暂停队列冷却，并自动降档保护；默认关闭</div>' +
+    '</div>' +
+    '</div>' +
+    '<transition name="fade-slide">' +
+    '<div v-show="backpressureEnabled" class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">失败阈值</span><span class="opt-input"><input type="number" min="1" step="1" v-model.number="bpParams.threshold">次</span></div>' +
+    '<div class="strategy-desc">连续失败达到该次数触发队列冷却（默认 3）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">冷却时长</span><span class="opt-input"><input type="number" min="1000" step="1000" v-model.number="bpParams.cooldownMs">ms</span></div>' +
+    '<div class="strategy-desc">队列暂停时长，默认 10000（10 秒）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">退避基数</span><span class="opt-input"><input type="number" min="100" step="100" v-model.number="bpParams.backoffBaseMs">ms</span></div>' +
+    '<div class="strategy-desc">重试基础间隔，按 1×/2×/4× 递增，上限 6000ms（默认 1500）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">大图粘贴等待上限</span><span class="opt-input"><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs">ms</span></div>' +
+    '<div class="strategy-desc">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
+    '</div>' +
+    '</div>' +
+    '</transition>' +
+    '</div>' +
     '</div>' +
 
-    '<div class="card">' +
-    '<h2>媒体发送回执（SendAck）</h2>' +
-    '<div class="form-row"><label>启用回执</label><toggle-switch v-model="ackParams.enabled" /></div>' +
-    '<div class="form-hint">图片/视频发送后等待 WCDB 回执确认是否真正发出；关闭则恢复“Enter 即成功”</div>' +
-    '<div class="form-row"><label>输入框探针（防误发）</label><toggle-switch v-model="ackParams.probeEnabled" /></div>' +
-    '<div class="form-hint">超时未确认时抓屏比对输入框是否仍含媒体：已清空则判定疑似已发出、禁止二次 Enter，防误发残留内容（默认关，需 xwd 可用）</div>' +
-    '<div class="form-row"><label>图片回执超时(ms)</label><input type="number" min="500" step="500" v-model.number="ackParams.timeoutImageMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">图片提交超时（默认 5000）；大图按体积自动加档</div>' +
-    '<div class="form-row"><label>视频回执超时(ms)</label><input type="number" min="500" step="500" v-model.number="ackParams.timeoutVideoMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">视频提交超时（默认 10000）</div>' +
-    '<div class="form-row"><label>体积加档(ms/MB)</label><input type="number" min="0" step="100" v-model.number="ackParams.timeoutPerMbMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">媒体每超 1MB 追加的超时（默认 800），0 关闭自适应</div>' +
-    '<div class="form-row"><label>超时封顶(ms)</label><input type="number" min="1000" step="1000" v-model.number="ackParams.timeoutMaxMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">自适应超时上限（默认 20000）</div>' +
-    '<div class="form-row"><label>扩展等待(ms)</label><input type="number" min="0" step="1000" v-model.number="ackParams.extendWaitMs" style="width:110px;text-align:right"></div>' +
-    '<div class="form-hint">探针判定“已发出但 WCDB 未确认”后的等待（默认 10000）</div>' +
-    '<div class="form-row"><label>图片失败重试</label><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesImage" style="width:110px;text-align:right"></div>' +
-    '<div class="form-row"><label>视频失败重试</label><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesVideo" style="width:110px;text-align:right"></div>' +
-    '<div class="form-row"><label>超时按失败处理(图)</label><toggle-switch v-model="ackParams.failOnTimeoutImage" /></div>' +
-    '<div class="form-row"><label>超时按失败处理(视频)</label><toggle-switch v-model="ackParams.failOnTimeoutVideo" /></div>' +
-    '<div class="form-row"><label>兜底动作</label>' +
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secAck = !secAck">' +
+    '<span class="chev" :class="{ open: secAck }">▸</span>' +
+    '<span class="config-title">媒体发送回执（SendAck）</span>' +
+    '<span class="config-summary">{{ ackSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secAck" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: ackParams.enabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">启用回执</span><toggle-switch v-model="ackParams.enabled" /></div>' +
+    '<div class="strategy-desc">图片/视频发送后等待 WCDB 回执确认是否真正发出；关闭则恢复"Enter 即成功"</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: ackParams.probeEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">输入框探针（防误发）</span><toggle-switch v-model="ackParams.probeEnabled" /></div>' +
+    '<div class="strategy-desc">超时未确认时抓屏比对输入框是否仍含媒体：已清空则判定疑似已发出、禁止二次 Enter，防误发残留内容（默认关，需 xwd 可用）</div>' +
+    '</div>' +
+    '</div>' +
+    '<div class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">图片回执超时</span><span class="opt-input"><input type="number" min="500" step="500" v-model.number="ackParams.timeoutImageMs">ms</span></div>' +
+    '<div class="strategy-desc">图片提交超时（默认 5000）；大图按体积自动加档</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">视频回执超时</span><span class="opt-input"><input type="number" min="500" step="500" v-model.number="ackParams.timeoutVideoMs">ms</span></div>' +
+    '<div class="strategy-desc">视频提交超时（默认 10000）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">体积加档</span><span class="opt-input"><input type="number" min="0" step="100" v-model.number="ackParams.timeoutPerMbMs">ms/MB</span></div>' +
+    '<div class="strategy-desc">媒体每超 1MB 追加的超时（默认 800），0 关闭自适应</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">超时封顶</span><span class="opt-input"><input type="number" min="1000" step="1000" v-model.number="ackParams.timeoutMaxMs">ms</span></div>' +
+    '<div class="strategy-desc">自适应超时上限（默认 20000）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">扩展等待</span><span class="opt-input"><input type="number" min="0" step="1000" v-model.number="ackParams.extendWaitMs">ms</span></div>' +
+    '<div class="strategy-desc">探针判定"已发出但 WCDB 未确认"后的等待（默认 10000）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">图片失败重试</span><span class="opt-input"><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesImage">次</span></div>' +
+    '<div class="strategy-desc">图片回执失败后的自动重试次数（默认 1）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">视频失败重试</span><span class="opt-input"><input type="number" min="0" step="1" v-model.number="ackParams.maxRetriesVideo">次</span></div>' +
+    '<div class="strategy-desc">视频回执失败后的自动重试次数（默认 1）</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: ackParams.failOnTimeoutImage }">' +
+    '<div class="strategy-top"><span class="strategy-name">超时按失败处理（图）</span><toggle-switch v-model="ackParams.failOnTimeoutImage" /></div>' +
+    '<div class="strategy-desc">图片回执超时视为发送失败，计入熔断统计并触发重试</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: ackParams.failOnTimeoutVideo }">' +
+    '<div class="strategy-top"><span class="strategy-name">超时按失败处理（视频）</span><toggle-switch v-model="ackParams.failOnTimeoutVideo" /></div>' +
+    '<div class="strategy-desc">视频回执超时视为发送失败，计入熔断统计并触发重试</div>' +
+    '</div>' +
+    '<div class="strategy-card" style="grid-column:1 / -1">' +
+    '<div class="strategy-top"><span class="strategy-name">兜底动作</span>' +
     '<select v-model="ackParams.retryAction"><option value="re-enter">二次 Enter（不清空，默认）</option><option value="clear-repaste">清空重贴（旧方案）</option><option value="none">只告警</option></select>' +
     '</div>' +
-    '<div class="form-hint">未确认时的兜底动作；重试次数=对应 kind 的失败重试+1</div>' +
+    '<div class="strategy-desc">回执未确认时的兜底动作；重试次数 = 对应 kind 的失败重试 + 1</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
     '</div>' +
 
-    '<div class="card">' +
-    '<h2>队列明细</h2>' +
-    '<div style="max-height:300px;overflow-y:auto">' +
-    '<div class="form-row" v-for="item in status.queue.items" :key="item.id">' +
-    '<label>{{ item.contactName }}</label>' +
-    '<span style="display:flex;align-items:center;gap:8px;font-size:12px;min-width:0">' +
-    '<span class="badge" :class="item.type === \'image\' ? \'warn\' : \'ok\'">{{ item.type === "image" ? "图" : "文" }}</span>' +
-    '<span style="max-width:280px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">{{ item.contentPreview || "-" }}</span>' +
-    '<span style="color:var(--text-muted);flex-shrink:0">{{ item.queuedSeconds }}s</span>' +
-    '</span>' +
+    '<transition name="fade-up">' +
+    '<div v-if="dirty" class="save-bar">' +
+    '<span class="save-bar-dot"></span>' +
+    '<span class="save-bar-text">有未保存的更改</span>' +
+    '<button class="btn btn-secondary btn-sm" @click="discardChanges">放弃</button>' +
+    '<button class="btn btn-primary btn-sm" :disabled="saving" @click="saveMode">{{ saving ? "保存中…" : "保存配置" }}</button>' +
     '</div>' +
-    '<div v-if="!status.queue.items.length" style="color:var(--text-muted);font-size:12px;padding:10px 0">队列为空</div>' +
-    '</div>' +
-    '<button class="btn btn-danger btn-sm" style="margin-top:10px" :disabled="clearingQueue || !status.queue.items.length" @click="clearQueue">{{ clearingQueue ? "清空中..." : "清空队列" }}</button>' +
-    '</div>' +
+    '</transition>' +
     '</div>'
 }
 
@@ -1411,7 +1871,7 @@ var LoginPage = {
     '<p style="font-size:13px;color:var(--text-muted);margin:0 0 28px">请输入密码以访问管理面板</p>' +
     '<div v-if="error" class="login-error">{{ error }}</div>' +
     '<div style="margin-bottom:18px">' +
-    '<input type="password" v-model="password" @keyup="onKeyup" placeholder="输入密码" autofocus ' +
+    '<input type="password" v-model="password" @keyup="onKeyup" placeholder="输入密码" autofocus autocomplete="current-password" ' +
     'style="width:100%;padding:12px 16px;border-radius:10px;font-size:15px;text-align:center;letter-spacing:4px">' +
     '</div>' +
     '<button class="btn btn-primary" @click="doLogin" :disabled="loading" ' +
@@ -1689,6 +2149,22 @@ var App = {
     '<div v-else class="app-shell">' +
 
     '<div :class="[\'sidebar-backdrop\', sidebarOpen?\'visible\':\'\']" @click="closeSidebar"></div>' +
+
+    '<nav class="mini-rail" aria-label="快捷导航">' +
+    '<router-link v-for="item in navItems" :key="item.path" :to="item.path" ' +
+    'custom v-slot="{ href, navigate, isActive }">' +
+    '<a :href="href" :class="[\'rail-btn\', { active: isActive }]" :title="item.label" :aria-label="item.label" @click="navigate; onNavClick()">' +
+    '<span class="rail-indicator"></span>' +
+    '<span class="nav-icon" v-html="item.icon"></span>' +
+    '</a></router-link>' +
+    '<div class="rail-spacer"></div>' +
+    '<button class="rail-btn" title="展开菜单" aria-label="展开菜单" @click="toggleSidebar()">' +
+    '<span class="nav-icon"><svg viewBox="0 0 24 24"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></span>' +
+    '</button>' +
+    '<button class="rail-btn rail-logout" title="退出登录" aria-label="退出登录" @click="logout">' +
+    '<span class="nav-icon"><svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></span>' +
+    '</button>' +
+    '</nav>' +
 
     '<aside :class="[\'sidebar\', sidebarOpen?\'open\':\'\']">' +
 

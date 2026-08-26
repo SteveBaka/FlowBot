@@ -14,7 +14,7 @@
   window.__LG_REFRACTION__ = true;
 
   var cfg = Object.assign(
-    { displacementScale: 90, aberrationIntensity: 2, size: 256 },
+    { displacementScale: 100, aberrationIntensity: 2, size: 256 },
     window.LIQUID_GLASS_CONFIG || {}
   );
 
@@ -125,7 +125,7 @@
     var edgeMask = el('feComponentTransfer', { in: 'EDGE_INTENSITY', result: 'EDGE_MASK' });
     var edgeFunc = document.createElementNS(NS, 'feFuncA');
     edgeFunc.setAttribute('type', 'discrete');
-    edgeFunc.setAttribute('tableValues', '0 ' + (ab * 0.05) + ' 1');
+    edgeFunc.setAttribute('tableValues', '0 ' + (0.1 + ab * 0.06) + ' 1');
     edgeMask.appendChild(edgeFunc);
 
     el('feOffset', { in: 'SourceGraphic', dx: '0', dy: '0', result: 'CENTER_ORIGINAL' });
@@ -166,12 +166,52 @@
     /* 下一帧再加类，确保样式解析时滤镜已就位 */
     requestAnimationFrame(function () {
       document.documentElement.classList.add('lg-svg');
+      injectWarpLayers();
     });
+  }
+
+  /* ── warp 层注入（liquid-glass-react 原架构）─────────────────────────
+     blur+url 塞进同一个 backdrop-filter 列表会被 Chromium 打折（探针实测）。
+     正确做法：容器内 prepend 一个空 warp 层，backdrop-filter 只含 blur()
+     纯函数，filter: url() 单独一条扭曲该层合成结果。内容 z-index>0 不变形。 */
+  var WARP_SELECTOR = [
+    '.card', '.stat-card', '.bot-card', '.log-box', '.hint-card',
+    '.disclaimer-banner', '.port-item', '.login-card', '.modal',
+    '.bot-config-panel', '.chain-bar', '.health-banner', '.bp-alert-banner'
+  ].join(',');
+
+  function injectWarpLayers(root) {
+    var scope = root || document;
+    var targets = scope.querySelectorAll(WARP_SELECTOR);
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      if (el.__lgWarp) continue;
+      if (getComputedStyle(el).position === 'static') el.style.position = 'relative';
+      var warp = document.createElement('span');
+      warp.className = 'glass-warp';
+      el.__lgWarp = true;
+      el.insertBefore(warp, el.firstChild);
+    }
+  }
+
+  function observeWarp() {
+    injectWarpLayers();
+    var mo = new MutationObserver(function (muts) {
+      for (var i = 0; i < muts.length; i++) {
+        if (muts[i].addedNodes.length) {
+          /* 动态插入的卡片（队列项、toasts 等）也补 warp */
+          setTimeout(function () { injectWarpLayers(); }, 0);
+          break;
+        }
+      }
+    });
+    mo.observe(document.body, { childList: true, subtree: true });
   }
 
   function boot() {
     try {
       injectFilter(buildDisplacementMap());
+      observeWarp();
     } catch (e) {
       /* canvas/SVG 不可用时静默降级为纯 blur */
     }
