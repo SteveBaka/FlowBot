@@ -106,11 +106,11 @@ var HomePage = {
     })
 
     function dotColor(c) {
-      if (c === 'green') return '#2ed573'
-      if (c === 'red') return '#ff4757'
-      if (c === 'yellow') return '#ffa502'
-      if (c === 'gray') return '#8892a4'
-      return '#8892a4'
+      if (c === 'green') return '#10b981'
+      if (c === 'red') return '#ef4444'
+      if (c === 'yellow') return '#fbbf24'
+      if (c === 'gray') return '#94a3b8'
+      return '#94a3b8'
     }
 
     async function load() {
@@ -245,7 +245,7 @@ var HomePage = {
     '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" style="margin-top:4px">' +
     '<div v-for="bs in cards.onebot.sub" :key="bs.label" style="font-size:13px;display:flex;align-items:center;gap:6px">' +
     '<span style="font-family:monospace;font-weight:500">{{ bs.label }}</span>' +
-    '<span style="font-size:12px" :style="{color: bs.status===\'connected\'?\'#2ed573\':bs.status===\'running\'?\'#2ed573\':\'#ff4757\'}">{{ bs.status===\'connected\'?\'已连接\':bs.status===\'running\'?\'运行中\':\'未连接\' }}</span>' +
+    '<span style="font-size:12px" :style="{color: (bs.status===\'connected\'||bs.status===\'running\')?\'var(--success)\':\'var(--danger)\'}">{{ bs.status===\'connected\'?\'已连接\':bs.status===\'running\'?\'运行中\':\'未连接\' }}</span>' +
     '</div>' +
     '</div>' +
     '<div v-else-if="typeof cards.onebot.sub === \'string\' && cards.onebot.sub" class="stat-sub">{{ cards.onebot.sub }}</div>' +
@@ -307,55 +307,38 @@ var BotPage = {
   components: { ToggleSwitch: ToggleSwitch },
   setup: function () {
     var bots = ref([])
-    var showModal = ref(false)
-    var modalStep = ref(1)
-    var modalMode = ref('')
-    var modalDirection = ref('server')
-    var modalBotName = ref('')
-    var modalUrl = ref('ws://127.0.0.1:6199/ws')
-    var modalPort = ref(7100)
-    var modalToken = ref('')
+    var showPanel = ref(false)
     var editingBotId = ref(null)
+    var panelMode = ref('http')
+    var panelDirection = ref('server')
+    var panelName = ref('')
+    var panelPort = ref(7100)
+    var panelUrl = ref('ws://127.0.0.1:6199/ws')
+    var panelToken = ref('')
+    var panelSaving = ref(false)
 
     async function loadBots() {
       var d = await api('/api/v1/mgmt/config')
       if (!d.error && d.bots) {
         try {
           var parsed = typeof d.bots === 'string' ? JSON.parse(d.bots) : d.bots
-          if (Array.isArray(parsed)) {
-            // 先合并状态再赋值，确保首屏即可显示正确的连接状态
-            await mergeBotStatus(parsed)
-            bots.value = parsed
-          }
-        } catch (e) {}
+          if (Array.isArray(parsed)) bots.value = parsed
+        } catch (_) {}
       }
-    }
-
-    // 合并各 bot 的实时连接状态（含插件 API 对端连接情况）
-    async function mergeBotStatus(list) {
       try {
         var st = await api('/api/v1/mgmt/bots/status')
         if (st && st.success && Array.isArray(st.bots)) {
           var statusMap = {}
           st.bots.forEach(function (b) { statusMap[b.id] = b })
-          list.forEach(function (b) {
+          bots.value.forEach(function (b) {
             var s = statusMap[b.id]
-            if (s) {
-              b.status = s.status
-              b.connectionStatus = s.connectionStatus
-              b.clientCount = s.clientCount
-              b.error = s.error
-            } else if (!b.status) {
-              // 状态接口未返回该 bot → 视为未运行，避免显示"未知"
-              b.status = 'stopped'
-              b.connectionStatus = 'disconnected'
-            }
+            if (s) { b.status = s.status; b.connectionStatus = s.connectionStatus; b.clientCount = s.clientCount; b.error = s.error }
+            else if (!b.status) { b.status = 'stopped'; b.connectionStatus = 'disconnected' }
           })
         }
       } catch (e) {}
     }
 
-    // 周期刷新连接状态（不重载配置，避免打断编辑）
     setInterval(function () {
       if (!bots.value.length) return
       api('/api/v1/mgmt/bots/status').then(function (st) {
@@ -364,54 +347,51 @@ var BotPage = {
           st.bots.forEach(function (b) { statusMap[b.id] = b })
           bots.value.forEach(function (b) {
             var s = statusMap[b.id]
-            if (s) {
-              b.status = s.status
-              b.connectionStatus = s.connectionStatus
-              b.clientCount = s.clientCount
-              b.error = s.error
-            } else if (!b.status) {
-              b.status = 'stopped'
-              b.connectionStatus = 'disconnected'
-            }
+            if (s) { b.status = s.status; b.connectionStatus = s.connectionStatus; b.clientCount = s.clientCount; b.error = s.error }
+            else if (!b.status) { b.status = 'stopped'; b.connectionStatus = 'disconnected' }
           })
         }
       }).catch(function () {})
     }, 5000)
 
-    function openAddModal() {
+    function openAddPanel() {
       editingBotId.value = null
-      modalStep.value = 1
-      modalMode.value = ''
-      modalDirection.value = 'server'
-      modalBotName.value = 'Bot ' + (bots.value.length + 1)
-      modalUrl.value = 'ws://127.0.0.1:6199/ws'
-      modalPort.value = 7100
-      modalToken.value = generateToken()
-      showModal.value = true
+      panelMode.value = 'http'
+      panelDirection.value = 'server'
+      panelName.value = 'Bot ' + (bots.value.length + 1)
+      panelPort.value = 7100
+      panelUrl.value = 'ws://127.0.0.1:6199/ws'
+      panelToken.value = generateToken()
+      showPanel.value = true
     }
 
-    function closeModal() { showModal.value = false }
-
-    function selectMode(mode) {
-      modalMode.value = mode
-      if (mode === 'http') {
-        modalStep.value = 3
-        modalPort.value = 7100
-      } else if (mode === 'ws') {
-        modalStep.value = 2
+    function editBot(botItem) {
+      editingBotId.value = botItem.id
+      panelMode.value = botItem.mode
+      panelDirection.value = botItem.direction || 'server'
+      panelName.value = botItem.name
+      if (botItem.mode === 'http' || botItem.mode === 'plugin') {
+        panelPort.value = Number(botItem.port) || 7100
+        panelUrl.value = ''
+      } else {
+        panelUrl.value = botItem.url || ('ws://' + botItem.address + ':' + botItem.port + '/ws')
+        panelPort.value = Number(botItem.port) || 6199
       }
+      panelToken.value = botItem.token || generateToken()
+      showPanel.value = true
     }
 
-    // HTTP 服务类型切换：OneBot HTTP 服务端 / 插件 API（AstrBot 适配器）
-    function onHttpTypeChange() {
-      if (modalMode.value === 'plugin') modalPort.value = 7400
-      else if (modalMode.value === 'http') modalPort.value = 7100
+    function closePanel() { showPanel.value = false; editingBotId.value = null }
+
+    function onPanelModeChange(mode) {
+      panelMode.value = mode
+      if (mode === 'http') { panelPort.value = 7100; panelDirection.value = 'server' }
+      else if (mode === 'plugin') { panelPort.value = 7400; panelDirection.value = 'server' }
+      else if (mode === 'ws') { panelPort.value = 6199; panelDirection.value = 'client'; panelUrl.value = 'ws://127.0.0.1:6199/ws' }
     }
 
-    function selectDirection(dir) {
-      modalDirection.value = dir
-      modalStep.value = 3
-    }
+    function onPanelDirChange(dir) { panelDirection.value = dir }
+    function regenerateToken() { panelToken.value = generateToken() }
 
     async function saveBots() {
       var d = await api('/api/v1/mgmt/config', {
@@ -423,68 +403,37 @@ var BotPage = {
         await api('/api/v1/mgmt/bots/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
         toast('Bot 配置已保存')
         loadBots()
-      } else {
-        toast('保存失败: ' + (d.error || ''), 'error')
-      }
+      } else { toast('保存失败: ' + (d.error || ''), 'error') }
     }
 
-    async function addBot() {
-      var isPortBased = modalMode.value === 'http' || modalMode.value === 'plugin'
-      var address = '127.0.0.1'
-      var port = 6199
-      var url = modalUrl.value
-      if (isPortBased) {
-        // HTTP/插件API 服务端：监听端口，无 URL
-        address = '0.0.0.0'
-        port = Number(modalPort.value) || 7100
-        url = ''
-      } else {
-        var urlMatch = modalUrl.value.match(/^(wss?):\/\/([^:\/]+):?(\d+)(\/.*)?$/)
+    async function savePanel() {
+      panelSaving.value = true
+      var isPortBased = panelMode.value === 'http' || panelMode.value === 'plugin'
+      var address = '127.0.0.1', port = 6199, url = panelUrl.value
+      if (isPortBased) { address = '0.0.0.0'; port = Number(panelPort.value) || 7100; url = '' }
+      else {
+        var urlMatch = panelUrl.value.match(/^(wss?):\/\/([^:\/]+):?(\d+)(\/.*)?$/)
         address = urlMatch ? urlMatch[2] : '127.0.0.1'
         port = urlMatch ? parseInt(urlMatch[3]) : 6199
       }
       if (editingBotId.value) {
         bots.value = bots.value.map(function (b) {
           if (b.id === editingBotId.value) {
-            return Object.assign({}, b, {
-              name: modalBotName.value || b.name,
-              mode: modalMode.value,
-              direction: modalDirection.value,
-              url: url,
-              address: address,
-              port: port,
-              token: modalToken.value
-            })
+            return Object.assign({}, b, { name: panelName.value || b.name, mode: panelMode.value, direction: panelDirection.value, url: url, address: address, port: port, token: panelToken.value })
           }
           return b
         })
-        editingBotId.value = null
       } else {
         var id = 'bot_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8)
-        var newBot = {
-          id: id,
-          name: modalBotName.value || 'Bot ' + (bots.value.length + 1),
-          mode: modalMode.value,
-          direction: modalDirection.value,
-          url: url,
-          address: address,
-          port: port,
-          token: modalToken.value,
-          enabled: true
-        }
-        bots.value = bots.value.concat([newBot])
+        bots.value = bots.value.concat([{ id: id, name: panelName.value || 'Bot ' + (bots.value.length + 1), mode: panelMode.value, direction: panelDirection.value, url: url, address: address, port: port, token: panelToken.value, enabled: true }])
       }
       await saveBots()
-      showModal.value = false
+      panelSaving.value = false
+      showPanel.value = false
+      editingBotId.value = null
     }
 
-    async function toggleBot(botItem) {
-      bots.value = bots.value.map(function (b) {
-        if (b.id === botItem.id) return Object.assign({}, b, { enabled: !b.enabled })
-        return b
-      })
-      await saveBots()
-    }
+    async function toggleBot(botItem) { botItem.enabled = !botItem.enabled; await saveBots() }
 
     async function deleteBot(botItem) {
       if (!confirm('确认删除 Bot "' + botItem.name + '"？')) return
@@ -492,38 +441,16 @@ var BotPage = {
       await saveBots()
     }
 
-    function editBot(botItem) {
-      editingBotId.value = botItem.id
-      modalMode.value = botItem.mode
-      modalDirection.value = botItem.direction
-      modalBotName.value = botItem.name
-      if (botItem.mode === 'http' || botItem.mode === 'plugin') {
-        modalUrl.value = ''
-        modalPort.value = Number(botItem.port) || 7100
-      } else {
-        modalUrl.value = botItem.url || ('ws://' + botItem.address + ':' + botItem.port + '/ws')
-        modalPort.value = Number(botItem.port) || 6199
-      }
-      modalToken.value = botItem.token
-      modalStep.value = 3
-      showModal.value = true
-    }
-
     async function testBot(botItem) {
       toast('正在测试连接...', 'info')
-      // 插件 API bot：由 WebUI server.js 管理，直接探测 bot 端口（不走 botManager）
       if (botItem.mode === 'plugin') {
         try {
           var host = window.location.hostname || '127.0.0.1'
           var port = Number(botItem.port) || 7400
-          var res = await fetch('http://' + host + ':' + port + '/api/v1/sessions', {
-            headers: botItem.token ? { Authorization: 'Bearer ' + botItem.token } : {}
-          })
-          if (res.ok) toast(botItem.name + ': 已连接（插件 API 运行中）', 'success')
-          else toast(botItem.name + ': 未连接（HTTP ' + res.status + '，检查 Token/端口）', 'error')
-        } catch (e) {
-          toast(botItem.name + ': 未连接（端口未监听）', 'error')
-        }
+          var res = await fetch('http://' + host + ':' + port + '/api/v1/sessions', { headers: botItem.token ? { Authorization: 'Bearer ' + botItem.token } : {} })
+          if (res.ok) toast(botItem.name + ': 已连接', 'success')
+          else toast(botItem.name + ': 未连接（HTTP ' + res.status + '）', 'error')
+        } catch (e) { toast(botItem.name + ': 未连接', 'error') }
         return
       }
       var d = await api('/api/v1/mgmt/bots/status')
@@ -531,21 +458,10 @@ var BotPage = {
         var bot = d.bots.find(function(b) { return b.id === botItem.id })
         if (bot) {
           var status = bot.connectionStatus || bot.status || 'unknown'
-          if (status === 'connected' || status === 'running') {
-            toast(bot.name + ': 已连接', 'success')
-          } else if (status === 'disconnected' || status === 'stopped') {
-            toast(bot.name + ': 未连接', 'error')
-          } else if (status === 'error') {
-            toast(bot.name + ': 连接错误' + (bot.error ? ': ' + bot.error : ''), 'error')
-          } else {
-            toast(bot.name + ': 未连接', 'error')
-          }
-        } else {
-          toast(botItem.name + ': 未运行（请先保存并启动）', 'error')
-        }
-      } else {
-        toast('检测失败', 'error')
-      }
+          if (status === 'connected' || status === 'running') toast(bot.name + ': 已连接', 'success')
+          else toast(bot.name + ': 未连接', 'error')
+        } else toast(botItem.name + ': 未运行', 'error')
+      } else toast('检测失败', 'error')
     }
 
     function modeBadge(m) { return m === 'http' ? 'badge-http' : (m === 'plugin' ? 'badge-plugin' : 'badge-ws') }
@@ -555,33 +471,30 @@ var BotPage = {
 
     onMounted(loadBots)
     return {
-      bots: bots, showModal: showModal, modalStep: modalStep,
-      modalMode: modalMode, modalDirection: modalDirection,
-      modalBotName: modalBotName, modalUrl: modalUrl,
-      modalPort: modalPort, modalToken: modalToken,
-      editingBotId: editingBotId,
-      openAddModal: openAddModal, closeModal: closeModal,
-      selectMode: selectMode, selectDirection: selectDirection, onHttpTypeChange: onHttpTypeChange,
-      addBot: addBot, toggleBot: toggleBot, deleteBot: deleteBot,
-      editBot: editBot, testBot: testBot,
+      bots: bots, showPanel: showPanel, editingBotId: editingBotId,
+      panelMode: panelMode, panelDirection: panelDirection,
+      panelName: panelName, panelPort: panelPort,
+      panelUrl: panelUrl, panelToken: panelToken, panelSaving: panelSaving,
+      openAddPanel: openAddPanel, closePanel: closePanel, editBot: editBot,
+      onPanelModeChange: onPanelModeChange, onPanelDirChange: onPanelDirChange,
+      regenerateToken: regenerateToken, savePanel: savePanel,
+      toggleBot: toggleBot, deleteBot: deleteBot, testBot: testBot,
       modeBadge: modeBadge, modeLabel: modeLabel,
-      dirBadge: dirBadge, dirLabel: dirLabel,
-      loadBots: loadBots
+      dirBadge: dirBadge, dirLabel: dirLabel, loadBots: loadBots
     }
   },
   template: '<div>' +
     '<div class="page-header">' +
     '<div><h1 class="page-title" style="margin:0">Bot 配置</h1><p class="subtitle">管理多个 OneBot v11 连接与插件 API</p></div>' +
     '<div class="header-actions"><button class="btn btn-secondary" @click="loadBots">刷新</button></div></div>' +
-
     '<div v-for="b in bots" :key="b.id" class="bot-card">' +
     '<div class="bot-info">' +
     '<div class="bot-name">{{ b.name }}</div>' +
     '<div class="bot-meta">' +
     '<span :class="[\'badge\', modeBadge(b.mode)]">{{ modeLabel(b.mode) }}</span>' +
     '<span :class="[\'badge\', dirBadge(b.direction)]">{{ dirLabel(b.direction) }}</span>' +
-    '<span>{{ b.url || (b.address + ":" + b.port) }}</span>' +
-    '<span v-if="b.connectionStatus === \'connected\'" class="badge badge-server">已连接{{ b.clientCount ? " (" + b.clientCount + ")" : "" }}</span>' +
+    '<span>{{ b.url || (b.address + \':\' + b.port) }}</span>' +
+    '<span v-if="b.connectionStatus === \'connected\'" class="badge badge-server">已连接{{ b.clientCount ? \' (\' + b.clientCount + \')\' : \'\' }}</span>' +
     '<span v-else-if="b.connectionStatus === \'disconnected\'" class="badge badge-client">未连接</span>' +
     '<span v-else-if="b.status === \'stopped\'" class="badge badge-client">未运行</span>' +
     '<span v-else class="badge badge-client">未知</span>' +
@@ -592,62 +505,42 @@ var BotPage = {
     '<toggle-switch :model-value="b.enabled" @update:model-value="toggleBot(b)" />' +
     '<button class="btn btn-danger btn-sm" @click="deleteBot(b)">&times;</button>' +
     '</div></div>' +
-
-    '<button class="add-bot-btn" @click="openAddModal">+ 添加 Bot</button>' +
-
-    '<transition name="modal-zoom">' +
-    '<div v-if="showModal" class="modal-overlay" @click.self="closeModal">' +
-    '<div class="modal">' +
-
-    '<transition name="modal-step" mode="out-in">' +
-    '<div :key="modalStep">' +
-    '<div v-if="modalStep===1">' +
-    '<h3>选择连接模式</h3>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
-    '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectMode(\'http\')">' +
-    '<div style="font-size:28px;margin-bottom:8px">HTTP</div>' +
-    '<div style="font-size:12px;color:var(--text-muted)">OneBot HTTP 服务端 / 插件 API</div></div>' +
-    '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectMode(\'ws\')">' +
-    '<div style="font-size:28px;margin-bottom:8px">WS</div>' +
-    '<div style="font-size:12px;color:var(--text-muted)">WebSocket</div></div>' +
+    '<button v-if="!showPanel" class="add-bot-btn" @click="openAddPanel">+ 添加 Bot</button>' +
+    '<transition name="panel-slide">' +
+    '<div v-if="showPanel" class="bot-config-panel">' +
+    '<div class="panel-header"><h3>{{ editingBotId ? "编辑 Bot" : "添加 Bot" }}</h3>' +
+    '<button class="panel-close-btn" @click="closePanel">&times;</button></div>' +
+        '<div class="panel-row">' +
+    '<div class="panel-field"><label class="panel-label">连接模式</label>' +
+    '<div class="panel-capsule">' +
+    '<button :class="[\'lg-capsule-btn\', { active: panelMode===\'http\' }]" @click="onPanelModeChange(\'http\')" :disabled="!!editingBotId">HTTP</button>' +
+    '<button :class="[\'lg-capsule-btn\', { active: panelMode===\'plugin\' }]" @click="onPanelModeChange(\'plugin\')" :disabled="!!editingBotId">插件API</button>' +
+    '<button :class="[\'lg-capsule-btn\', { active: panelMode===\'ws\' }]" @click="onPanelModeChange(\'ws\')" :disabled="!!editingBotId">WS</button>' +
     '</div>' +
-    '<div style="text-align:center;margin-top:16px"><button class="btn btn-secondary" @click="closeModal">取消</button></div>' +
+    '<div v-if="panelMode===\'http\' || panelMode===\'plugin\'" class="panel-hint" style="margin-top:6px">' +
+    "{{ panelMode === 'plugin' ? '插件 API：AstrBot 适配器统一消息服务端（HTTP+WS），Token 与适配器一致' : 'OneBot HTTP 服务端：OneBot v11 协议端口，机器人框架按 OneBot 标准接入' }}</div>" +
     '</div>' +
-
-    '<div v-else-if="modalStep===2">' +
-    '<h3>选择连接方向</h3>' +
-    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">' +
-    '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectDirection(\'server\')">' +
-    '<div style="font-size:16px;font-weight:600;margin-bottom:4px">服务端</div>' +
-    '<div style="font-size:12px;color:var(--text-muted)">监听端口，等待连接</div></div>' +
-    '<div class="card" style="cursor:pointer;text-align:center;padding:24px 16px" @click="selectDirection(\'client\')">' +
-    '<div style="font-size:16px;font-weight:600;margin-bottom:4px">客户端</div>' +
-    '<div style="font-size:12px;color:var(--text-muted)">主动连接外部服务</div></div>' +
-    '</div>' +
-    '<div style="text-align:center;margin-top:16px"><button class="btn btn-secondary" @click="modalStep=1">返回</button></div>' +
-    '</div>' +
-
-    '<div v-else-if="modalStep===3">' +
-    '<h3>{{ editingBotId ? "编辑 Bot" : "配置 Bot" }}</h3>' +
-    '<div class="form-group"><label>名称</label><input type="text" v-model="modalBotName" placeholder="Bot 1"></div>' +
-    '<div v-if="modalMode === \'http\' || modalMode === \'plugin\'">' +
-    '<div class="form-group"><label>服务类型</label>' +
-    '<select v-model="modalMode" @change="onHttpTypeChange" style="width:100%;padding:8px 10px;border:1px solid var(--border);border-radius:6px;background:var(--bg-input,var(--bg-card));color:var(--text)">' +
-    '<option value="http">OneBot HTTP 服务端</option>' +
-    '<option value="plugin">插件 API（AstrBot 适配器）</option>' +
-    '</select></div>' +
-    '<div class="form-group"><label>监听端口 *</label><input type="number" v-model.number="modalPort" placeholder="7100" min="1" max="65535"></div>' +
-    '<div style="font-size:12px;color:var(--text-muted);margin-bottom:10px">{{ modalMode === \'plugin\' ? \'插件 API：AstrBot 适配器统一消息服务端（HTTP+WS），Token 与适配器一致，关闭此 bot 即停用插件 API\' : \'OneBot HTTP 服务端：OneBot v11 协议端口，机器人框架按 OneBot 标准接入\' }}</div>' +
-    '</div>' +
-    '<div v-else class="form-group"><label>URL *</label><input type="text" v-model="modalUrl" placeholder="ws://127.0.0.1:6199/ws"></div>' +
-    '<div class="form-group"><label>Token</label><input type="text" v-model="modalToken" placeholder="自动生成"></div>' +
-    '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
-    '<button class="btn btn-secondary" @click="editingBotId ? closeModal() : (modalStep = (modalMode===\'ws\' ? 2 : 1))">{{ editingBotId ? "取消" : "返回" }}</button>' +
-    '<button class="btn btn-primary" @click="addBot">保存</button>' +
-    '</div></div>' +
-
-    '</div></transition>' +
-    '</div></div></div>'
+    '<div class="panel-field"><label class="panel-label">连接方向</label>' +
+    '<div class="panel-capsule">' +
+    '<button :class="[\'lg-capsule-btn\', { active: panelDirection===\'server\' }]" @click="onPanelDirChange(\'server\')" :disabled="!!editingBotId || panelMode===\'ws\'">服务端</button>' +
+    '<button :class="[\'lg-capsule-btn\', { active: panelDirection===\'client\' }]" @click="onPanelDirChange(\'client\')" :disabled="!!editingBotId || panelMode!==\'ws\'">客户端</button>' +
+    '</div></div></div>' +
+    '<div class="panel-sep"></div>' +
+    '<div class="panel-grid">' +
+    '<div class="panel-field"><label class="panel-label">名称</label>' +
+    '<input type="text" v-model="panelName" placeholder="Bot 1" class="panel-input"></div>' +
+    '<div class="panel-field"><label class="panel-label">{{ panelMode===\'ws\' ? \'URL\' : \'端口\' }}</label>' +
+    '<input v-if="panelMode===\'ws\'" type="text" v-model="panelUrl" placeholder="ws://127.0.0.1:6199/ws" class="panel-input">' +
+    '<input v-else type="number" v-model.number="panelPort" :placeholder="panelMode===\'plugin\'?\'7400\':\'7100\'" min="1" max="65535" class="panel-input"></div>' +
+    '<div class="panel-field"><label class="panel-label">Token</label>' +
+    '<div class="panel-input-group"><input type="text" v-model="panelToken" placeholder="自动生成" class="panel-input" style="flex:1">' +
+    '<button class="panel-icon-btn" @click="regenerateToken" title="重新生成"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"/></svg></button>' +
+    '</div></div></div>' +
+    '<div class="panel-sep"></div>' +
+    '<div class="panel-actions">' +
+    '<button class="btn btn-secondary" @click="closePanel">取消</button>' +
+    '<button class="btn btn-primary" @click="savePanel" :disabled="panelSaving">{{ panelSaving ? \'保存中...\' : (editingBotId ? \'更新配置\' : \'保存配置\') }}</button>' +
+    '</div></div></transition></div>'
 }
 
 var AccountsPage = {
@@ -682,12 +575,12 @@ var AccountsPage = {
     '<span style="font-size:14px;font-weight:500;color:var(--accent);font-family:monospace">{{ currentWxid || "未登录" }}</span></div></div>' +
 
     '<div v-if="showHint" class="hint-card">' +
-    '<p style="color:#000">请在 noVNC 虚拟桌面中操作 FlowBOT和WeChat 以进行登录，然后回到本页面刷新。<br>请先扫描二维码登录微信后再根据FlowBOT的流程配置数据库，才可以激活本套件。</p>' +
-    '<div style="display:flex;gap:8px">' +
+    '<p>请在 noVNC 虚拟桌面中操作 FlowBOT 和 WeChat 以进行登录，然后回到本页面刷新。<br>请先扫描二维码登录微信后再根据 FlowBOT 的流程配置数据库，才可以激活本套件。</p>' +
+    '<div style="display:flex;gap:8px;margin-top:12px">' +
     '<button class="btn btn-primary" @click="openNoVnc">打开 noVNC</button>' +
     '<button class="btn btn-secondary" @click="load">刷新状态</button>' +
-    '</div></transition>' +
-    '</div></div></div>'
+    '</div>' +
+    '</div></div>'
 }
 
 var SettingsPage = {
@@ -964,9 +857,9 @@ var AboutPage = {
   template: '<div>' +
     '<h1 class="page-title">关于</h1>' +
 
-    '<div class="card" style="text-align:center">' +
+    '<div class="card about-card" style="text-align:center">' +
     '<div class="about-logo"><img src="icon.png" alt="FlowBOT"></div>' +
-    '<h2 style="border:none;padding:0">FlowBOT | {{ info.flowbotVersion }}</h2>' +
+    '<h2 style="border:none;padding:0;justify-content:center;text-align:center">FlowBOT | {{ info.flowbotVersion }}</h2>' +
     '<p class="text-muted">基于 WeFlow & OneBot v11 制作的聊天机器人</p>' +
     '<div class="about-info">' +
     '<div class="info-row"><span>WeFlow 版本</span><span>{{ info.version }}</span></div>' +
@@ -1446,15 +1339,15 @@ var LogsPage = {
       }
     },
     logColor: function (line) {
-      if (!line) return '#e8eaed'
+      if (!line) return 'var(--text-primary)'
       var lv = typeof line === 'object' ? (line.level || '').toLowerCase() : ''
-      if (lv === 'error' || lv === 'fatal') return '#ff4757'
-      if (lv === 'warn') return '#ffa502'
-      if (lv === 'debug') return '#8892a4'
-      return '#e8eaed'
+      if (lv === 'error' || lv === 'fatal') return 'var(--danger)'
+      if (lv === 'warn') return 'var(--warn)'
+      if (lv === 'debug') return 'var(--text-muted)'
+      return 'var(--text-primary)'
     },
     levelBadgeColor: function (lv) {
-      return this.levelColors[lv] || '#8892a4'
+      return this.levelColors[lv] || '#94a3b8'
     }
   },
   template: '<div>' +
@@ -1464,7 +1357,6 @@ var LogsPage = {
     '<button class="btn btn-secondary" @click="loadLogs">刷新</button>' +
     '<button class="btn btn-danger" @click="clearLogs">清除日志</button>' +
     '</div></div>' +
-
     '<div class="card" style="margin-bottom:16px">' +
     '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">' +
     '<span v-for="lv in levels" :key="lv" class="log-cat-btn log-level-btn" :class="{active: selectedLevels.indexOf(lv)!==-1}" @click="toggleLevel(lv)" style="cursor:pointer">{{ levelLabels[lv] }}</span>' +
@@ -1474,15 +1366,12 @@ var LogsPage = {
     'style="flex:1;min-width:150px;padding:6px 10px;border-radius:6px;font-size:13px">' +
     '<span style="display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--text-muted)">自动跟踪<toggle-switch v-model="autoRefresh" @change="toggleAutoRefresh" /></span>' +
     '</div></div>' +
-
-    '<div id="log-box" ref="logBox" ' +
-    'style="background:var(--bg-secondary,#1e1e2e);border:1px solid var(--border,#333);border-radius:8px;padding:12px;' +
-    'height:calc(100vh - 300px);min-height:300px;overflow-y:auto;font-family:monospace;font-size:13px;line-height:1.6">' +
-    '<div v-if="loading && logs.length===0" style="color:var(--text-muted,#888)">加载中...</div>' +
-    '<div v-else-if="logs.length===0" style="color:var(--text-muted,#888)">暂无日志</div>' +
-    '<div v-for="(line, i) in logs" :key="i" :style="{color: logColor(line)}" style="font-family:monospace;white-space:pre-wrap;word-break:break-all"><span style="opacity:0.6">[{{ (line.level || \'info\').toUpperCase() }}]</span> {{ typeof line === \'object\' ? line.raw : line }}</div>' +
+    '<div id="log-box" ref="logBox" class="log-box" ' +
+    'style="height:calc(100vh - 300px);min-height:300px;overflow-y:auto;font-family:\'SF Mono\',Monaco,monospace;font-size:12.5px;line-height:1.6">' +
+    '<div v-if="loading && logs.length===0" style="color:var(--text-muted)">加载中...</div>' +
+    '<div v-else-if="logs.length===0" style="color:var(--text-muted)">暂无日志</div>' +
+    '<div v-for="(line, i) in logs" :key="i" :style="{color: logColor(line)}" style="font-family:inherit;white-space:pre-wrap;word-break:break-all"><span style="opacity:0.65">[{{ (line.level || \'info\').toUpperCase() }}]</span> {{ typeof line === \'object\' ? line.raw : line }}</div>' +
     '</div>' +
-
     '</div>'
 }
 
@@ -1672,8 +1561,8 @@ var FilterPage = {
     '<div class="select-all-bar">' +
     '<label class="checkbox-label"><input type="checkbox" :checked="allSelected" @change="toggleAll" /> 全选</label>' +
     '<label class="checkbox-label"><input type="checkbox" v-model="showOfficial" /> 显示公众号</label>' +
-    '<span class="selected-count">已选择 {{ list.length }} 个会话</span>' +
     '<span class="spacer"></span>' +
+    '<span class="selected-count">已选择 {{ list.length }} 个会话</span>' +
     '<button class="btn btn-primary" @click="save" :disabled="saving">{{ saving ? \'保存中...\' : \'保存设置\' }}</button>' +
     '</div>' +
     '<div v-if="loading" class="filter-loading">加载中...</div>' +
@@ -1681,12 +1570,11 @@ var FilterPage = {
     '<div v-for="s in filteredSessions" :key="s.username" class="session-row" ' +
     ':class="{ selected: !!selectedSet[s.username] }" @click="toggleOne(s.username)">' +
     '<input type="checkbox" :checked="!!selectedSet[s.username]" @click.stop="toggleOne(s.username)" />' +
+    '<span class="session-type" :class="typeClass(s.sessionType || s.type)">{{ typeLabel(s.sessionType || s.type) }}</span>' +
     '<div class="session-info">' +
     '<span class="session-name">{{ s.displayName || s.username }}</span>' +
     '<span class="session-id">{{ s.username }}</span>' +
     '</div>' +
-    '<span class="session-type" :class="typeClass(s.sessionType || s.type)">{{ typeLabel(s.sessionType || s.type) }}</span>' +
-    '<span class="session-time">{{ formatTime(s.lastTimestamp) }}</span>' +
     '</div>' +
     '<div v-if="filteredSessions.length === 0" class="filter-empty">没有匹配的会话</div>' +
     '</div>' +
