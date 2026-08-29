@@ -2030,6 +2030,12 @@ select.panel-input {
   overflow: hidden;
 }
 
+/* 浅色模式：卡片由写死深色改为亮玻璃，文字/输入框随主题变量自然适配 */
+:root[data-theme="light"] .login-card {
+  background: rgba(255, 255, 255, 0.55) !important;
+  box-shadow: 0 24px 60px -8px rgba(40, 30, 70, 0.25) !important;
+}
+
 .login-logo {
   width: 56px;
   height: 56px;

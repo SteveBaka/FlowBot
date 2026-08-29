@@ -1021,7 +1021,7 @@ var SendManagerPage = {
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
     var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500 })
-    var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 5000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 20000, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
+    var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
       queue: { pending: 0, processing: false, currentContent: null, lastSendTime: null, items: [] },
@@ -1245,11 +1245,13 @@ var SendManagerPage = {
         bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
-        ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 5000
+        ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
         ackParams.timeoutVideoMs = d.sendAckTimeoutMsVideo || 10000
         ackParams.extendWaitMs = d.sendAckExtendWaitMs || 10000
         ackParams.timeoutPerMbMs = d.sendAckTimeoutPerMbMs || 800
-        ackParams.timeoutMaxMs = d.sendAckTimeoutMaxMs || 20000
+        ackParams.timeoutMaxMs = d.sendAckTimeoutMaxMs || 5000
+        ackParams.videoTimeoutMaxMs = d.sendAckVideoTimeoutMaxMs || 20000
+        ackParams.probeDiffThreshold = d.sendAckProbeDiffThreshold === undefined ? 15 : Math.round(d.sendAckProbeDiffThreshold * 100)
         ackParams.maxRetriesImage = d.sendAckImageMaxRetries === undefined ? 1 : d.sendAckImageMaxRetries
         ackParams.maxRetriesVideo = d.sendAckVideoMaxRetries === undefined ? 1 : d.sendAckVideoMaxRetries
         ackParams.failOnTimeoutImage = d.sendAckImageFailOnTimeout !== false
@@ -1328,11 +1330,13 @@ var SendManagerPage = {
         imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
-        sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 5000),
+        sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
         sendAckTimeoutMsVideo: Math.max(500, Number(ackParams.timeoutVideoMs) || 10000),
         sendAckExtendWaitMs: Math.max(0, Number(ackParams.extendWaitMs) || 10000),
         sendAckTimeoutPerMbMs: Math.max(0, Number(ackParams.timeoutPerMbMs) || 800),
-        sendAckTimeoutMaxMs: Math.max(1000, Number(ackParams.timeoutMaxMs) || 20000),
+        sendAckTimeoutMaxMs: Math.max(1000, Number(ackParams.timeoutMaxMs) || 5000),
+        sendAckVideoTimeoutMaxMs: Math.max(1000, Number(ackParams.videoTimeoutMaxMs) || 20000),
+        sendAckProbeDiffThreshold: Math.max(1, Math.min(100, Number(ackParams.probeDiffThreshold) || 15)) / 100,
         sendAckImageMaxRetries: Math.max(0, Number(ackParams.maxRetriesImage) || 1),
         sendAckVideoMaxRetries: Math.max(0, Number(ackParams.maxRetriesVideo) || 1),
         sendAckImageFailOnTimeout: !!ackParams.failOnTimeoutImage,
@@ -1667,25 +1671,33 @@ var SendManagerPage = {
     '</div>' +
     '<div class="strategy-card" :class="{ on: ackParams.probeEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">输入框探针（防误发）</span><toggle-switch v-model="ackParams.probeEnabled" /></div>' +
-    '<div class="strategy-desc">超时未确认时抓屏比对输入框是否仍含媒体：已清空则判定疑似已发出、禁止二次 Enter，防误发残留内容（默认关，需 xwd 可用）</div>' +
+    '<div class="strategy-desc">超时未确认时抓屏比对输入框是否仍含媒体。差异 &lt; 阈值(默认15%) 视为"仍在输入框"→ 允许二次 Enter（媒体卡住时差异通常 5%-15%，保二次 Enter 才不会被卡死）；仅差异 ≥ 阈值 才视为"已清空"→ 禁止二次 Enter（默认关，需 xwd 可用）</div>' +
     '</div>' +
     '</div>' +
     '<div class="config-opt-grid">' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">图片回执超时</span><span class="opt-input"><input type="number" min="500" step="500" v-model.number="ackParams.timeoutImageMs">ms</span></div>' +
-    '<div class="strategy-desc">图片提交超时（默认 5000）；大图按体积自动加档</div>' +
+    '<div class="strategy-desc">图片提交超时（默认 3000，最多 5000）；大图按体积自动加档</div>' +
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">视频回执超时</span><span class="opt-input"><input type="number" min="500" step="500" v-model.number="ackParams.timeoutVideoMs">ms</span></div>' +
-    '<div class="strategy-desc">视频提交超时（默认 10000）</div>' +
+    '<div class="strategy-desc">视频提交超时（默认 10000，视频转码慢）</div>' +
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">体积加档</span><span class="opt-input"><input type="number" min="0" step="100" v-model.number="ackParams.timeoutPerMbMs">ms/MB</span></div>' +
     '<div class="strategy-desc">媒体每超 1MB 追加的超时（默认 800），0 关闭自适应</div>' +
     '</div>' +
     '<div class="strategy-card">' +
-    '<div class="strategy-top"><span class="strategy-name">超时封顶</span><span class="opt-input"><input type="number" min="1000" step="1000" v-model.number="ackParams.timeoutMaxMs">ms</span></div>' +
-    '<div class="strategy-desc">自适应超时上限（默认 20000）</div>' +
+    '<div class="strategy-top"><span class="strategy-name">图片超时封顶</span><span class="opt-input"><input type="number" min="1000" step="1000" v-model.number="ackParams.timeoutMaxMs">ms</span></div>' +
+    '<div class="strategy-desc">图片自适应超时上限（默认 5000）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">视频超时封顶</span><span class="opt-input"><input type="number" min="1000" step="1000" v-model.number="ackParams.videoTimeoutMaxMs">ms</span></div>' +
+    '<div class="strategy-desc">视频自适应超时上限（默认 20000）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">探针差异阈值</span><span class="opt-input"><input type="number" min="1" max="100" step="1" v-model.number="ackParams.probeDiffThreshold">%</span></div>' +
+    '<div class="strategy-desc">探针判定"媒体仍在"的差异上限（默认 15%）；低于该值=仍在（可放心 Enter），≥该值=已清空（禁止 Enter）。媒体卡住时差异通常 5%-15%，过低会误判</div>' +
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">扩展等待</span><span class="opt-input"><input type="number" min="0" step="1000" v-model.number="ackParams.extendWaitMs">ms</span></div>' +

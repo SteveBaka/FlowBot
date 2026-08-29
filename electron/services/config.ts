@@ -111,6 +111,7 @@ interface ConfigSchema {
   sendAckInputClearProbeEnabled: boolean
   sendAckTimeoutPerMbMs: number
   sendAckTimeoutMaxMs: number
+  sendAckVideoTimeoutMaxMs: number
   sendAckProbeDiffThreshold: number
   messagePushFilterMode: 'all' | 'whitelist' | 'blacklist'
   messagePushFilterList: string[]
@@ -307,7 +308,7 @@ export class ConfigService {
       sendAckEnabled: true,
       sendAckUseEventMonitor: true,
       sendAckPollIntervalMs: 500,
-      sendAckTimeoutMsImage: 5000,
+      sendAckTimeoutMsImage: 3000,
       sendAckTimeoutMsVideo: 10000,
       sendAckExtendWaitMs: 10000,
       sendAckRetryAction: 're-enter',
@@ -318,8 +319,9 @@ export class ConfigService {
       sendAckRequireServerId: false,
       sendAckInputClearProbeEnabled: false,
       sendAckTimeoutPerMbMs: 800,
-      sendAckTimeoutMaxMs: 20000,
-      sendAckProbeDiffThreshold: 0.05,
+      sendAckTimeoutMaxMs: 5000,
+      sendAckVideoTimeoutMaxMs: 20000,
+      sendAckProbeDiffThreshold: 0.15,
       messagePushFilterMode: 'all',
       messagePushFilterList: [],
       windowCloseBehavior: 'ask',

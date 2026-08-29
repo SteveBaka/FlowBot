@@ -131,7 +131,7 @@ export class SendAckService {
     const isVideo = fp.kind === 'video'
     // 超时：kind 基准 + 体积自适应（大图/大视频微信压缩处理更久，Enter→落库延迟随体积增长）
     const baseTimeout = isVideo ? this.cfgNum('sendAckTimeoutMsVideo', 10000) : this.cfgNum('sendAckTimeoutMsImage', 5000)
-    const timeoutMs = this.computeTimeout(baseTimeout, fp.sizeMb)
+    const timeoutMs = this.computeTimeout(baseTimeout, fp.sizeMb, isVideo)
     if (timeoutMs !== baseTimeout) {
       log(`超时按体积自适应: ${baseTimeout} → ${timeoutMs}ms (sizeMb=${fp.sizeMb?.toFixed(2)})`)
     }
@@ -205,11 +205,12 @@ export class SendAckService {
     return this.handleTimeout(fp, timeoutMs, waitedMs)
   }
 
-  /** 超时按体积自适应：base + 每超出 1MB 加 sendAckTimeoutPerMbMs（默认 800ms/MB），封顶 sendAckTimeoutMaxMs（默认 20000） */
-  private computeTimeout(base: number, sizeMb?: number): number {
+  /** 超时按体积自适应：base + 每超出 1MB 加 sendAckTimeoutPerMbMs（默认 800ms/MB），封顶按 kind 区分（图片 5000 / 视频 20000） */
+  private computeTimeout(base: number, sizeMb?: number, isVideo = false): number {
     const perMb = this.cfgNum('sendAckTimeoutPerMbMs', 800)
     if (!sizeMb || sizeMb <= 1 || perMb <= 0) return base
-    const maxMs = this.cfgNum('sendAckTimeoutMaxMs', 20000)
+    // 视频用独立封顶键（转码慢，封顶 20s）；图片封顶 sendAckTimeoutMaxMs（默认 5000，用户决策：图片最多等 5s）
+    const maxMs = isVideo ? this.cfgNum('sendAckVideoTimeoutMaxMs', 20000) : this.cfgNum('sendAckTimeoutMaxMs', 5000)
     const total = base + Math.ceil(sizeMb - 1) * perMb
     return Math.min(total, Math.max(base, maxMs))
   }

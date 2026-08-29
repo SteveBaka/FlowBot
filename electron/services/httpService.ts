@@ -3602,6 +3602,7 @@ class HttpService {
                 'sendAckInputClearProbeEnabled',
                 'sendAckTimeoutPerMbMs',
                 'sendAckTimeoutMaxMs',
+                'sendAckVideoTimeoutMaxMs',
                 'sendAckProbeDiffThreshold'
             ]
             const config: Record<string, any> = {}

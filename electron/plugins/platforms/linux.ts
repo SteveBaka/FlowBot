@@ -519,13 +519,16 @@ export class LinuxSender implements IPlatformSender {
       if (!wid) return false
       const img = await captureWindowXwd(wid)
       if (!img) return false
-      // 输入框 ROI：窗口底部约 7% 高度的窄条（实测微信 Linux 输入框位于 y≈93%~98%）。
-      // 不用"底部 15%"——范围太宽会把空白区域算进差异稀释信号，且大图渲染时整块都变。
+      // 输入框 ROI：窗口底部约 30% 的宽条（y=70%~100%）。
+      // 微信 Linux 聊天界面在文本输入框下方还有一条空白占位，若只取底部 7% 窄条，
+      // 会落在该空白占位上，媒体卡片（渲染在输入框中上部）在/不在都不影响该窄条，
+      // 导致探针把恒定噪声误读为"媒体已离开"。扩大到底部 30% 覆盖媒体卡片主体 + 占位，
+      // 让差异真正反映媒体本身。
       const roi = {
         x: 0,
-        y: Math.floor(img.height * 0.93),
+        y: Math.floor(img.height * 0.70),
         w: img.width,
-        h: Math.max(1, img.height - Math.floor(img.height * 0.93))
+        h: Math.max(1, img.height - Math.floor(img.height * 0.70))
       }
       this.probeBuffer = img
       this.probeWid = wid
@@ -543,7 +546,10 @@ export class LinuxSender implements IPlatformSender {
       const img = await captureWindowXwd(this.probeWid)
       if (!img || !this.probeRoi || !this.probeBuffer) return undefined
       const diff = roidiff(this.probeBuffer, img, this.probeRoi)
-      const threshold = Math.max(0, Math.min(1, Number(getConfigNumber('sendAckProbeDiffThreshold', 0.05))))
+      // 保守化阈值（方案一）：默认 15%。diff < 15% 一律判"媒体仍在（可放心 Enter）"，
+      // 仅 diff ≥ 15% 才判"已清空"。媒体卡住时 diff 落在 5%-15% 区间（实测 6.4%），
+      // 若仍用 5% 会把"卡在框里的媒体"误判为"已清空"→ 阻止二次 Enter → 媒体永久卡死。
+      const threshold = Math.max(0, Math.min(1, Number(getConfigNumber('sendAckProbeDiffThreshold', 0.15))))
       log(`探针 ROI 差异 ${(diff * 100).toFixed(1)}% (阈值 ${(threshold * 100).toFixed(0)}%)`)
       return diff < threshold
     } catch {
