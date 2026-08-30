@@ -92,6 +92,12 @@ interface ConfigSchema {
   sendBackoffBaseMs: number
   imagePasteCapMs: number
   imageMaxBytes: number
+  // 图片出站压缩（MEDIA-SERVICE §11.5：分界点 + 内容类型分流 + PNG 优先）
+  imageCompressEnabled: boolean
+  imageCompressKeepResolution: boolean
+  imageCompressFormat: 'png' | 'jpeg' | 'auto'
+  imageCompressPaletteMax: number
+  imageUrlTimeoutMs: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -303,6 +309,11 @@ export class ConfigService {
       sendBackoffBaseMs: 1500,
       imagePasteCapMs: 1500,
       imageMaxBytes: 5 * 1024 * 1024,
+      imageCompressEnabled: true,
+      imageCompressKeepResolution: true,
+      imageCompressFormat: 'png',
+      imageCompressPaletteMax: 256,
+      imageUrlTimeoutMs: 15000,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

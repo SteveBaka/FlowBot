@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000 })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1244,6 +1244,11 @@ var SendManagerPage = {
         bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
         bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
         bpParams.imageMaxBytes = (d.imageMaxBytes && d.imageMaxBytes > 0) ? Math.round(d.imageMaxBytes / (1024 * 1024)) : 5
+        bpParams.imageCompressEnabled = d.imageCompressEnabled !== false
+        bpParams.imageCompressKeepResolution = d.imageCompressKeepResolution !== false
+        bpParams.imageCompressFormat = d.imageCompressFormat || 'png'
+        bpParams.imageCompressPaletteMax = d.imageCompressPaletteMax || 256
+        bpParams.imageUrlTimeoutMs = d.imageUrlTimeoutMs || 15000
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1330,6 +1335,11 @@ var SendManagerPage = {
         sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
         imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
         imageMaxBytes: Math.max(1, Math.min(20, Number(bpParams.imageMaxBytes) || 5)) * (1024 * 1024),
+        imageCompressEnabled: !!bpParams.imageCompressEnabled,
+        imageCompressKeepResolution: !!bpParams.imageCompressKeepResolution,
+        imageCompressFormat: ['png', 'jpeg', 'auto'].includes(bpParams.imageCompressFormat) ? bpParams.imageCompressFormat : 'png',
+        imageCompressPaletteMax: Math.max(2, Math.min(256, Number(bpParams.imageCompressPaletteMax) || 256)),
+        imageUrlTimeoutMs: Math.max(1000, Number(bpParams.imageUrlTimeoutMs) || 15000),
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1656,7 +1666,23 @@ var SendManagerPage = {
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">图片大小上限</span><span class="opt-input"><input type="number" min="1" max="20" step="1" v-model.number="bpParams.imageMaxBytes">MB</span></div>' +
-    '<div class="strategy-desc">超过该体积的图片拒绝粘贴（防微信冻结，默认 5MB）；部分插件生成图约 5.26MB，可按需上调至 20MB</div>' +
+    '<div class="strategy-desc">超过该体积的图片拒绝粘贴（防微信冻结，默认 5MB）；部分插件生成图约 5.26MB，可按需上调至 20MB；也是图片压缩的分界点</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCompressEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">图片压缩（大图）</span><toggle-switch v-model="bpParams.imageCompressEnabled" /></div>' +
+    '<div class="strategy-desc">超过图片大小上限的大图，发送前经 ffmpeg 压缩进分界点（默认开；仅大图触发，小图直通零开销）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">压缩格式</span><span class="opt-input"><select v-model="bpParams.imageCompressFormat"><option value="png">PNG（近无损，微信必支持）</option><option value="jpeg">JPEG（照片）</option><option value="auto">自动（内容探测）</option></select></span></div>' +
+    '<div class="strategy-desc">漫画/图标/截图用 PNG 降位深；照片用 JPEG；auto 由内容色数探测决定（默认 PNG）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">保分辨率</span><toggle-switch v-model="bpParams.imageCompressKeepResolution" /></div>' +
+    '<div class="strategy-desc">压缩不降像素（默认开，保清晰）；关闭后超阈压缩允许降分辨率兜底（画质会下降）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">PNG调色板色数</span><span class="opt-input"><input type="number" min="2" max="256" step="1" v-model.number="bpParams.imageCompressPaletteMax">色</span></div>' +
+    '<div class="strategy-desc">PNG 降位深最大色数（默认 256 近无损；低则更小但有色带）</div>' +
     '</div>' +
     '</div>' +
     '</transition>' +

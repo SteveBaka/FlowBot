@@ -20,7 +20,7 @@ import { snsService } from './snsService'
 import { getPluginManager } from '../plugins/pluginManager'
 import { SendOptions, MessageType } from '../plugins/plugin-interface'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
-import { prepareVideoForSend, detectVideoExt } from './mediaService'
+import { prepareVideoForSend, detectVideoExt, prepareImageForSend } from './mediaService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -264,8 +264,14 @@ class HttpService {
   private mediaUploads = new Map<string, { path: string; expires: number }>()
   private readonly mediaUploadTtlMs = 5 * 60 * 1000
 
-  // 图片发送限制（防微信粘贴冻结）：仅体积 >5MB 拒绝
-  private readonly IMAGE_SEND_MAX_BYTES = 5 * 1024 * 1024
+  // 图片发送限制（防微信粘贴冻结）：读 imageMaxBytes 配置（默认 5MB），WebUI 可调并与压缩分界点共用
+  private imageSendMaxBytes(): number {
+    try {
+      const v = this.configService?.get('imageMaxBytes')
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
+    } catch {}
+    return 5 * 1024 * 1024
+  }
   // 身份库直读（WebUI 维护的 identity.db，同容器文件系统，发送前一次读取省 WCDB）
   private identityDbReadOnly: any = null
   private identityDbPath = ''
@@ -3095,82 +3101,48 @@ class HttpService {
     imageUrl?: string,
     imageToken?: string
   ): Promise<{ path: string | null; error?: string }> {
-    // ④ image_token：上传接口返回的服务器端文件（跨设备推荐）
+    // ④ image_token：上传接口返回的服务器端文件（跨设备推荐）。
+    // 依赖本类内存态 mediaUploads 反查，故保留在本方法；查到落盘路径后仍交给 mediaService
+    // 走统一的闸 + 压缩管线。
     if (imageToken) {
       const entry = this.mediaUploads.get(String(imageToken))
       if (entry && entry.expires > Date.now() && fs.existsSync(entry.path)) {
         const err = this.validateSendImage(entry.path)
         if (err) return { path: null, error: err }
-        return { path: entry.path }
+        const prepared = await prepareImageForSend({ path: entry.path })
+        if (!prepared) return { path: null, error: '图片归一/压缩失败' }
+        return { path: prepared.imagePath }
       }
       return { path: null, error: '图片 token 无效或已过期' }
     }
-    // ① image_base64：字节内联，跨设备最可靠
+    // ① image_base64 / ② image_url / ③ image_path：交给 mediaService 统一归一（含
+    // imageMaxBytes 闸 + 15s URL 超时 + 分界点压缩）。此处仅保留错误文案包装以兼容 REST 客户端。
     if (imageBase64) {
-      try {
-        const raw = String(imageBase64)
-        const b64 = raw.includes('base64,') ? raw.slice(raw.indexOf('base64,') + 7) : raw
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64.trim())) {
-          return { path: null, error: '图片 base64 解码失败（含非法字符）' }
-        }
-        const buf = Buffer.from(b64, 'base64')
-        if (buf.length > 0) {
-          if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
-            return { path: null, error: `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
-          }
-          const ext = this.detectImageExt(buf)
-          const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
-          fs.writeFileSync(tmpPath, buf)
-          const err = this.validateSendImage(tmpPath)
-          if (err) {
-            try { fs.unlinkSync(tmpPath) } catch {}
-            return { path: null, error: err }
-          }
-          return { path: tmpPath }
-        }
-      } catch {}
-      return { path: null, error: '图片 base64 解码失败' }
+      const prepared = await prepareImageForSend({ base64: imageBase64 })
+      if (!prepared) return { path: null, error: '图片 base64 解码失败' }
+      return { path: prepared.imagePath }
     }
-    // ② image_url：直链拉取（需 flowbot 可达）
     if (imageUrl) {
-      try {
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 15000)
-        let resp: Response
-        try {
-          resp = await fetch(String(imageUrl), { signal: controller.signal })
-        } finally {
-          clearTimeout(timer)
-        }
-        if (!resp.ok) return { path: null, error: `URL 下载失败: HTTP ${resp.status}` }
-        const buf = Buffer.from(await resp.arrayBuffer())
-        if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
-          return { path: null, error: `URL 图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
-        }
-        const ext = this.detectImageExt(buf)
-        const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
-        fs.writeFileSync(tmpPath, buf)
-        const err = this.validateSendImage(tmpPath)
-        if (err) {
-          try { fs.unlinkSync(tmpPath) } catch {}
-          return { path: null, error: err }
-        }
-        return { path: tmpPath }
-      } catch (error: any) {
-        return { path: null, error: `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}` }
-      }
+      const prepared = await prepareImageForSend({ url: imageUrl })
+      if (!prepared) return { path: null, error: `URL 下载失败: ${this.imageUrlErrHint(imageUrl)}` }
+      return { path: prepared.imagePath }
     }
-    // ③ image_path：仅同主机（flowbot 文件系统）有效
     if (imagePath) {
       const p = String(imagePath).trim()
       if (fs.existsSync(p)) {
-        const err = this.validateSendImage(p)
-        if (err) return { path: null, error: err }
-        return { path: p }
+        const prepared = await prepareImageForSend({ path: p })
+        if (!prepared) return { path: null, error: '图片路径不可访问' }
+        return { path: prepared.imagePath }
       }
       return { path: null, error: '路径不可访问（跨主机请使用 image_token / image_base64 / image_url）' }
     }
     return { path: null, error: 'Image message requires image_token, image_base64, image_url or image_path' }
+  }
+
+  /** 构造 image_url 拉取失败的提示文案（仅供错误信息，略去详情避免暴露内部） */
+  private imageUrlErrHint(url: string): string {
+    const m = /^https?:\/\/([^/]+)/i.exec(url)
+    return m ? `HTTP/${m[1]} 下载失败` : '下载失败'
   }
 
   private detectImageExt(buf: Buffer): string {
@@ -3187,8 +3159,8 @@ class HttpService {
   private validateSendImage(filePath: string): string | null {
     try {
       const st = fs.statSync(filePath)
-      if (st.size > this.IMAGE_SEND_MAX_BYTES) {
-        return `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）`
+      if (st.size > this.imageSendMaxBytes()) {
+        return `图片过大（>${Math.round(this.imageSendMaxBytes() / 1024 / 1024)}MB）`
       }
     } catch {
       return '图片校验失败'
@@ -3556,7 +3528,7 @@ class HttpService {
     this.sendError(res, 405, `Method Not Allowed. Allowed: ${allow}`)
   }
 
-  // ─── Management API handlers ────────────────────────────────────────────
+  // Management API handlers
 
     private handleMgmtGetConfig(res: http.ServerResponse): void {
         try {
@@ -3587,6 +3559,12 @@ class HttpService {
                 'sendBackoffBaseMs',
                 'imagePasteCapMs',
                 'imageMaxBytes',
+                // 图片出站压缩（MEDIA-SERVICE §11.5）
+                'imageCompressEnabled',
+                'imageCompressKeepResolution',
+                'imageCompressFormat',
+                'imageCompressPaletteMax',
+                'imageUrlTimeoutMs',
                 // SendAck 媒体回执（WebUI「发送管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',
