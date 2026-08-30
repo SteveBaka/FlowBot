@@ -20,7 +20,7 @@ import { snsService } from './snsService'
 import { getPluginManager } from '../plugins/pluginManager'
 import { SendOptions, MessageType } from '../plugins/plugin-interface'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
-import { prepareVideoForSend, detectVideoExt } from './outboundMediaService'
+import { prepareVideoForSend, detectVideoExt } from './mediaService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {

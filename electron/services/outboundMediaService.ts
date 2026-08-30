@@ -196,7 +196,10 @@ export async function prepareVideoForSend(
           if (!settled) { settled = true; clearTimeout(timeout); cleanup(); reject(new Error(`request error: ${e.message}`)) }
         })
         function cleanup(): void {
-          // 半成品不落盘（chunks 未写文件），无需删除；若已写则由调用方 TTL 清理
+          // R1（2026-08-31 修复）：超时/非 200/超限分支此前只 reject 不销毁 socket，
+          // 下载在后台继续、chunks 持续累积，低配容器内存被无声吃掉。
+          // 现在销毁 req，连接立即释放；半成品未落盘（chunks 未写文件）无需删除。
+          req.destroy()
         }
       })
       const st = await fsp.stat(result.tmpPath)
