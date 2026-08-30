@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5 })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1243,6 +1243,7 @@ var SendManagerPage = {
         bpParams.cooldownMs = d.sendCooldownMs || 10000
         bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
         bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
+        bpParams.imageMaxBytes = (d.imageMaxBytes && d.imageMaxBytes > 0) ? Math.round(d.imageMaxBytes / (1024 * 1024)) : 5
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1328,6 +1329,7 @@ var SendManagerPage = {
         sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
         sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
         imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
+        imageMaxBytes: Math.max(1, Math.min(20, Number(bpParams.imageMaxBytes) || 5)) * (1024 * 1024),
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1651,6 +1653,10 @@ var SendManagerPage = {
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">大图粘贴等待上限</span><span class="opt-input"><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs">ms</span></div>' +
     '<div class="strategy-desc">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">图片大小上限</span><span class="opt-input"><input type="number" min="1" max="20" step="1" v-model.number="bpParams.imageMaxBytes">MB</span></div>' +
+    '<div class="strategy-desc">超过该体积的图片拒绝粘贴（防微信冻结，默认 5MB）；部分插件生成图约 5.26MB，可按需上调至 20MB</div>' +
     '</div>' +
     '</div>' +
     '</transition>' +

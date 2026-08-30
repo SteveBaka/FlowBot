@@ -91,6 +91,7 @@ interface ConfigSchema {
   sendCooldownMs: number
   sendBackoffBaseMs: number
   imagePasteCapMs: number
+  imageMaxBytes: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -301,6 +302,7 @@ export class ConfigService {
       sendCooldownMs: 10000,
       sendBackoffBaseMs: 1500,
       imagePasteCapMs: 1500,
+      imageMaxBytes: 5 * 1024 * 1024,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,
