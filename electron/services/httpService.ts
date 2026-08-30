@@ -2980,7 +2980,7 @@ class HttpService {
         }
         const prepared = await prepareVideoForSend(src)
         if (!prepared) {
-          console.error(`[HttpService] video normalization failed for ${String(src).slice(0, 80)}... (see [outboundMedia] logs for reason)`)
+          console.error(`[HttpService] video normalization failed for ${String(src).slice(0, 80)}... (see [mediaService] logs for reason)`)
           this.sendError(res, 400, 'video download failed or size exceeded')
           return
         }
