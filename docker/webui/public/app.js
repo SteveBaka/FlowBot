@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30 })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1208,6 +1208,7 @@ var SendManagerPage = {
     var secStrategy = ref(false)
     var secBp = ref(false)
     var secAck = ref(false)
+    var secCdn = ref(false)
     var strategySummary = computed(function () {
       var n = (mergeEnabled.value ? 1 : 0) + (dedupEnabled.value ? 1 : 0) + (priorityEnabled.value ? 1 : 0) + (dynamicIntervalEnabled.value ? 1 : 0)
       return '开启 ' + n + ' / 4 项'
@@ -1219,6 +1220,10 @@ var SendManagerPage = {
     var ackSummary = computed(function () {
       if (!ackParams.enabled) return '已关闭'
       return '图 ' + Math.round(ackParams.timeoutImageMs / 1000) + 's · 视频 ' + Math.round(ackParams.timeoutVideoMs / 1000) + 's'
+    })
+    var cdnSummary = computed(function () {
+      if (!bpParams.imageCdnDirectFetchEnabled) return '已关闭（实验）'
+      return '开启 · 超时 ' + Math.round(bpParams.imageCdnDirectFetchTimeoutMs / 1000) + 's'
     })
 
     function initParams() {
@@ -1249,6 +1254,10 @@ var SendManagerPage = {
         bpParams.imageCompressFormat = d.imageCompressFormat || 'png'
         bpParams.imageCompressPaletteMax = d.imageCompressPaletteMax || 256
         bpParams.imageUrlTimeoutMs = d.imageUrlTimeoutMs || 15000
+        bpParams.imageCdnDirectFetchEnabled = d.imageCdnDirectFetchEnabled === true
+        bpParams.imageCdnDirectFetchTimeoutMs = d.imageCdnDirectFetchTimeoutMs || 30000
+        bpParams.imageCdnDirectFetchMinIntervalMs = (d.imageCdnDirectFetchMinIntervalMs !== undefined) ? d.imageCdnDirectFetchMinIntervalMs : 3000
+        bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1340,6 +1349,10 @@ var SendManagerPage = {
         imageCompressFormat: ['png', 'jpeg', 'auto'].includes(bpParams.imageCompressFormat) ? bpParams.imageCompressFormat : 'png',
         imageCompressPaletteMax: Math.max(2, Math.min(256, Number(bpParams.imageCompressPaletteMax) || 256)),
         imageUrlTimeoutMs: Math.max(1000, Number(bpParams.imageUrlTimeoutMs) || 15000),
+        imageCdnDirectFetchEnabled: !!bpParams.imageCdnDirectFetchEnabled,
+        imageCdnDirectFetchTimeoutMs: Math.max(5000, Math.min(120000, Number(bpParams.imageCdnDirectFetchTimeoutMs) || 30000)),
+        imageCdnDirectFetchMinIntervalMs: isFinite(Number(bpParams.imageCdnDirectFetchMinIntervalMs)) ? Math.max(0, Math.min(60000, Number(bpParams.imageCdnDirectFetchMinIntervalMs))) : 3000,
+        imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1449,8 +1462,8 @@ var SendManagerPage = {
       queueBars: queueBars, trend: trend, pipeline: pipeline,
       nowElapsed: nowElapsed, typeLabel: typeLabel, urgencyClass: urgencyClass,
       tiers: tiers, tierName: tierName, setTier: setTier, customEditing: customEditing, overriddenKeys: overriddenKeys,
-      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck,
-      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary,
+      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck, secCdn: secCdn,
+      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary, cdnSummary: cdnSummary,
       dirty: dirty, discardChanges: discardChanges
     }
   },
@@ -1689,6 +1702,35 @@ var SendManagerPage = {
     '</div>' +
     '</div>' +
 
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secCdn = !secCdn">' +
+    '<span class="chev" :class="{ open: secCdn }">▸</span>' +
+    '<span class="config-title">图片入站原图（CDN 直取）</span>' +
+    '<span class="config-summary">{{ cdnSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secCdn" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">CDN 直取原图（实验）</span><toggle-switch v-model="bpParams.imageCdnDirectFetchEnabled" /></div>' +
+    '<div class="strategy-desc">仅缩略图消息的原图兜底：本地读取全失败时经微信 CDN 库直取（默认关；需常驻 helper，验收通过后再启用）。防护：仅新增消息（禁历史回填）、单图单次尝试、最小间隔+每小时限流、零 hook 纯主动调用</div>' +
+    '</div>' +
+    '</div>' +
+    '<div class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">直取超时</span><span class="opt-input"><input type="number" min="5000" step="1000" v-model.number="bpParams.imageCdnDirectFetchTimeoutMs">ms</span></div>' +
+    '<div class="strategy-desc">直取任务落盘轮询上限（默认 30000；超时即放弃该图并降级缩略图，不重试、不阻断推送）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">最小间隔</span><span class="opt-input"><input type="number" min="0" step="500" v-model.number="bpParams.imageCdnDirectFetchMinIntervalMs">ms</span></div>' +
+    '<div class="strategy-desc">两次直取的最小时间间隔（默认 3000；0 为不限间隔，但仍受每小时上限约束）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">每小时上限</span><span class="opt-input"><input type="number" min="1" step="5" v-model.number="bpParams.imageCdnDirectFetchHourlyLimit">张</span></div>' +
+    '<div class="strategy-desc">每小时直取张数上限（暂定 30，超限该小时降级缩略图；运行稳定后可自行逐步提升）</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
     '<div class="card config-section">' +
     '<button type="button" class="config-head" @click="secAck = !secAck">' +
     '<span class="chev" :class="{ open: secAck }">▸</span>' +

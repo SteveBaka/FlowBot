@@ -3565,6 +3565,12 @@ class HttpService {
                 'imageCompressFormat',
                 'imageCompressPaletteMax',
                 'imageUrlTimeoutMs',
+                // 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）
+                'imageCdnDirectFetchEnabled',
+                'imageCdnDirectFetchTimeoutMs',
+                'imageCdnDirectFetchMinIntervalMs',
+                'imageCdnDirectFetchHourlyLimit',
+                'imageCdnDirectFetchMaxAgeMs',
                 // SendAck 媒体回执（WebUI「发送管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',

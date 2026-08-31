@@ -98,6 +98,13 @@ interface ConfigSchema {
   imageCompressFormat: 'png' | 'jpeg' | 'auto'
   imageCompressPaletteMax: number
   imageUrlTimeoutMs: number
+  // 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6；默认关，验收用例 #1 通过后启用）
+  imageCdnDirectFetchEnabled: boolean
+  imageCdnDirectFetchTimeoutMs: number
+  // 风控防护（2026-09-01 拍板）：仅增量消息 + 最小间隔 + 每小时上限（WebUI 可调前两项，稳定后用户自行提升）
+  imageCdnDirectFetchMinIntervalMs: number
+  imageCdnDirectFetchHourlyLimit: number
+  imageCdnDirectFetchMaxAgeMs: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -314,6 +321,11 @@ export class ConfigService {
       imageCompressFormat: 'png',
       imageCompressPaletteMax: 256,
       imageUrlTimeoutMs: 15000,
+      imageCdnDirectFetchEnabled: false,
+      imageCdnDirectFetchTimeoutMs: 30000,
+      imageCdnDirectFetchMinIntervalMs: 3000,
+      imageCdnDirectFetchHourlyLimit: 30,
+      imageCdnDirectFetchMaxAgeMs: 600000,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

@@ -5650,6 +5650,34 @@ class ChatService {
   }
 
   /**
+   * 解析图片消息的 CDN 直取参数（IMAGE-HD-DOWNLOAD-ANALYSIS §8.4/§8.6）
+   * 4.x 的 cdn*url 是 DER filekey 而非 URL；直取需要 filekey+aeskey+length 三参数
+   */
+  parseImageCdnFetchParams(content: string): { fileKey?: string; aesKey?: string; md5?: string; fileLen?: number; hdLen?: number } {
+    try {
+      if (!content) return {}
+      const base = this.parseImageInfo(content)
+      const fileKey =
+        this.extractXmlAttribute(content, 'img', 'cdnbigimgurl') ||
+        this.extractXmlAttribute(content, 'img', 'cdnmidimgurl') ||
+        undefined
+      const toInt = (v: string) => {
+        const n = parseInt(v, 10)
+        return Number.isFinite(n) && n > 0 ? n : undefined
+      }
+      return {
+        fileKey,
+        aesKey: base.aesKey,
+        md5: base.md5,
+        fileLen: toInt(this.extractXmlAttribute(content, 'img', 'length')),
+        hdLen: toInt(this.extractXmlAttribute(content, 'img', 'hdlength'))
+      }
+    } catch {
+      return {}
+    }
+  }
+
+  /**
    * 解析视频MD5
    * 注意：提取 md5 字段用于查询 hardlink.db，获取实际视频文件名
    */

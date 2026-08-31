@@ -3,6 +3,7 @@ import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
 import { imageDecryptService } from './imageDecryptService'
+import { cdnFetchService } from './cdnFetchService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
@@ -888,6 +889,31 @@ class MessagePushService {
       } catch (e) {
         lastError = e
         console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
+      }
+    }
+    // CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）：仅剩缩略图且开关开启时触发；
+    // 产物为解密后明文，任何失败都降级回缩略图，不阻断推送
+    if (thumbPath && this.configService.get('imageCdnDirectFetchEnabled') === true) {
+      try {
+        const cdnParams = chatService.parseImageCdnFetchParams(String(message.rawContent || message.content || ''))
+        if (cdnParams.fileKey && cdnParams.aesKey && cdnParams.fileLen && cdnParams.fileLen > 0) {
+          const fullPath = cdnFetchService.buildSavePath(imageMd5 || `img_${Date.now()}`)
+          const cdnResult = await cdnFetchService.fetch({
+            fileKey: cdnParams.fileKey,
+            aesKey: cdnParams.aesKey,
+            fileLen: cdnParams.fileLen,
+            fullPath,
+            md5: imageMd5 || cdnParams.md5,
+            messageCreateTime: Number(message.createTime || 0)
+          })
+          if (cdnResult.success && cdnResult.localPath) {
+            console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
+            return cdnResult.localPath
+          }
+          console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
+        }
+      } catch (e) {
+        console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)
       }
     }
     if (thumbPath) {
