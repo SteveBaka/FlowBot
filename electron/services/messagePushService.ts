@@ -867,7 +867,8 @@ class MessagePushService {
             thumbPath = result.localPath
           }
           if (isLastAttempt) {
-            return thumbPath
+            // break（而非 return）：让控制流落到循环后的 CDN 直取兜底块，再由末尾统一返回缩略图
+            break
           }
           if (preferHd && imageMd5) {
             const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
@@ -903,14 +904,17 @@ class MessagePushService {
             aesKey: cdnParams.aesKey,
             fileLen: cdnParams.fileLen,
             fullPath,
-            md5: imageMd5 || cdnParams.md5,
-            messageCreateTime: Number(message.createTime || 0)
+            md5: imageMd5 || cdnParams.md5, // 仅诊断：XML md5 与 CDN 实存对象无关（PoC 实证），不参与产物判定
+            // createTime 秒 → 毫秒（cdnFetchService 门禁按 ms 与 Date.now() 比较）
+            messageCreateTime: Number(message.createTime || 0) * 1000
           })
           if (cdnResult.success && cdnResult.localPath) {
             console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
             return cdnResult.localPath
           }
           console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
+        } else {
+          console.log(`[DIAG][MsgPush] cdn fetch skip: params incomplete fileKey=${!!cdnParams.fileKey} aesKey=${!!cdnParams.aesKey} fileLen=${cdnParams.fileLen ?? 'null'}`)
         }
       } catch (e) {
         console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)

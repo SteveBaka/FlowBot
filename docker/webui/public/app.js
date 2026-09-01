@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1258,6 +1258,7 @@ var SendManagerPage = {
         bpParams.imageCdnDirectFetchTimeoutMs = d.imageCdnDirectFetchTimeoutMs || 30000
         bpParams.imageCdnDirectFetchMinIntervalMs = (d.imageCdnDirectFetchMinIntervalMs !== undefined) ? d.imageCdnDirectFetchMinIntervalMs : 3000
         bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
+        bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1353,6 +1354,7 @@ var SendManagerPage = {
         imageCdnDirectFetchTimeoutMs: Math.max(5000, Math.min(120000, Number(bpParams.imageCdnDirectFetchTimeoutMs) || 30000)),
         imageCdnDirectFetchMinIntervalMs: isFinite(Number(bpParams.imageCdnDirectFetchMinIntervalMs)) ? Math.max(0, Math.min(60000, Number(bpParams.imageCdnDirectFetchMinIntervalMs))) : 3000,
         imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
+        imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1712,21 +1714,25 @@ var SendManagerPage = {
     '<div class="config-opt-grid cols1">' +
     '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">CDN 直取原图（实验）</span><toggle-switch v-model="bpParams.imageCdnDirectFetchEnabled" /></div>' +
-    '<div class="strategy-desc">仅缩略图消息的原图兜底：本地读取全失败时经微信 CDN 库直取（默认关；需常驻 helper，验收通过后再启用）。防护：仅新增消息（禁历史回填）、单图单次尝试、最小间隔+每小时限流、零 hook 纯主动调用</div>' +
+    '<div class="strategy-desc">仅缩略图消息的原图兜底：本地读取（_h.dat > .dat > _t.dat）与 HD 升级全失败、只剩缩略图时，调用内置 ptrace 注入器毫秒级驱动微信自身 CDN 库直取并解密原图（零 hook、零 frida、进程不驻留；需微信在线登录态，默认关）。任何失败都自动降级回缩略图，绝不阻断推送。防护：仅近 10 分钟内的新消息（禁历史回填）、同一图 6 小时内仅尝试一次、最小间隔与每小时上限限流、超时/错误码不重试直接降级</div>' +
     '</div>' +
     '</div>' +
     '<div class="config-opt-grid">' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">直取超时</span><span class="opt-input"><input type="number" min="5000" step="1000" v-model.number="bpParams.imageCdnDirectFetchTimeoutMs">ms</span></div>' +
-    '<div class="strategy-desc">直取任务落盘轮询上限（默认 30000；超时即放弃该图并降级缩略图，不重试、不阻断推送）</div>' +
+    '<div class="strategy-desc">直取请求发起到产物落盘的等待上限，期间每 500ms 轮询、尺寸稳定即判定完成（默认 30000，钳制 5000–120000）。超时即放弃该图并降级缩略图——不重试，避免对同一 CDN 对象反复请求</div>' +
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">最小间隔</span><span class="opt-input"><input type="number" min="0" step="500" v-model.number="bpParams.imageCdnDirectFetchMinIntervalMs">ms</span></div>' +
-    '<div class="strategy-desc">两次直取的最小时间间隔（默认 3000；0 为不限间隔，但仍受每小时上限约束）</div>' +
+    '<div class="strategy-desc">两次直取请求的最小时间间隔（默认 3000，钳制 0–60000；0 为不限间隔，但仍受每小时上限约束）。未到间隔的消息不排队等待，直接降级缩略图</div>' +
     '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">每小时上限</span><span class="opt-input"><input type="number" min="1" step="5" v-model.number="bpParams.imageCdnDirectFetchHourlyLimit">张</span></div>' +
-    '<div class="strategy-desc">每小时直取张数上限（暂定 30，超限该小时降级缩略图；运行稳定后可自行逐步提升）</div>' +
+    '<div class="strategy-desc">滑动 1 小时窗口内的直取张数上限（默认 30，钳制 1–600）。超限后该小时内的图片全部降级缩略图；运行稳定后可自行逐步提升</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchDiagMd5Log }">' +
+    '<div class="strategy-top"><span class="strategy-name">md5 比对诊断日志</span><toggle-switch v-model="bpParams.imageCdnDirectFetchDiagMd5Log" /></div>' +
+    '<div class="strategy-desc">直取成功后，将产物 md5 与消息 XML 声称的 md5 比对并记录日志（仅记录，不参与成败判定——服务端对象与声称值本就无关）。反馈问题时开启此开关，在容器日志中检索「诊断：产物 md5」即可提供该行</div>' +
     '</div>' +
     '</div>' +
     '</div>' +
@@ -1803,6 +1809,7 @@ var SendManagerPage = {
     '</div>' +
     '</div>' +
 
+    '<teleport to="body">' +
     '<transition name="fade-up">' +
     '<div v-if="dirty" class="save-bar">' +
     '<span class="save-bar-dot"></span>' +
@@ -1811,6 +1818,7 @@ var SendManagerPage = {
     '<button class="btn btn-primary btn-sm" :disabled="saving" @click="saveMode">{{ saving ? "保存中…" : "保存配置" }}</button>' +
     '</div>' +
     '</transition>' +
+    '</teleport>' +
     '</div>'
 }
 

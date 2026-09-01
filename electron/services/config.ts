@@ -105,6 +105,8 @@ interface ConfigSchema {
   imageCdnDirectFetchMinIntervalMs: number
   imageCdnDirectFetchHourlyLimit: number
   imageCdnDirectFetchMaxAgeMs: number
+  // 产物 md5 与 XML 声称值比对诊断日志（仅记录不判定；用户反馈问题时开关复现）
+  imageCdnDirectFetchDiagMd5Log: boolean
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -326,6 +328,7 @@ export class ConfigService {
       imageCdnDirectFetchMinIntervalMs: 3000,
       imageCdnDirectFetchHourlyLimit: 30,
       imageCdnDirectFetchMaxAgeMs: 600000,
+      imageCdnDirectFetchDiagMd5Log: true,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

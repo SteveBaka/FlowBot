@@ -1,19 +1,26 @@
 /**
- * cdnFetchService —— 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6 定稿契约）
+ * cdnFetchService —— 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6 + POC-FINAL 契约）
  *
  * 职责：本地直读（_h > .dat > _t）与 HD 升级全失败、只剩缩略图时，驱动客户端 CDN 库
  * 下载并解密原图。四要素：① 登录态前置检测 ② 串行排队 ③ 产物校验 ④ 错误码降级映射。
  * 风控防护（2026-09-01 拍板）：仅增量消息（禁历史回填）、单 filekey 单次尝试、
  * 最小间隔 + 每小时上限限流、零 hook 纯主动调用（超时即放弃不重试）。
- * 传输层（callHelper）是唯一 seam：Dev 侧 frida helper（cdn_probe15.js 模板 + cdn_fetch
- * 命令通道）交付后在此接入；当前返回 helper_not_available，调用方降级推缩略图。
+ *
+ * 传输层（callHelper）：调用 ptrace 注入器二进制 `cdn_fetch`（resources/key/linux/x64/，
+ * 与 xkey_helper 同款技法：毫秒级借线程远程调用 StartC2CDownload，零 hook 零 frida，
+ * wechat md5 硬守卫绑定 RVA）。契约 `→ {"success","ret"}`；ret=0 受理后产物由微信
+ * CDN 线程异步落盘 savePath（解密后明文）。二进制缺失/未安装时降级推缩略图。
  */
 import { join } from 'path'
 import { app } from 'electron'
 import crypto from 'crypto'
-import { existsSync, mkdirSync, statSync, readFileSync } from 'fs'
+import { existsSync, mkdirSync, statSync, readFileSync, openSync, readSync, closeSync, chmodSync } from 'fs'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
+
+const execFileAsync = promisify(execFile)
 
 export interface CdnFetchRequest {
   /** cdnbigimgurl DER hex（ASN.1 filekey，非 URL） */
@@ -40,9 +47,10 @@ export interface CdnFetchResult {
   disposition?: CdnFetchDisposition
 }
 
-/** §8.5 错误码 → 处置映射 */
+/** §8.5 错误码 → 处置映射（PoC 补充：-32767 = CDN 子系统懒初始化未完成） */
 export function mapCdnErrorCode(code?: number | null): CdnFetchDisposition {
   if (code === -21009) return 'retry_once'            // 同 filekey 会话内重复请求
+  if (code === -32767) return 'retry_once'            // CDN 未初始化（新登录进程无媒体事件），首个媒体事件后自愈
   if (code === -5103166 || code === 30001) return 'permanent_thumb' // CDN 对象过期/删除
   if (code === -21038 || code === -20003) return 'impl_bug'         // savepath 冲突 / 参数缺失
   return 'unknown'
@@ -100,6 +108,14 @@ export class CdnFetchService {
       return Number.isFinite(v) && v > 0 ? Math.min(v, 3600000) : 600000
     } catch {
       return 600000
+    }
+  }
+
+  private isDiagMd5LogEnabled(): boolean {
+    try {
+      return this.configService.get('imageCdnDirectFetchDiagMd5Log') !== false
+    } catch {
+      return true
     }
   }
 
@@ -192,34 +208,75 @@ export class CdnFetchService {
 
   private async runFetch(req: CdnFetchRequest): Promise<CdnFetchResult> {
     const dispatched = await this.callHelper(req)
-    if (!dispatched.success && dispatched.error === 'helper_not_available') return dispatched
-
-    if (dispatched.success) {
-      // 传输层已受理（code=0）→ 轮询产物落盘（500ms 间隔 / 超时上限）
-      const ok = await this.waitForFile(req.fullPath, this.getTimeoutMs())
-      if (!ok) {
-        // 保守处置：超时不重试（零 hook 下终结错误码不可见，避免对同一 filekey 反复请求）
-        return { success: false, error: 'timeout', code: dispatched.code ?? null, disposition: 'permanent_thumb' }
-      }
-      const verify = this.verifyFetchedFile(req.fullPath, req.md5)
-      if (!verify.ok) {
-        return { success: false, error: verify.error || 'verify_failed', code: dispatched.code ?? null, disposition: 'impl_bug' }
-      }
-      return { success: true, localPath: req.fullPath, code: dispatched.code ?? null }
+    if (!dispatched.success) {
+      // 注入器自身失败（缺二进制/attach/写内存）——disposition 已由 callHelper 标注
+      return { ...dispatched, disposition: dispatched.disposition ?? mapCdnErrorCode(dispatched.code) }
     }
-    // 要素④：helper 返回业务错误码 → 降级映射
-    return { ...dispatched, disposition: mapCdnErrorCode(dispatched.code) }
+    const ret = dispatched.code ?? -1
+    if (ret !== 0) {
+      // 要素④：门禁/参数错误码 → 降级映射（-32767 CDN 未初始化 / -21009 重复 / -21038 savepath 冲突…）
+      return { success: false, error: `cdn_ret_${ret}`, code: ret, disposition: mapCdnErrorCode(ret) }
+    }
+    // ret=0 受理 → 产物由微信 CDN 线程异步落盘，轮询（500ms 间隔 / 超时上限）
+    const ok = await this.waitForFile(req.fullPath, this.getTimeoutMs())
+    if (!ok) {
+      // 保守处置：超时不重试（避免对同一 filekey 反复请求）
+      return { success: false, error: 'timeout', code: 0, disposition: 'permanent_thumb' }
+    }
+    const verify = this.verifyFetchedFile(req.fullPath, req.md5)
+    if (!verify.ok) {
+      return { success: false, error: verify.error || 'verify_failed', code: 0, disposition: 'impl_bug' }
+    }
+    return { success: true, localPath: req.fullPath, code: 0 }
+  }
+
+  /** 解析注入器二进制路径（仿 keyServiceLinux.getHelperPath 候选链）+ 运行时 chmod */
+  private getHelperPath(): string | null {
+    const candidates: string[] = []
+    try {
+      const resourcesPath = (process as unknown as { resourcesPath?: string }).resourcesPath
+      if (resourcesPath) {
+        candidates.push(join(resourcesPath, 'resources', 'key', 'linux', 'x64', 'cdn_fetch'))
+        candidates.push(join(resourcesPath, 'key', 'linux', 'x64', 'cdn_fetch'))
+      }
+    } catch { /* 非 Electron 环境 */ }
+    try {
+      candidates.push(join(app.getAppPath(), 'resources', 'key', 'linux', 'x64', 'cdn_fetch'))
+    } catch { /* ignore */ }
+    candidates.push(join(process.cwd(), 'resources', 'key', 'linux', 'x64', 'cdn_fetch'))
+    for (const p of candidates) {
+      if (existsSync(p)) {
+        try { chmodSync(p, 0o755) } catch { /* 只读场景由部署层保证 */ }
+        return p
+      }
+    }
+    return null
   }
 
   /**
-   * ★ 传输 seam（唯一待实现点）：Dev 侧常驻 frida helper 交付后在此接入。
-   * 契约：fetch(fileKey, aesKey, fileLen, fullPath) → code（0=受理；负数为创建级错误码）。
-   * ⚠️ 风控约束（2026-09-01 拍板）：helper **零 hook** —— 仅 NativeFunction 主动调用 +
-   * 读取可见参数，禁止 Interceptor.attach / 任何代码修改；任务终结错误码不可见，
-   * 成败以「落盘轮询 + md5 校验」为准，超时即放弃（不重试）。
+   * 传输层：调用 ptrace 注入器 `cdn_fetch`（零 hook，毫秒级借线程远程调用）。
+   * 契约：`cdn_fetch <fileKey> <aesKey> <fileLen> <savePath> [taskname] → {"success","ret"}`
+   * ret=0 受理（产物由微信 CDN 线程异步落盘 savePath，解密后明文）；负数为门禁/参数错误码。
+   * 二进制缺失 → helper_not_installed（调用方降级缩略图，不阻断推送）。
    */
-  private async callHelper(_req: CdnFetchRequest): Promise<CdnFetchResult> {
-    return { success: false, error: 'helper_not_available', code: null }
+  private async callHelper(req: CdnFetchRequest): Promise<CdnFetchResult> {
+    const bin = this.getHelperPath()
+    if (!bin) return { success: false, error: 'helper_not_installed', disposition: 'permanent_thumb' }
+    const taskname = `cdndirect_${Date.now()}_fetch`
+    const args = [req.fileKey, req.aesKey, String(req.fileLen), req.fullPath, taskname]
+    try {
+      const { stdout } = await execFileAsync(bin, args, { timeout: 30000, maxBuffer: 64 * 1024 })
+      const res = JSON.parse(String(stdout || '').trim())
+      if (!res.success) {
+        return { success: false, error: res.error || 'helper_failed', code: null, disposition: 'impl_bug' }
+      }
+      return { success: true, code: Number(res.ret) }
+    } catch (e) {
+      // 注入器把 JSON 错误打在 stdout（诊断日志走 stderr），execFile 拒绝时必须带上 stdout，否则无诊断信息
+      const err = e as { stdout?: unknown }
+      const so = typeof err?.stdout === 'string' ? err.stdout.trim() : ''
+      return { success: false, error: `helper_exec_failed:${String(e)}${so ? ` stdout=${so}` : ''}`, code: null, disposition: 'impl_bug' }
+    }
   }
 
   /** 轮询产物落盘：文件出现且尺寸稳定（两次采样一致）视为就绪 */
@@ -242,16 +299,30 @@ export class CdnFetchService {
     return false
   }
 
-  /** 要素③：产物校验——存在 + 非空 +（可选）md5 比对；产物为解密后明文，可直接 file 头校验 */
-  verifyFetchedFile(fullPath: string, expectedMd5?: string): { ok: boolean; error?: string } {
+  /** 要素③：产物校验——存在 + 非空 + 图片魔数（解密后明文）；diagMd5 仅诊断（XML md5 与
+   * CDN 实存对象无关，PoC 实证：声称 26034B、实得 88873B 且内容正确），不参与判定；
+   * 诊断日志经 imageCdnDirectFetchDiagMd5Log 开关控制（默认开，用户反馈问题时复现用） */
+  verifyFetchedFile(fullPath: string, diagMd5?: string): { ok: boolean; error?: string } {
     try {
       if (!existsSync(fullPath)) return { ok: false, error: 'file_missing' }
       const stat = statSync(fullPath)
       if (stat.size <= 0) return { ok: false, error: 'file_empty' }
-      if (expectedMd5) {
+      const fd = openSync(fullPath, 'r')
+      const head = Buffer.alloc(4)
+      readSync(fd, head, 0, 4, 0)
+      closeSync(fd)
+      const hex = head.toString('hex')
+      const isImage =
+        hex.startsWith('ffd8') ||          // JPEG
+        hex === '89504e47' ||              // PNG
+        hex.startsWith('47494638') ||      // GIF87a/89a
+        hex === '52494646' ||              // RIFF（WEBP 等）
+        hex.startsWith('424d')             // BMP
+      if (!isImage) return { ok: false, error: `bad_magic_${hex}` }
+      if (diagMd5 && this.isDiagMd5LogEnabled()) {
         const actual = crypto.createHash('md5').update(readFileSync(fullPath)).digest('hex')
-        if (actual.toLowerCase() !== String(expectedMd5).toLowerCase()) {
-          return { ok: false, error: 'md5_mismatch' }
+        if (actual.toLowerCase() !== String(diagMd5).toLowerCase()) {
+          console.log(`[cdnFetch] 诊断：产物 md5 ${actual} 与消息声称 ${diagMd5} 不符（服务端对象与 XML 声称值无关，非失败）`)
         }
       }
       return { ok: true }
