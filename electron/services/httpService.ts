@@ -140,94 +140,87 @@ interface ImageTokenEntry {
 const imageTokenCache = new Map<string, ImageTokenEntry>()
 const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
 // 视频 token 单独 TTL：适配器下载大文件可能滞后，2 分钟图片级 TTL 不够用
-const VIDEO_TOKEN_TTL_MS = 60 * 60 * 1000
+export const VIDEO_TOKEN_TTL_MS = 60 * 60 * 1000
 const IMAGE_TOKEN_MAX = 200
 let imageTokenLastCleanup = 0
 const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
+
+/** 池满腾坑（2026-09-02 加固）：先淘汰已过期项，保住长 TTL 视频 token
+ * 不被高频图片流量按插入序挤出；无过期项才退化为最老项淘汰 */
+function evictTokenSlot(now: number): void {
+  for (const [key, entry] of imageTokenCache) {
+    if (entry.expires < now) {
+      imageTokenCache.delete(key)
+      return
+    }
+  }
+  const oldest = imageTokenCache.keys().next().value
+  if (oldest) {
+    imageTokenCache.delete(oldest)
+  }
+}
+
+/** 图片/视频 token 共用分配：节流清理过期 → 腾坑 → 16 位随机 token → 入池 */
+function allocMediaToken(
+  filePath: string,
+  opts: { ttlMs: number; kind: 'image' | 'video'; isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }
+): string {
+  const now = Date.now()
+
+  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
+    imageTokenLastCleanup = now
+    for (const [token, entry] of imageTokenCache) {
+      if (entry.expires < now) {
+        imageTokenCache.delete(token)
+      }
+    }
+  }
+
+  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
+    evictTokenSlot(now)
+  }
+
+  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
+  let token = ''
+  do {
+    token = ''
+    for (let i = 0; i < 16; i++) {
+      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
+    }
+  } while (imageTokenCache.has(token))
+
+  imageTokenCache.set(token, {
+    imagePath: filePath,
+    expires: now + opts.ttlMs,
+    isThumb: opts.isThumb,
+    kind: opts.kind,
+    sessionId: opts.sessionId,
+    imageMd5: opts.imageMd5,
+    imageDatName: opts.imageDatName,
+  })
+
+  return token
+}
 
 export function registerImageToken(imagePath: string): string {
   return registerImageTokenWithMeta(imagePath, { isThumb: isThumbnailFilePath(imagePath) })
 }
 
-export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }): string {
-  const now = Date.now()
-
-  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
-    imageTokenLastCleanup = now
-    for (const [token, entry] of imageTokenCache) {
-      if (entry.expires < now) {
-        imageTokenCache.delete(token)
-      }
-    }
-  }
-
-  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
-    const oldest = imageTokenCache.keys().next().value
-    if (oldest) {
-      imageTokenCache.delete(oldest)
-    }
-  }
-
-  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
-  let token = ''
-  do {
-    token = ''
-    for (let i = 0; i < 16; i++) {
-      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
-    }
-  } while (imageTokenCache.has(token))
-
-  imageTokenCache.set(token, {
-    imagePath,
-    expires: now + IMAGE_TOKEN_TTL_MS,
+export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string; ttlMs?: number }): string {
+  return allocMediaToken(imagePath, {
+    ttlMs: meta.ttlMs ?? IMAGE_TOKEN_TTL_MS,
+    kind: 'image',
     isThumb: meta.isThumb,
     sessionId: meta.sessionId,
     imageMd5: meta.imageMd5,
     imageDatName: meta.imageDatName,
-    kind: 'image',
   })
-
-  return token
 }
 
 /** 入站视频 token（INBOUND-VIDEO-PUSH-PLAN §2.3）：复用图片令牌池（16 位随机 + LRU），
  * TTL 1h 独立；仅可经 /api/media 消费 */
 export function registerVideoTokenWithMeta(videoPath: string): string {
-  const now = Date.now()
-
-  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
-    imageTokenLastCleanup = now
-    for (const [token, entry] of imageTokenCache) {
-      if (entry.expires < now) {
-        imageTokenCache.delete(token)
-      }
-    }
-  }
-
-  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
-    const oldest = imageTokenCache.keys().next().value
-    if (oldest) {
-      imageTokenCache.delete(oldest)
-    }
-  }
-
-  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
-  let token = ''
-  do {
-    token = ''
-    for (let i = 0; i < 16; i++) {
-      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
-    }
-  } while (imageTokenCache.has(token))
-
-  imageTokenCache.set(token, {
-    imagePath: videoPath,
-    expires: now + VIDEO_TOKEN_TTL_MS,
-    isThumb: false,
-    kind: 'video',
-  })
-
-  return token
+  return allocMediaToken(videoPath, { ttlMs: VIDEO_TOKEN_TTL_MS, kind: 'video', isThumb: false })
 }
 
 export function isThumbnailFilePath(filePath: string): boolean {
@@ -720,7 +713,7 @@ class HttpService {
             return
         }
 
-        if (pathname === '/api/media' && req.method === 'GET') {
+        if (pathname === '/api/media' && (req.method === 'GET' || req.method === 'HEAD')) {
             const token = url.searchParams.get('token') || ''
             if (!/^[a-z0-9]{16}$/.test(token)) {
                 this.sendError(res, 400, 'Invalid token format')
@@ -740,12 +733,34 @@ class HttpService {
                 '.mp4': 'video/mp4', '.mov': 'video/quicktime',
                 '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo'
             }
-            res.writeHead(200, {
+            const stat = fs.statSync(entry.imagePath)
+            const baseHeaders: Record<string, string | number> = {
                 'Content-Type': mimeMap[ext] || 'application/octet-stream',
-                'Content-Length': String(fs.statSync(entry.imagePath).size),
                 'Cache-Control': 'no-cache, max-age=0',
-                'X-Content-Type-Options': 'nosniff'
-            })
+                'X-Content-Type-Options': 'nosniff',
+                'Accept-Ranges': 'bytes'
+            }
+            // Range（单段 bytes=N-M / -N 后缀）：断点续传与拖动进度；非法/越界回 416
+            const rangeMatch = req.headers.range ? /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range).trim()) : null
+            if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
+                const start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : (rangeMatch[2] ? Math.max(0, stat.size - parseInt(rangeMatch[2], 10)) : 0)
+                const end = (rangeMatch[1] && rangeMatch[2]) ? Math.min(parseInt(rangeMatch[2], 10), stat.size - 1) : stat.size - 1
+                if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= stat.size) {
+                    res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` })
+                    res.end()
+                    return
+                }
+                res.writeHead(206, {
+                    ...baseHeaders,
+                    'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+                    'Content-Length': String(end - start + 1)
+                })
+                if (req.method === 'HEAD') { res.end(); return }
+                fs.createReadStream(entry.imagePath, { start, end }).pipe(res)
+                return
+            }
+            res.writeHead(200, { ...baseHeaders, 'Content-Length': String(stat.size) })
+            if (req.method === 'HEAD') { res.end(); return }
             fs.createReadStream(entry.imagePath).pipe(res)
             return
         }

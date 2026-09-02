@@ -37,6 +37,33 @@ function videoUrlTimeoutMs(): number {
   return 120000
 }
 
+/* ── 出站临时文件生命周期清扫（2026-09-02 快赢）────────────────────────
+ * 归一产物（weflow_obv_* 视频 / weflow_img_* 图片 / weflow_comp_* 压缩中间件）
+ * 写入 tmpdir 后无人回收：发送成功不删、失败也不删，只随容器重建消失。
+ * 对齐 cdnFetchService.sweepExpiredProducts 模式：按前缀 + mtime 惰性清扫，
+ * 仅删本模块命名产物，24h 龄期保证不误删在用文件。 */
+const OUTBOUND_TMP_PREFIXES = ['weflow_obv_', 'weflow_img_', 'weflow_comp_']
+const OUTBOUND_TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
+const OUTBOUND_TMP_SWEEP_INTERVAL_MS = 60 * 60 * 1000
+let lastOutboundTmpSweep = 0
+
+function sweepOutboundTmpFiles(): void {
+  const now = Date.now()
+  if (now - lastOutboundTmpSweep < OUTBOUND_TMP_SWEEP_INTERVAL_MS) return
+  lastOutboundTmpSweep = now
+  try {
+    const dir = tmpdir()
+    for (const name of fs.readdirSync(dir)) {
+      if (!OUTBOUND_TMP_PREFIXES.some((p) => name.startsWith(p))) continue
+      try {
+        if (fs.statSync(path.join(dir, name)).mtimeMs < now - OUTBOUND_TMP_MAX_AGE_MS) {
+          fs.unlinkSync(path.join(dir, name))
+        }
+      } catch { /* 单文件失败下轮再清 */ }
+    }
+  } catch { /* tmpdir 不可读则本轮跳过 */ }
+}
+
 /**
  * 视频扩展名探测（尽力保留，绝不拒绝）：
  * - 偏移 4 处 'ftyp'（ISO BMFF）→ .mp4/.mov
@@ -108,6 +135,7 @@ export async function prepareVideoForSend(
     console.warn('[mediaService] prepareVideoForSend: videoSendEnabled=false, skipped')
     return null
   }
+  sweepOutboundTmpFiles()
   const max = videoMaxBytes()
   const timeoutMs = videoUrlTimeoutMs()
   const t0 = Date.now()
@@ -470,6 +498,7 @@ export async function prepareImageForSend(
   src: string | ImageSource
 ): Promise<{ imagePath: string; mime: string; compressed?: boolean } | null> {
   const t0 = Date.now()
+  sweepOutboundTmpFiles()
   try {
     // 兼容字符串入参（OneBot / 旧调用只传 file:// 或裸路径）：智能分散到对应来源字段。
     const source: ImageSource = typeof src === 'string'

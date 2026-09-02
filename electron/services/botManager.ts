@@ -3,7 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
-import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, isThumbnailFilePath } from './httpService'
+import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, isThumbnailFilePath, VIDEO_TOKEN_TTL_MS } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -728,31 +728,32 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           messageSegments.push({ type: 'image', data: { file: data.emojiUrl } })
         }
 
-        // 入站视频段（INBOUND-VIDEO-PUSH-PLAN §2.2）：跟随 imageTransferMode。
-        // base64 模式跳过视频段（大文件 base64 不可行），仅传元数据；URL 模式走 /api/media?token=。
+        // 入站视频段（ADAPTER-MEDIA-CONTRACT §3）：视频无 base64 可行形态，
+        // 配置了 imageServerBaseUrl 即发 video 段（不再跟随图片传输模式）；
+        // 未配置 baseUrl 才退化为仅元数据。
         if (data.videoPath && fs.existsSync(data.videoPath)) {
-          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
           const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
-          if (mode === 'url' && baseUrl) {
+          if (baseUrl) {
             const videoToken = registerVideoTokenWithMeta(data.videoPath)
             const videoUrl = `${baseUrl.replace(/\/+$/, '')}/api/media?token=${videoToken}`
             // astrbot Video 组件自带 cover 字段（components.py:288），封面直接挂段内
             const videoData: Record<string, string> = { file: videoUrl }
             if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
-              data.videoPosterUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false })}`
+              // cover 与视频本体同寿命（1h），避免图片级 2min TTL 先过期导致封面 404
+              data.videoPosterUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false, ttlMs: VIDEO_TOKEN_TTL_MS })}`
               videoData.cover = data.videoPosterUrl
             }
             messageSegments.push({ type: 'video', data: videoData })
           } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
-            // base64/直连模式：视频本体不内联，仅给出封面供适配器参考
+            // 无对外地址：视频本体无处可链，仅元数据；封面落 file://（同机场景）
             data.videoPosterUrl = `file://${data.videoPosterPath}`
           }
         } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
-          // 视频本体缺失（群视频懒下载）：降级推封面，标注是视频便于模型辨别
-          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
+          // 视频本体缺失（群视频懒下载）：降级推封面，标注是视频便于模型辨别。
+          // 配置了对外地址就走 URL（file:// 跨容器不可达），无 baseUrl 才回退 file://
           const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
-          if (mode === 'url' && baseUrl) {
-            const posterToken = registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false })
+          if (baseUrl) {
+            const posterToken = registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false, ttlMs: VIDEO_TOKEN_TTL_MS })
             messageSegments.push({ type: 'image', data: { file: `${baseUrl.replace(/\/+$/, '')}/api/image?token=${posterToken}` } })
           } else {
             messageSegments.push({ type: 'image', data: { file: `file://${data.videoPosterPath}` } })
