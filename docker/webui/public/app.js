@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1209,6 +1209,7 @@ var SendManagerPage = {
     var secBp = ref(false)
     var secAck = ref(false)
     var secCdn = ref(false)
+    var secVid = ref(false)
     var strategySummary = computed(function () {
       var n = (mergeEnabled.value ? 1 : 0) + (dedupEnabled.value ? 1 : 0) + (priorityEnabled.value ? 1 : 0) + (dynamicIntervalEnabled.value ? 1 : 0)
       return '开启 ' + n + ' / 4 项'
@@ -1224,6 +1225,9 @@ var SendManagerPage = {
     var cdnSummary = computed(function () {
       if (!bpParams.imageCdnDirectFetchEnabled) return '已关闭（实验）'
       return '开启 · 超时 ' + Math.round(bpParams.imageCdnDirectFetchTimeoutMs / 1000) + 's'
+    })
+    var vidSummary = computed(function () {
+      return bpParams.videoCalibrationLogEnabled ? '标定日志开启' : '已关闭'
     })
 
     function initParams() {
@@ -1259,6 +1263,7 @@ var SendManagerPage = {
         bpParams.imageCdnDirectFetchMinIntervalMs = (d.imageCdnDirectFetchMinIntervalMs !== undefined) ? d.imageCdnDirectFetchMinIntervalMs : 3000
         bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
         bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
+        bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1355,6 +1360,7 @@ var SendManagerPage = {
         imageCdnDirectFetchMinIntervalMs: isFinite(Number(bpParams.imageCdnDirectFetchMinIntervalMs)) ? Math.max(0, Math.min(60000, Number(bpParams.imageCdnDirectFetchMinIntervalMs))) : 3000,
         imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
         imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
+        videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1464,8 +1470,8 @@ var SendManagerPage = {
       queueBars: queueBars, trend: trend, pipeline: pipeline,
       nowElapsed: nowElapsed, typeLabel: typeLabel, urgencyClass: urgencyClass,
       tiers: tiers, tierName: tierName, setTier: setTier, customEditing: customEditing, overriddenKeys: overriddenKeys,
-      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck, secCdn: secCdn,
-      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary, cdnSummary: cdnSummary,
+      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck, secCdn: secCdn, secVid: secVid,
+      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary, cdnSummary: cdnSummary, vidSummary: vidSummary,
       dirty: dirty, discardChanges: discardChanges
     }
   },
@@ -1701,6 +1707,22 @@ var SendManagerPage = {
     '</div>' +
     '</div>' +
     '</transition>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secVid = !secVid">' +
+    '<span class="chev" :class="{ open: secVid }">▸</span>' +
+    '<span class="config-title">视频链路</span>' +
+    '<span class="config-summary">{{ vidSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secVid" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +
+    '<div class="strategy-desc">发送视频时在容器日志记录源规格（体积/时长/分辨率/码率）与 Enter 时刻（[Calib] 标记），用于量化发送耗时；默认关，仅标定/排查时开启</div>' +
+    '</div>' +
+    '</div>' +
     '</div>' +
     '</div>' +
 

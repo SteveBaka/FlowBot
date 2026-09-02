@@ -14,7 +14,7 @@
 import { join } from 'path'
 import { app } from 'electron'
 import crypto from 'crypto'
-import { existsSync, mkdirSync, statSync, readFileSync, openSync, readSync, closeSync, chmodSync } from 'fs'
+import { existsSync, mkdirSync, statSync, readFileSync, openSync, readSync, closeSync, chmodSync, readdirSync, unlinkSync } from 'fs'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { ConfigService } from './config'
@@ -174,7 +174,7 @@ export class CdnFetchService {
     return this.getElectronPath('userData') || process.cwd()
   }
 
-  /** 独一 savepath：<data>/cdn_fetch/<id>_<uuid>.img */
+  /** 独一 savepath：<data>/cdn_fetch/<id>_<uuid>.img；顺带清理超 24h 的历史产物 */
   buildSavePath(id: string): string {
     const dir = join(this.getUserDataPath(), 'cdn_fetch')
     try {
@@ -182,6 +182,19 @@ export class CdnFetchService {
     } catch { /* fetch 内校验会兜底 */ }
     const safeId = String(id || 'img').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 64) || 'img'
     return join(dir, `${safeId}_${crypto.randomUUID()}.img`)
+  }
+
+  /** 产物 TTL：推送消费方（token URL）取用后即无用，超 24h 删除防堆积 */
+  private sweepExpiredProducts(): void {
+    try {
+      const dir = join(this.getUserDataPath(), 'cdn_fetch')
+      if (!existsSync(dir)) return
+      const cutoff = Date.now() - 24 * 3600 * 1000
+      for (const f of readdirSync(dir)) {
+        const p = join(dir, f)
+        try { if (statSync(p).mtimeMs < cutoff) unlinkSync(p) } catch { /* 下轮再清 */ }
+      }
+    } catch { /* 清理失败不影响主链路 */ }
   }
 
   /** 兜底入口：调用方保证仅在本地只剩缩略图时触发；任何失败都降级，不抛出 */
@@ -198,8 +211,14 @@ export class CdnFetchService {
       if (!guard.ok) return { success: false, error: guard.error, disposition: guard.disposition }
       this.recordAttempt(req.fileKey)
       const run = this.queue.then(() => this.runFetch(req))
-      // 队列容错：单个失败不阻断后续请求
-      this.queue = run.catch(() => undefined)
+      // retry_once（-32767 CDN 懒初始化 / -21009 重复请求）为瞬态：撤销台账，允许同 filekey 重试
+      this.queue = run
+        .then((res) => {
+          if (res.disposition === 'retry_once') this.attemptedKeys.delete(req.fileKey)
+          return res
+        })
+        .catch(() => undefined)
+      this.sweepExpiredProducts()
       return await run
     } catch (e) {
       return { success: false, error: `fetch_exception:${String(e)}` }

@@ -316,7 +316,7 @@ export class KeyServiceLinux {
         if (verified === true) {
           onProgress?.('缓存密钥校验成功，已确认可用')
         } else if (verified === false) {
-          onProgress?.('已从缓存计算密钥，但未通过本地模板校验')
+          return { success: false, error: '捕获的密钥未通过本地图片校验（解不开现存 dat，疑似微信登录账号与 WeFlow 配置账号不一致），已拒绝保存' }
         }
         return { success: true, xorKey: keyObj.xorKey, aesKey, verified: verified === true }
       }
@@ -421,7 +421,10 @@ export class KeyServiceLinux {
         const res = JSON.parse(memOut.trim())
 
         if (res.success) {
-          onProgress?.('内存扫描成功');
+          if (!this.verifyDerivedAesKey(String(res.key || ''), ciphertext!)) {
+            return { success: false, error: '内存扫描到的密钥未通过模板校验（解不开模板密文，疑似残留候选或账号不匹配），已拒绝保存' }
+          }
+          onProgress?.('内存扫描成功，模板校验通过');
           return { success: true, xorKey, aesKey: res.key }
         }
         return { success: false, error: res.result || '未知错误' }

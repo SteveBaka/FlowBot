@@ -823,6 +823,10 @@ export class LinuxSender implements IPlatformSender {
     }
 
     log(`Pressing Enter to send...`)
+    // [Calib] T0 标记（标定协议）：受 videoCalibrationLogEnabled 开关控制（WebUI 发送管理）
+    if (ConfigService.getInstance().get('videoCalibrationLogEnabled') === true) {
+      log(`[Calib] T0 media-enter ts=${Date.now()} kind=${videoPath ? 'video' : 'image'}`)
+    }
     // 探针基线：Enter 前抓取（媒体卡片已渲染、尚未发送）——SendAck 超时时对比判定卡框/已发出。
     // 必须在 Enter 前：Enter 后输入框已被微信清空，基线=空框会导致差异恒为 0 而误判"仍在输入框"。
     if (onMediaPasted) {

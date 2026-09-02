@@ -12,6 +12,7 @@ import * as fsp from 'fs/promises'
 import * as path from 'path'
 import * as http from 'http'
 import * as https from 'https'
+import { execFile } from 'child_process'
 import { ConfigService } from './config'
 
 const isEnabled = (): boolean => {
@@ -60,6 +61,31 @@ function sourceExt(fileUrl: string): string {
   return ''
 }
 
+/** [Calib] 视频源规格探针（MEDIA-SERVICE-DESIGN §2.3 任务1 / §9.1 detectVideoSpec 原型）：
+ * ffmpeg -i 只读头部（实测 ~13ms）+ 5s 超时，仅打日志、零行为影响，失败静默。
+ * 输出行与 linux.ts 的 [Calib] T0 行、scripts/video-tx-monitor.sh 的上传结束点
+ * 组成标定三元组（源规格 → Enter 时刻 → 上传完成时刻）。 */
+function probeVideoSpec(videoPath: string, srcBytes: number): void {
+  try {
+    if (ConfigService.getInstance().get('videoCalibrationLogEnabled') !== true) return
+    const ff = getFfmpegPath()
+    if (!ff) return
+    execFile(ff, ['-i', videoPath], { timeout: 5000 }, (_err, _stdout, stderr) => {
+      try {
+        const out = String(stderr || '')
+        const dur = /Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/.exec(out)
+        const vid = /Stream #[^\n]*Video:\s*([^,(]+),[^,]*,\s*(\d{2,5})x(\d{2,5})/.exec(out)
+        const br = /\bbitrate:\s*(\d+)\s*kb\/s/.exec(out)
+        const durS = dur ? (+dur[1]) * 3600 + (+dur[2]) * 60 + (+dur[3]) : 0
+        const parts = [`size=${srcBytes}`, `duration=${durS.toFixed(1)}s`]
+        if (vid) parts.push(`res=${vid[2]}x${vid[3]}`, `codec=${vid[1].trim()}`)
+        if (br) parts.push(`bitrate=${br[1]}kbps`)
+        console.log(`[mediaService][Calib] video-spec ${parts.join(' ')} file=${path.basename(videoPath)}`)
+      } catch { /* 标定探针永不抛出 */ }
+    })
+  } catch { /* 同上 */ }
+}
+
 /**
  * 视频归一：四种来源 → 本地临时文件路径。
  * 返回 { videoPath, mime } | null；
@@ -102,6 +128,7 @@ export async function prepareVideoForSend(
       const tmpPath = path.join(tmpdir(), `weflow_obv_${randomUUID()}${ext}`)
       await fsp.writeFile(tmpPath, buf, { mode: 0o600 })
       console.log(`[mediaService] video base64 → ${tmpPath} (${(buf.length / 1024 / 1024).toFixed(1)}MB, ${Date.now() - t0}ms)`)
+      void probeVideoSpec(tmpPath, buf.length)
       return { videoPath: tmpPath, mime: 'application/octet-stream' }
     }
 
@@ -125,6 +152,7 @@ export async function prepareVideoForSend(
       const tmpPath = path.join(tmpdir(), `weflow_obv_${randomUUID()}${sourceExt(fileUrl) || '.mp4'}`)
       await fsp.copyFile(filePath, tmpPath)
       console.log(`[mediaService] video file:// → ${tmpPath} (${(st.size / 1024 / 1024).toFixed(1)}MB, ${Date.now() - t0}ms)`)
+      void probeVideoSpec(tmpPath, st.size)
       return { videoPath: tmpPath, mime: 'application/octet-stream' }
     }
 
@@ -200,6 +228,7 @@ export async function prepareVideoForSend(
       })
       const st = await fsp.stat(result.tmpPath)
       console.log(`[mediaService] video download ok → ${result.tmpPath} (${(st.size / 1024 / 1024).toFixed(1)}MB, ${Date.now() - t0}ms)`)
+      void probeVideoSpec(result.tmpPath, st.size)
       return { videoPath: result.tmpPath, mime: 'application/octet-stream' }
     }
 
@@ -217,6 +246,7 @@ export async function prepareVideoForSend(
       const tmpPath = path.join(tmpdir(), `weflow_obv_${randomUUID()}${sourceExt(fileUrl) || '.mp4'}`)
       await fsp.copyFile(fileUrl, tmpPath)
       console.log(`[mediaService] video bare path → ${tmpPath} (${(st.size / 1024 / 1024).toFixed(1)}MB, ${Date.now() - t0}ms)`)
+      void probeVideoSpec(tmpPath, st.size)
       return { videoPath: tmpPath, mime: 'application/octet-stream' }
     }
 
