@@ -2,15 +2,11 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { imageDecryptService } from './imageDecryptService'
-import { cdnFetchService } from './cdnFetchService'
-import { videoService } from './videoService'
-import { fileURLToPath } from 'url'
+import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage } from './mediaService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
 import { promises as fs } from 'fs'
-import { existsSync as fsExistsSync, statSync as fsStatSync } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
@@ -94,8 +90,6 @@ class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
-  private readonly imageDecryptMaxRetries = 3
-  private readonly imageDecryptRetryDelayMs = 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -846,155 +840,14 @@ class MessagePushService {
     return merged
   }
 
-  /** 入站视频解析（INBOUND-VIDEO-PUSH-PLAN §三）：开关关闭/文件缺失/异常全部安全降级，
-   * 不抛出、不触发微信下载。元数据 duration 取自消息 XML，size 取自本地 stat。 */
-  private async resolveInboundVideo(message: Message): Promise<{
-    videoPath?: string
-    videoMd5?: string
-    videoPosterPath?: string
-    videoMeta?: { durationSec?: number; sizeBytes?: number; posterAvailable?: boolean; fileMissing?: boolean }
-  } | undefined> {
-    if (this.configService.get('inboundVideoPushEnabled') !== true) return undefined
-    if (Number(message.localType || 0) !== 43) return undefined
-    const videoMd5 = String(message.videoMd5 || '').trim()
-    if (!videoMd5) return undefined
-    try {
-      const info = await videoService.getVideoInfo(videoMd5, { includePoster: true, posterFormat: 'fileUrl' })
-      if (!info?.exists || !info.videoUrl || !fsExistsSync(info.videoUrl)) {
-        const raw = String(message.rawContent || message.content || '')
-        const dur = /<videomsg[^>]*\sduration="(\d+(?:\.\d+)?)"/.exec(raw)
-        // 视频本体缺失（群视频懒下载）：降级推封面 + 元数据，文件留给二期 CDN 直传
-        const posterPath = await videoService.getVideoPosterFallback(videoMd5)
-        if (!posterPath) {
-          return {
-            videoMd5,
-            videoMeta: {
-              durationSec: dur ? Number(dur[1]) : undefined,
-              fileMissing: true
-            }
-          }
-        }
-        return {
-          videoMd5,
-          videoPosterPath: posterPath,
-          videoMeta: {
-            durationSec: dur ? Number(dur[1]) : undefined,
-            posterAvailable: true,
-            fileMissing: true
-          }
-        }
-      }
-      let videoPosterPath: string | undefined
-      try {
-        if (info.coverUrl && info.coverUrl.startsWith('file://')) videoPosterPath = fileURLToPath(info.coverUrl)
-      } catch { /* 封面路径解析失败则不提供 */ }
-      const dur = /<videomsg[^>]*\sduration="(\d+(?:\.\d+)?)"/.exec(String(message.rawContent || message.content || ''))
-      return {
-        videoPath: info.videoUrl,
-        videoMd5,
-        videoPosterPath,
-        videoMeta: {
-          durationSec: dur ? Number(dur[1]) : undefined,
-          sizeBytes: fsStatSync(info.videoUrl).size,
-          posterAvailable: !!videoPosterPath
-        }
-      }
-    } catch {
-      return undefined
-    }
+  /** 入站视频编排已收敛 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 1）：薄委托 */
+  private resolveInboundVideo(message: Message) {
+    return mediaResolveInboundVideo(message)
   }
 
-  private async resolveAndDecryptImage(message: Message, sessionId: string): Promise<string | undefined> {
-    if (Number(message.localType || 0) !== 3) return undefined
-    const imageMd5 = String(message.imageMd5 || '').trim()
-    const imageDatName = String(message.imageDatName || '').trim()
-    if (!imageMd5 && !imageDatName) return undefined
-    const basePayload = {
-      sessionId,
-      imageMd5,
-      imageDatName,
-      createTime: Number(message.createTime || 0),
-      preferFilePath: true,
-      suppressEvents: true
-    }
-    let lastError: unknown = undefined
-    let thumbPath: string | undefined = undefined
-    for (let attempt = 0; attempt <= this.imageDecryptMaxRetries; attempt++) {
-      if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, this.imageDecryptRetryDelayMs))
-      }
-      const isLastAttempt = attempt >= this.imageDecryptMaxRetries
-      const preferHd = attempt >= 1
-      const payload = { ...basePayload, preferHd }
-      try {
-        const result = await imageDecryptService.decryptImage(payload)
-        console.log(`[DIAG][MsgPush] attempt=${attempt} preferHd=${preferHd} result.success=${result?.success} isThumb=${result?.isThumb} localPath=${result?.localPath} error=${result?.error}`)
-        if (result?.success && result.localPath) {
-          if (!result.isThumb) {
-            return result.localPath
-          }
-          if (!thumbPath) {
-            thumbPath = result.localPath
-          }
-          if (isLastAttempt) {
-            // break（而非 return）：让控制流落到循环后的 CDN 直取兜底块，再由末尾统一返回缩略图
-            break
-          }
-          if (preferHd && imageMd5) {
-            const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
-            console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat search: found=${!!hdDat} path=${hdDat}`)
-            if (hdDat) {
-              const ready = await imageDecryptService.waitForFullDatReady(hdDat, 1500)
-              console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat ready=${ready}`)
-              if (ready) {
-                const hdResult = await imageDecryptService.decryptImageDirect(hdDat, sessionId)
-                console.log(`[DIAG][MsgPush] attempt=${attempt} decryptImageDirect: result=${hdResult}`)
-                if (hdResult) return hdResult
-              }
-            }
-          }
-          continue
-        }
-        lastError = result?.error || 'decrypt_failed'
-        console.log(`[DIAG][MsgPush] attempt=${attempt} failed: ${lastError}`)
-      } catch (e) {
-        lastError = e
-        console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
-      }
-    }
-    // CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）：仅剩缩略图且开关开启时触发；
-    // 产物为解密后明文，任何失败都降级回缩略图，不阻断推送
-    if (thumbPath && this.configService.get('imageCdnDirectFetchEnabled') === true) {
-      try {
-        const cdnParams = chatService.parseImageCdnFetchParams(String(message.rawContent || message.content || ''))
-        if (cdnParams.fileKey && cdnParams.aesKey && cdnParams.fileLen && cdnParams.fileLen > 0) {
-          const fullPath = cdnFetchService.buildSavePath(imageMd5 || `img_${Date.now()}`)
-          const cdnResult = await cdnFetchService.fetch({
-            fileKey: cdnParams.fileKey,
-            aesKey: cdnParams.aesKey,
-            fileLen: cdnParams.fileLen,
-            fullPath,
-            md5: imageMd5 || cdnParams.md5, // 仅诊断：XML md5 与 CDN 实存对象无关（PoC 实证），不参与产物判定
-            // createTime 秒 → 毫秒（cdnFetchService 门禁按 ms 与 Date.now() 比较）
-            messageCreateTime: Number(message.createTime || 0) * 1000
-          })
-          if (cdnResult.success && cdnResult.localPath) {
-            console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
-            return cdnResult.localPath
-          }
-          console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
-        } else {
-          console.log(`[DIAG][MsgPush] cdn fetch skip: params incomplete fileKey=${!!cdnParams.fileKey} aesKey=${!!cdnParams.aesKey} fileLen=${cdnParams.fileLen ?? 'null'}`)
-        }
-      } catch (e) {
-        console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)
-      }
-    }
-    if (thumbPath) {
-      return thumbPath
-    }
-    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
-    return undefined
+  /** 入站图片编排已收敛 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 2/3）：薄委托 */
+  private resolveAndDecryptImage(message: Message, sessionId: string) {
+    return mediaResolveInboundImage(message, sessionId)
   }
 
   private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {

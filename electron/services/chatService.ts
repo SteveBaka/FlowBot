@@ -10,6 +10,7 @@ import * as crypto from 'crypto'
 import { app, BrowserWindow, dialog } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
+import { parseImageCdnFetchParams } from './mediaService'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
 import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStats } from './sessionStatsCacheService'
@@ -5652,29 +5653,10 @@ class ChatService {
   /**
    * 解析图片消息的 CDN 直取参数（IMAGE-HD-DOWNLOAD-ANALYSIS §8.4/§8.6）
    * 4.x 的 cdn*url 是 DER filekey 而非 URL；直取需要 filekey+aeskey+length 三参数
+   * 实现已下沉 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 2/3），此处薄委托保兼容
    */
   parseImageCdnFetchParams(content: string): { fileKey?: string; aesKey?: string; md5?: string; fileLen?: number; hdLen?: number } {
-    try {
-      if (!content) return {}
-      const base = this.parseImageInfo(content)
-      const fileKey =
-        this.extractXmlAttribute(content, 'img', 'cdnbigimgurl') ||
-        this.extractXmlAttribute(content, 'img', 'cdnmidimgurl') ||
-        undefined
-      const toInt = (v: string) => {
-        const n = parseInt(v, 10)
-        return Number.isFinite(n) && n > 0 ? n : undefined
-      }
-      return {
-        fileKey,
-        aesKey: base.aesKey,
-        md5: base.md5,
-        fileLen: toInt(this.extractXmlAttribute(content, 'img', 'length')),
-        hdLen: toInt(this.extractXmlAttribute(content, 'img', 'hdlength'))
-      }
-    } catch {
-      return {}
-    }
+    return parseImageCdnFetchParams(content)
   }
 
   /**

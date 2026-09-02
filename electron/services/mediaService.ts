@@ -13,7 +13,11 @@ import * as path from 'path'
 import * as http from 'http'
 import * as https from 'https'
 import { execFile } from 'child_process'
+import { fileURLToPath } from 'url'
 import { ConfigService } from './config'
+import { videoService } from './videoService'
+import { imageDecryptService } from './imageDecryptService'
+import { cdnFetchService } from './cdnFetchService'
 
 const isEnabled = (): boolean => {
   try { return ConfigService.getInstance().get('videoSendEnabled') !== false } catch { return true }
@@ -62,6 +66,258 @@ function sweepOutboundTmpFiles(): void {
       } catch { /* 单文件失败下轮再清 */ }
     }
   } catch { /* tmpdir 不可读则本轮跳过 */ }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 入站编排层（MEDIA-INBOUND-CONVERGENCE-PLAN）
+ *
+ * 只产出「信号」（本地路径/meta/降级标记）：token/URL/段构造归分发层
+ * （httpService/botManager/server.js），WCDB 抓取归 messagePushService。
+ * 开关关闭/文件缺失/异常全部安全降级——不抛出、不阻断推送、
+ * 绝不主动触发微信下载。
+ * ══════════════════════════════════════════════════════════════════ */
+
+/** 结构化最小消息（chatService.Message 天然满足，避免依赖 chatService） */
+export interface InboundMediaMessage {
+  localType?: number | string
+  videoMd5?: string
+  imageMd5?: string
+  imageDatName?: string
+  createTime?: number | string
+  rawContent?: string
+  content?: string | null
+}
+
+export interface InboundVideoSignal {
+  videoPath?: string
+  videoMd5?: string
+  videoPosterPath?: string
+  videoMeta?: { durationSec?: number; sizeBytes?: number; posterAvailable?: boolean; fileMissing?: boolean }
+}
+
+/** 消息 XML videomsg duration 属性 → 秒（唯一提取点，两个分支共用） */
+function parseVideoDurationSec(raw: string): number | undefined {
+  const m = /<videomsg[^>]*\sduration="(\d+(?:\.\d+)?)"/.exec(raw)
+  return m ? Number(m[1]) : undefined
+}
+
+/** 入站视频解析（INBOUND-VIDEO-PUSH-PLAN §三）：开关关闭/文件缺失/异常全部安全降级，
+ * 不抛出、不触发微信下载。元数据 duration 取自消息 XML，size 取自本地 stat。 */
+export async function resolveInboundVideo(message: InboundMediaMessage): Promise<InboundVideoSignal | undefined> {
+  if (ConfigService.getInstance().get('inboundVideoPushEnabled') !== true) return undefined
+  if (Number(message.localType || 0) !== 43) return undefined
+  const videoMd5 = String(message.videoMd5 || '').trim()
+  if (!videoMd5) return undefined
+  try {
+    const raw = String(message.rawContent || message.content || '')
+    const durationSec = parseVideoDurationSec(raw)
+    const info = await videoService.getVideoInfo(videoMd5, { includePoster: true, posterFormat: 'fileUrl' })
+    if (!info?.exists || !info.videoUrl || !fs.existsSync(info.videoUrl)) {
+      // 视频本体缺失（群视频懒下载）：降级推封面 + 元数据，文件留给二期 CDN 直传
+      const posterPath = await videoService.getVideoPosterFallback(videoMd5)
+      if (!posterPath) {
+        return {
+          videoMd5,
+          videoMeta: {
+            durationSec,
+            fileMissing: true
+          }
+        }
+      }
+      return {
+        videoMd5,
+        videoPosterPath: posterPath,
+        videoMeta: {
+          durationSec,
+          posterAvailable: true,
+          fileMissing: true
+        }
+      }
+    }
+    let videoPosterPath: string | undefined
+    try {
+      if (info.coverUrl && info.coverUrl.startsWith('file://')) videoPosterPath = fileURLToPath(info.coverUrl)
+    } catch { /* 封面路径解析失败则不提供 */ }
+    return {
+      videoPath: info.videoUrl,
+      videoMd5,
+      videoPosterPath,
+      videoMeta: {
+        durationSec,
+        sizeBytes: fs.statSync(info.videoUrl).size,
+        posterAvailable: !!videoPosterPath
+      }
+    }
+  } catch {
+    return undefined
+  }
+}
+
+/* ── 图片消息 XML 解析（自 chatService 下沉，纯函数；chatService 薄委托保兼容）── */
+
+function extractXmlValue(xml: string, tagName: string): string {
+  const regex = new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, 'i')
+  const match = regex.exec(xml)
+  if (match) {
+    return match[1].replace(/<!\[CDATA\[/g, '').replace(/\]\]>/g, '').trim()
+  }
+  return ''
+}
+
+function extractXmlAttribute(xml: string, tagName: string, attrName: string): string {
+  // 匹配 <tagName ... attrName="value" ... /> 或 <tagName ... attrName="value" ...>
+  const regex = new RegExp(`<${tagName}[^>]*\\s${attrName}\\s*=\\s*['"]([^'"]*)['"']`, 'i')
+  const match = regex.exec(xml)
+  return match ? match[1] : ''
+}
+
+function parseImageInfo(content: string): { md5?: string; aesKey?: string; encrypVer?: number; cdnThumbUrl?: string } {
+  try {
+    const md5 =
+      extractXmlValue(content, 'md5') ||
+      extractXmlAttribute(content, 'img', 'md5') ||
+      undefined
+    const aesKey = extractXmlAttribute(content, 'img', 'aeskey') || undefined
+    const encrypVerStr = extractXmlAttribute(content, 'img', 'encrypver') || undefined
+    const cdnThumbUrl = extractXmlAttribute(content, 'img', 'cdnthumburl') || undefined
+
+    return {
+      md5,
+      aesKey,
+      encrypVer: encrypVerStr ? parseInt(encrypVerStr, 10) : undefined,
+      cdnThumbUrl
+    }
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 解析图片消息的 CDN 直取参数（IMAGE-HD-DOWNLOAD-ANALYSIS §8.4/§8.6）
+ * 4.x 的 cdn*url 是 DER filekey 而非 URL；直取需要 filekey+aeskey+length 三参数
+ */
+export function parseImageCdnFetchParams(content: string): { fileKey?: string; aesKey?: string; md5?: string; fileLen?: number; hdLen?: number } {
+  try {
+    if (!content) return {}
+    const base = parseImageInfo(content)
+    const fileKey =
+      extractXmlAttribute(content, 'img', 'cdnbigimgurl') ||
+      extractXmlAttribute(content, 'img', 'cdnmidimgurl') ||
+      undefined
+    const toInt = (v: string) => {
+      const n = parseInt(v, 10)
+      return Number.isFinite(n) && n > 0 ? n : undefined
+    }
+    return {
+      fileKey,
+      aesKey: base.aesKey,
+      md5: base.md5,
+      fileLen: toInt(extractXmlAttribute(content, 'img', 'length')),
+      hdLen: toInt(extractXmlAttribute(content, 'img', 'hdlength'))
+    }
+  } catch {
+    return {}
+  }
+}
+
+/* ── 入站图片编排（自 messagePushService.resolveAndDecryptImage 迁入，逻辑逐行等价）── */
+
+const IMAGE_DECRYPT_MAX_RETRIES = 3
+const IMAGE_DECRYPT_RETRY_DELAY_MS = 1000
+
+/** 入站图片解析：重试 + preferHd 分层 + HD dat 升级 + CDN 直取兜底 + 缩略图降级，
+ * 全路径不抛出；失败返回 undefined（调用方据 lt===3 判定 imageDecryptFailed） */
+export async function resolveInboundImage(message: InboundMediaMessage, sessionId: string): Promise<string | undefined> {
+  if (Number(message.localType || 0) !== 3) return undefined
+  const imageMd5 = String(message.imageMd5 || '').trim()
+  const imageDatName = String(message.imageDatName || '').trim()
+  if (!imageMd5 && !imageDatName) return undefined
+  const basePayload = {
+    sessionId,
+    imageMd5,
+    imageDatName,
+    createTime: Number(message.createTime || 0),
+    preferFilePath: true,
+    suppressEvents: true
+  }
+  let lastError: unknown = undefined
+  let thumbPath: string | undefined = undefined
+  for (let attempt = 0; attempt <= IMAGE_DECRYPT_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, IMAGE_DECRYPT_RETRY_DELAY_MS))
+    }
+    const isLastAttempt = attempt >= IMAGE_DECRYPT_MAX_RETRIES
+    const preferHd = attempt >= 1
+    const payload = { ...basePayload, preferHd }
+    try {
+      const result = await imageDecryptService.decryptImage(payload)
+      console.log(`[DIAG][MsgPush] attempt=${attempt} preferHd=${preferHd} result.success=${result?.success} isThumb=${result?.isThumb} localPath=${result?.localPath} error=${result?.error}`)
+      if (result?.success && result.localPath) {
+        if (!result.isThumb) {
+          return result.localPath
+        }
+        if (!thumbPath) {
+          thumbPath = result.localPath
+        }
+        if (isLastAttempt) {
+          // break（而非 return）：让控制流落到循环后的 CDN 直取兜底块，再由末尾统一返回缩略图
+          break
+        }
+        if (preferHd && imageMd5) {
+          const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
+          console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat search: found=${!!hdDat} path=${hdDat}`)
+          if (hdDat) {
+            const ready = await imageDecryptService.waitForFullDatReady(hdDat, 1500)
+            console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat ready=${ready}`)
+            if (ready) {
+              const hdResult = await imageDecryptService.decryptImageDirect(hdDat, sessionId)
+              console.log(`[DIAG][MsgPush] attempt=${attempt} decryptImageDirect: result=${hdResult}`)
+              if (hdResult) return hdResult
+            }
+          }
+        }
+        continue
+      }
+      lastError = result?.error || 'decrypt_failed'
+      console.log(`[DIAG][MsgPush] attempt=${attempt} failed: ${lastError}`)
+    } catch (e) {
+      lastError = e
+      console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
+    }
+  }
+  // CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）：仅剩缩略图且开关开启时触发；
+  // 产物为解密后明文，任何失败都降级回缩略图，不阻断推送
+  if (thumbPath && ConfigService.getInstance().get('imageCdnDirectFetchEnabled') === true) {
+    try {
+      const cdnParams = parseImageCdnFetchParams(String(message.rawContent || message.content || ''))
+      if (cdnParams.fileKey && cdnParams.aesKey && cdnParams.fileLen && cdnParams.fileLen > 0) {
+        const fullPath = cdnFetchService.buildSavePath(imageMd5 || `img_${Date.now()}`)
+        const cdnResult = await cdnFetchService.fetch({
+          fileKey: cdnParams.fileKey,
+          aesKey: cdnParams.aesKey,
+          fileLen: cdnParams.fileLen,
+          fullPath,
+          md5: imageMd5 || cdnParams.md5, // 仅诊断：XML md5 与 CDN 实存对象无关（PoC 实证），不参与产物判定
+          // createTime 秒 → 毫秒（cdnFetchService 门禁按 ms 与 Date.now() 比较）
+          messageCreateTime: Number(message.createTime || 0) * 1000
+        })
+        if (cdnResult.success && cdnResult.localPath) {
+          console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
+          return cdnResult.localPath
+        }
+        console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
+      } else {
+        console.log(`[DIAG][MsgPush] cdn fetch skip: params incomplete fileKey=${!!cdnParams.fileKey} aesKey=${!!cdnParams.aesKey} fileLen=${cdnParams.fileLen ?? 'null'}`)
+      }
+    } catch (e) {
+      console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)
+    }
+  }
+  if (thumbPath) {
+    return thumbPath
+  }
+  console.warn(`[MessagePushService] Image decrypt failed after ${IMAGE_DECRYPT_MAX_RETRIES + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
+  return undefined
 }
 
 /**
