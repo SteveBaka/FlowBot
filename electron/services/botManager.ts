@@ -3,7 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
-import { registerImageToken, registerImageTokenWithMeta, isThumbnailFilePath } from './httpService'
+import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, isThumbnailFilePath } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -726,6 +726,38 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
         } else if (data.emojiUrl) {
           messageSegments.push({ type: 'image', data: { file: data.emojiUrl } })
+        }
+
+        // 入站视频段（INBOUND-VIDEO-PUSH-PLAN §2.2）：跟随 imageTransferMode。
+        // base64 模式跳过视频段（大文件 base64 不可行），仅传元数据；URL 模式走 /api/media?token=。
+        if (data.videoPath && fs.existsSync(data.videoPath)) {
+          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
+          if (mode === 'url' && baseUrl) {
+            const videoToken = registerVideoTokenWithMeta(data.videoPath)
+            const videoUrl = `${baseUrl.replace(/\/+$/, '')}/api/media?token=${videoToken}`
+            // astrbot Video 组件自带 cover 字段（components.py:288），封面直接挂段内
+            const videoData: Record<string, string> = { file: videoUrl }
+            if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+              data.videoPosterUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false })}`
+              videoData.cover = data.videoPosterUrl
+            }
+            messageSegments.push({ type: 'video', data: videoData })
+          } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+            // base64/直连模式：视频本体不内联，仅给出封面供适配器参考
+            data.videoPosterUrl = `file://${data.videoPosterPath}`
+          }
+        } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+          // 视频本体缺失（群视频懒下载）：降级推封面，标注是视频便于模型辨别
+          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
+          if (mode === 'url' && baseUrl) {
+            const posterToken = registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false })
+            messageSegments.push({ type: 'image', data: { file: `${baseUrl.replace(/\/+$/, '')}/api/image?token=${posterToken}` } })
+          } else {
+            messageSegments.push({ type: 'image', data: { file: `file://${data.videoPosterPath}` } })
+          }
+          messageSegments.push({ type: 'text', data: { text: '（以上为视频封面截图，视频文件未下载）' } })
         }
 
         if (isGroup && data.content) {

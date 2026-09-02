@@ -134,10 +134,13 @@ interface ImageTokenEntry {
   sessionId?: string
   imageMd5?: string
   imageDatName?: string
+  kind?: 'image' | 'video'
 }
 
 const imageTokenCache = new Map<string, ImageTokenEntry>()
 const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
+// 视频 token 单独 TTL：适配器下载大文件可能滞后，2 分钟图片级 TTL 不够用
+const VIDEO_TOKEN_TTL_MS = 60 * 60 * 1000
 const IMAGE_TOKEN_MAX = 200
 let imageTokenLastCleanup = 0
 const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
@@ -181,6 +184,47 @@ export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: b
     sessionId: meta.sessionId,
     imageMd5: meta.imageMd5,
     imageDatName: meta.imageDatName,
+    kind: 'image',
+  })
+
+  return token
+}
+
+/** 入站视频 token（INBOUND-VIDEO-PUSH-PLAN §2.3）：复用图片令牌池（16 位随机 + LRU），
+ * TTL 1h 独立；仅可经 /api/media 消费 */
+export function registerVideoTokenWithMeta(videoPath: string): string {
+  const now = Date.now()
+
+  if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
+    imageTokenLastCleanup = now
+    for (const [token, entry] of imageTokenCache) {
+      if (entry.expires < now) {
+        imageTokenCache.delete(token)
+      }
+    }
+  }
+
+  if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
+    const oldest = imageTokenCache.keys().next().value
+    if (oldest) {
+      imageTokenCache.delete(oldest)
+    }
+  }
+
+  const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
+  let token = ''
+  do {
+    token = ''
+    for (let i = 0; i < 16; i++) {
+      token += TOKEN_CHARS[Math.floor(Math.random() * 36)]
+    }
+  } while (imageTokenCache.has(token))
+
+  imageTokenCache.set(token, {
+    imagePath: videoPath,
+    expires: now + VIDEO_TOKEN_TTL_MS,
+    isThumb: false,
+    kind: 'video',
   })
 
   return token
@@ -646,6 +690,10 @@ class HttpService {
                 return
             }
             const entry = imageTokenCache.get(token)
+            if (entry?.kind === 'video') {
+                this.sendError(res, 404, 'Image not found or expired')
+                return
+            }
             let filePath = getImagePathByToken(token)
             if (!filePath) {
                 this.sendError(res, 404, 'Image not found or expired')
@@ -669,6 +717,36 @@ class HttpService {
                 'X-Content-Type-Options': 'nosniff'
             })
             fs.createReadStream(filePath).pipe(res)
+            return
+        }
+
+        if (pathname === '/api/media' && req.method === 'GET') {
+            const token = url.searchParams.get('token') || ''
+            if (!/^[a-z0-9]{16}$/.test(token)) {
+                this.sendError(res, 400, 'Invalid token format')
+                return
+            }
+            const entry = imageTokenCache.get(token)
+            if (!entry || entry.kind !== 'video' || entry.expires < Date.now()) {
+                this.sendError(res, 404, 'Media not found or expired')
+                return
+            }
+            if (!fs.existsSync(entry.imagePath)) {
+                this.sendError(res, 404, 'Media file missing')
+                return
+            }
+            const ext = path.extname(entry.imagePath).toLowerCase()
+            const mimeMap: Record<string, string> = {
+                '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+                '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo'
+            }
+            res.writeHead(200, {
+                'Content-Type': mimeMap[ext] || 'application/octet-stream',
+                'Content-Length': String(fs.statSync(entry.imagePath).size),
+                'Cache-Control': 'no-cache, max-age=0',
+                'X-Content-Type-Options': 'nosniff'
+            })
+            fs.createReadStream(entry.imagePath).pipe(res)
             return
         }
 
@@ -3573,7 +3651,8 @@ class HttpService {
                 'imageCdnDirectFetchMaxAgeMs',
                 'imageCdnDirectFetchDiagMd5Log',
                 'videoCalibrationLogEnabled',
-                // SendAck 媒体回执（WebUI「发送管理」页读写）
+                'inboundVideoPushEnabled',
+                // SendAck 媒体回执（WebUI「消息管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',
                 'sendAckPollIntervalMs',
@@ -3605,7 +3684,7 @@ class HttpService {
         }
     }
 
-  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  /** 发送/队列运行状态（供 WebUI「消息管理」页只读回显） */
   private handleMgmtSendStatus(res: http.ServerResponse): void {
     try {
       const sender = getEnhancedMessageSender() as any

@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { execSync, spawn } = require('child_process')
+const { Readable } = require('stream')
 
 const PORT = process.env.WEBUI_PORT || 7300
 // 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
@@ -429,7 +430,32 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image') {
+  // 入站视频 token 代理（INBOUND-VIDEO-PUSH-PLAN §2.3）：与 /api/image 同构，流式转发大文件
+  if (p === '/api/media' && req.method === 'GET') {
+    var mediaToken = url.searchParams.get('token') || ''
+    if (!/^[a-z0-9]{16}$/.test(mediaToken)) {
+      json(res, { ok: false, error: 'Invalid token format' }, 400)
+      return
+    }
+    try {
+      var mediaTarget = 'http://127.0.0.1:' + FLOW_PORT + '/api/media?token=' + mediaToken
+      var mediaResp = await fetch(mediaTarget)
+      if (!mediaResp.ok || !mediaResp.body) {
+        json(res, { ok: false, error: 'Media not found or expired' }, mediaResp.status)
+        return
+      }
+      res.writeHead(200, {
+        'Content-Type': mediaResp.headers.get('content-type') || 'application/octet-stream',
+        'Cache-Control': 'no-cache, max-age=0'
+      })
+      Readable.fromWeb(mediaResp.body).pipe(res)
+    } catch (err) {
+      json(res, { ok: false, error: 'Media service unavailable' }, 502)
+    }
+    return
+  }
+
+  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image' && p !== '/api/media') {
     if (!isAuthenticated(req)) {
       json(res, { ok: false, error: 'Unauthorized' }, 401)
       return

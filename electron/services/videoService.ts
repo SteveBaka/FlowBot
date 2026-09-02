@@ -541,6 +541,43 @@ class VideoService {
     }
   }
 
+  /** 入站视频降级（INBOUND-VIDEO-PUSH-PLAN §三）：视频本体未落盘（群视频懒下载）时，
+   * 返回已落盘的封面（{md5}.jpg 优先，{md5}_thumb.jpg 次之）。
+   * 直接按命名约定探测文件系统而非查目录索引——微信写盘 thumb 可能晚于消息到达，
+   * 索引缓存会滞后导致漏查。无 ffmpeg 参与。 */
+  async getVideoPosterFallback(videoMd5: string): Promise<string | null> {
+    const normalized = this.normalizeVideoLookupKey(videoMd5) || String(videoMd5 || '').trim().toLowerCase()
+    if (!normalized) return null
+    const dbPath = this.getDbPath()
+    const wxid = this.getMyWxid()
+    if (!dbPath || !wxid) return null
+    const videoBaseDir = this.resolveVideoBaseDir(dbPath, wxid)
+    if (!existsSync(videoBaseDir)) return null
+    try {
+      const yearMonthDirs = readdirSync(videoBaseDir)
+        .filter((dir) => /^\d{4}-\d{2}$/.test(dir))
+        .sort()
+        .reverse()
+      for (const dir of yearMonthDirs) {
+        for (const name of [`${normalized}.jpg`, `${normalized}_thumb.jpg`]) {
+          const candidate = join(videoBaseDir, dir, name)
+          try {
+            if (existsSync(candidate)) return candidate
+          } catch { /* 下一候选 */ }
+        }
+      }
+    } catch { /* 目录不可读 */ }
+    // 索引兜底（非标准命名）
+    const index = this.getOrBuildVideoIndex(videoBaseDir)
+    const entry = index.get(normalized) || index.get(normalized.replace(/_raw$/, ''))
+    const viaIndex = entry?.coverPath || entry?.thumbPath
+    try {
+      return viaIndex && existsSync(viaIndex) ? viaIndex : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * 根据消息内容解析视频MD5
    */

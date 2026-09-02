@@ -109,6 +109,8 @@ interface ConfigSchema {
   imageCdnDirectFetchDiagMd5Log: boolean
   // 视频链路标定日志（源规格 + T0；默认关，实验时开启）——后续入站视频开关同区
   videoCalibrationLogEnabled: boolean
+  // 入站视频推送（默认关：多数模型不支持视频模态，仅向适配器提供文件 URL 与元数据，INBOUND-VIDEO-PUSH-PLAN §三）
+  inboundVideoPushEnabled: boolean
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -332,6 +334,7 @@ export class ConfigService {
       imageCdnDirectFetchMaxAgeMs: 600000,
       imageCdnDirectFetchDiagMd5Log: true,
       videoCalibrationLogEnabled: false,
+      inboundVideoPushEnabled: false,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

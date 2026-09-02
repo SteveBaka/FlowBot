@@ -4,10 +4,13 @@ import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
 import { imageDecryptService } from './imageDecryptService'
 import { cdnFetchService } from './cdnFetchService'
+import { videoService } from './videoService'
+import { fileURLToPath } from 'url'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
 import { promises as fs } from 'fs'
+import { existsSync as fsExistsSync, statSync as fsStatSync } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
@@ -54,6 +57,15 @@ interface MessagePushPayload {
   imageDecryptFailed?: boolean
   senderIdAlias?: string
   emojiUrl?: string
+  videoPath?: string
+  videoMd5?: string
+  videoPosterPath?: string
+  videoMeta?: {
+    durationSec?: number
+    sizeBytes?: number
+    posterAvailable?: boolean
+    fileMissing?: boolean
+  }
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -834,6 +846,64 @@ class MessagePushService {
     return merged
   }
 
+  /** 入站视频解析（INBOUND-VIDEO-PUSH-PLAN §三）：开关关闭/文件缺失/异常全部安全降级，
+   * 不抛出、不触发微信下载。元数据 duration 取自消息 XML，size 取自本地 stat。 */
+  private async resolveInboundVideo(message: Message): Promise<{
+    videoPath?: string
+    videoMd5?: string
+    videoPosterPath?: string
+    videoMeta?: { durationSec?: number; sizeBytes?: number; posterAvailable?: boolean; fileMissing?: boolean }
+  } | undefined> {
+    if (this.configService.get('inboundVideoPushEnabled') !== true) return undefined
+    if (Number(message.localType || 0) !== 43) return undefined
+    const videoMd5 = String(message.videoMd5 || '').trim()
+    if (!videoMd5) return undefined
+    try {
+      const info = await videoService.getVideoInfo(videoMd5, { includePoster: true, posterFormat: 'fileUrl' })
+      if (!info?.exists || !info.videoUrl || !fsExistsSync(info.videoUrl)) {
+        const raw = String(message.rawContent || message.content || '')
+        const dur = /<videomsg[^>]*\sduration="(\d+(?:\.\d+)?)"/.exec(raw)
+        // 视频本体缺失（群视频懒下载）：降级推封面 + 元数据，文件留给二期 CDN 直传
+        const posterPath = await videoService.getVideoPosterFallback(videoMd5)
+        if (!posterPath) {
+          return {
+            videoMd5,
+            videoMeta: {
+              durationSec: dur ? Number(dur[1]) : undefined,
+              fileMissing: true
+            }
+          }
+        }
+        return {
+          videoMd5,
+          videoPosterPath: posterPath,
+          videoMeta: {
+            durationSec: dur ? Number(dur[1]) : undefined,
+            posterAvailable: true,
+            fileMissing: true
+          }
+        }
+      }
+      let videoPosterPath: string | undefined
+      try {
+        if (info.coverUrl && info.coverUrl.startsWith('file://')) videoPosterPath = fileURLToPath(info.coverUrl)
+      } catch { /* 封面路径解析失败则不提供 */ }
+      const dur = /<videomsg[^>]*\sduration="(\d+(?:\.\d+)?)"/.exec(String(message.rawContent || message.content || ''))
+      return {
+        videoPath: info.videoUrl,
+        videoMd5,
+        videoPosterPath,
+        videoMeta: {
+          durationSec: dur ? Number(dur[1]) : undefined,
+          sizeBytes: fsStatSync(info.videoUrl).size,
+          posterAvailable: !!videoPosterPath
+        }
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   private async resolveAndDecryptImage(message: Message, sessionId: string): Promise<string | undefined> {
     if (Number(message.localType || 0) !== 3) return undefined
     const imageMd5 = String(message.imageMd5 || '').trim()
@@ -982,6 +1052,7 @@ class MessagePushService {
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
+    const video = await this.resolveInboundVideo(message)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1051,7 +1122,8 @@ class MessagePushService {
         imageBaseMd5: imageMd5 || undefined,
         imageDecryptFailed,
         senderIdAlias,
-        emojiUrl
+        emojiUrl,
+        ...(video ?? {})
       }
     }
 
@@ -1077,7 +1149,8 @@ class MessagePushService {
       imageBaseMd5: imageMd5 || undefined,
       imageDecryptFailed,
       senderIdAlias,
-      emojiUrl
+      emojiUrl,
+      ...(video ?? {})
     }
   }
 

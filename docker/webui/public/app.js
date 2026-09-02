@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1264,6 +1264,7 @@ var SendManagerPage = {
         bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
         bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
         bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
+        bpParams.inboundVideoPushEnabled = d.inboundVideoPushEnabled === true
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1361,6 +1362,7 @@ var SendManagerPage = {
         imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
         imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
         videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
+        inboundVideoPushEnabled: bpParams.inboundVideoPushEnabled === true,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1477,7 +1479,7 @@ var SendManagerPage = {
   },
   template: '<div>' +
     '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">发送管理</h1><p class="subtitle">发送流水线状态与节律配置</p></div>' +
+    '<div><h1 class="page-title" style="margin:0">消息管理</h1><p class="subtitle">发送流水线状态与节律配置</p></div>' +
     '</div>' +
 
     '<transition name="fade-slide">' +
@@ -1718,6 +1720,10 @@ var SendManagerPage = {
     '</button>' +
     '<div v-show="secVid" class="config-body">' +
     '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: bpParams.inboundVideoPushEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">入站视频推送</span><toggle-switch v-model="bpParams.inboundVideoPushEnabled" /></div>' +
+    '<div class="strategy-desc">收到视频时向适配器提供视频文件 URL（/api/media?token=，1h 有效）、封面与元数据（时长/体积）；多数模型不支持视频模态，是否下载与理解由适配器和模型决定；默认关，关闭时视频消息仅显示 [视频]</div>' +
+    '</div>' +
     '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +
     '<div class="strategy-desc">发送视频时在容器日志记录源规格（体积/时长/分辨率/码率）与 Enter 时刻（[Calib] 标记），用于量化发送耗时；默认关，仅标定/排查时开启</div>' +
@@ -2121,7 +2127,7 @@ var FilterPage = {
     }
   },
   template: '<div>' +
-    '<h1 class="page-title">消息推送过滤</h1>' +
+    '<h1 class="page-title">推送过滤</h1>' +
     '<div class="card">' +
     '<div class="form-row"><label>启用消息推送</label>' +
     '<toggle-switch v-model="pushEnabled" /></div>' +
@@ -2161,9 +2167,9 @@ var routes = [
   { path: '/', component: HomePage, meta: { title: '首页' } },
   { path: '/bot', component: BotPage, meta: { title: 'Bot 配置' } },
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
-  { path: '/filter', component: FilterPage, meta: { title: '消息过滤' } },
+  { path: '/filter', component: FilterPage, meta: { title: '推送过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
-  { path: '/send', component: SendManagerPage, meta: { title: '发送管理' } },
+  { path: '/send', component: SendManagerPage, meta: { title: '消息管理' } },
   { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } },
   { path: '/login', component: LoginPage, meta: { title: '登录' } }
@@ -2188,10 +2194,10 @@ var App = {
     var navItems = [
       { path: '/', label: '首页', icon: '<svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>' },
       { path: '/bot', label: 'Bot 配置', icon: '<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>' },
+      { path: '/filter', label: '推送过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
+      { path: '/send', label: '消息管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
-      { path: '/filter', label: '消息过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
-      { path: '/send', label: '发送管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
     ]

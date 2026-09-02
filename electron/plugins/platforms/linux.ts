@@ -823,7 +823,7 @@ export class LinuxSender implements IPlatformSender {
     }
 
     log(`Pressing Enter to send...`)
-    // [Calib] T0 标记（标定协议）：受 videoCalibrationLogEnabled 开关控制（WebUI 发送管理）
+    // [Calib] T0 标记（标定协议）：受 videoCalibrationLogEnabled 开关控制（WebUI 消息管理）
     if (ConfigService.getInstance().get('videoCalibrationLogEnabled') === true) {
       log(`[Calib] T0 media-enter ts=${Date.now()} kind=${videoPath ? 'video' : 'image'}`)
     }
@@ -1219,7 +1219,7 @@ export class LinuxSender implements IPlatformSender {
     }
   }
 
-  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  /** 发送/队列运行状态（供 WebUI「消息管理」页只读回显） */
   getSendStatus(): Record<string, any> {
     let mode: DelayMode = this.delayMode
     try {
