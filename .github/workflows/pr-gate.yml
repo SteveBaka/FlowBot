@@ -1,0 +1,212 @@
+name: PR Gate
+
+# 每个 PR 的自动审核闸门:构建 + 安全扫描 + Docker 镜像冒烟,
+# 结果以置顶评论的形式出现在对应 PR 中。
+# push to main 的发布路径由 docker-release.yml 内置的同款冒烟闸兜底。
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+
+concurrency:
+  group: pr-gate-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  SMOKE_IMAGE: flowbot:gate
+
+jobs:
+  build-linux:
+    name: Build (Linux) — tsc / vite / electron-builder
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Install Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      # setup-node only caches ~/.npm; the electron dist zip (~110MB) and
+      # electron-builder tooling live in these caches and would re-download every run.
+      - name: Cache Electron binaries
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: electron-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            electron-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Ensure linux key helper is executable
+        shell: bash
+        run: |
+          [ -f "resources/key/linux/x64/xkey_helper_linux" ] && chmod +x "resources/key/linux/x64/xkey_helper_linux" || echo "File not found"
+
+      - name: Type check (tsc)
+        run: npx tsc --noEmit
+
+      - name: Build frontend (vite)
+        run: npx vite build
+
+      # --dir: only release/linux-unpacked/ is consumed by the Docker build.
+      - name: Package Electron app (Linux, unpacked)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --linux --x64 --dir
+
+      - name: Upload linux-unpacked artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-unpacked
+          path: release/linux-unpacked/
+          retention-days: 1
+
+  security:
+    name: Security scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Secret leak scan (gitleaks, blocking)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Informational only: transitive advisories in already-merged deps would
+      # otherwise create permanent red gates. New deps are gated by dependency-review.
+      - name: Production dependency audit (informational)
+        if: always()
+        run: |
+          {
+            echo "### npm audit(--omit=dev,非阻断)"
+            echo '```'
+            npm audit --omit=dev --package-lock-only 2>&1 || true
+            echo '```'
+          } > security-report.md
+
+      - name: Dependency review (PR only, blocking)
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+      - name: Upload security report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: security-report
+          path: security-report.md
+          if-no-files-found: ignore
+          retention-days: 1
+
+  docker-smoke:
+    name: Docker image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    needs: build-linux
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download linux-unpacked artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-unpacked
+          path: release/linux-unpacked/
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build image (local)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: ${{ env.SMOKE_IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run smoke probes
+        run: bash .github/scripts/docker-smoke.sh "$SMOKE_IMAGE" smoke-report.md
+
+      - name: Upload smoke report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-report
+          path: |
+            smoke-report.md
+            smoke-container.log
+          if-no-files-found: ignore
+          retention-days: 1
+
+  report:
+    name: Review report (PR comment)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs: [build-linux, security, docker-smoke]
+    if: always()
+    steps:
+      - name: Check out git repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Download smoke report
+        if: needs.docker-smoke.result == 'success' || needs.docker-smoke.result == 'failure'
+        uses: actions/download-artifact@v8
+        with:
+          name: smoke-report
+          path: smoke-artifacts
+
+      - name: Download security report
+        if: needs.security.result == 'success' || needs.security.result == 'failure'
+        uses: actions/download-artifact@v8
+        with:
+          name: security-report
+          path: security-artifacts
+
+      - name: Assemble review report
+        env:
+          BUILD_RESULT: ${{ needs.build-linux.result }}
+          SECURITY_RESULT: ${{ needs.security.result }}
+          SMOKE_RESULT: ${{ needs.docker-smoke.result }}
+          EVENT_NAME: ${{ github.event_name }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash .github/scripts/assemble-report.sh pr-gate-report.md
+
+      - name: Append to job summary
+        if: always()
+        run: cat pr-gate-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Post sticky PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: pr-gate
+          path: pr-gate-report.md
+          skip_unchanged: true
