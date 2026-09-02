@@ -1723,7 +1723,14 @@ function normalizePushPayload(p) {
       video_meta: p.videoMeta || undefined,
       video_url: videoUrl,
       video_poster_path: p.videoPosterPath || undefined,
-      video_poster_url: videoPosterUrl
+      video_poster_url: videoPosterUrl,
+      // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，
+      // 插件端据 quoted_is_self 钉死 Reply.sender_id = self_id
+      quoted_sender_id: p.quoted && p.quoted.senderId ? String(p.quoted.senderId) : undefined,
+      quoted_sender_name: p.quoted && p.quoted.senderName ? String(p.quoted.senderName) : undefined,
+      quoted_content: p.quoted && p.quoted.content ? String(p.quoted.content) : undefined,
+      quoted_svrid: p.quoted && p.quoted.svrid ? String(p.quoted.svrid) : undefined,
+      quoted_is_self: p.quoted ? Boolean(p.quoted.isSelf) : undefined
     }
   }
 }

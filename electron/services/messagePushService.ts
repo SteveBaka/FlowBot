@@ -62,6 +62,13 @@ interface MessagePushPayload {
     posterAvailable?: boolean
     fileMissing?: boolean
   }
+  quoted?: {
+    senderId?: string    // 被引用者 wxid（refermsg chatusr 原样）
+    senderName?: string  // 被引用者显示名（displayname）
+    content?: string     // 被引用原文（媒体引用为归一化占位）
+    svrid?: string       // 被引用消息服务器 ID
+    isSelf: boolean      // FlowBot 裁决：被引用者是否为登录账号（宽松比较）
+  }
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -890,6 +897,33 @@ class MessagePushService {
     return Array.from(new Set(ids))
   }
 
+  /**
+   * 组装引用信息（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：
+   * isSelf 是 self 映射的仲裁点——FlowBot 同时掌握 myWxid 与 chatusr，
+   * 用宽松比较（trim + lowercase）裁决，插件端据 isSelf 钉死 Reply.sender_id = self_id。
+   */
+  private buildQuotedPayload(message: Message): MessagePushPayload['quoted'] {
+    const senderId = String(message.quotedSenderId || '').trim()
+    const svrid = String(message.quotedSvrid || '').trim()
+    if (!senderId && !svrid) return undefined
+
+    let content = String(message.quotedContent || '').trim()
+    // 媒体引用在解析层先落 __SVRID__ 标记（chatService.parseMediaQuoteMessage），
+    // 推送时未回查原文，不能把内部标记透给下游
+    if (content.startsWith('__SVRID__')) content = '[媒体消息]'
+
+    const myWxid = this.configService.getMyWxidCleaned()
+    const isSelf = Boolean(senderId && myWxid && senderId.toLowerCase() === myWxid.toLowerCase())
+
+    return {
+      senderId: senderId || undefined,
+      senderName: String(message.quotedSender || '').trim() || undefined,
+      content: content || undefined,
+      svrid: svrid || undefined,
+      isSelf
+    }
+  }
+
   private async buildPayload(session: ChatSession, message: Message): Promise<MessagePushPayload | null> {
     const sessionId = String(session.username || '').trim()
     const messageKey = String(message.messageKey || '').trim()
@@ -899,6 +933,7 @@ class MessagePushService {
     const sessionType = this.getSessionType(sessionId, session)
     const content = this.getMessageDisplayContent(message)
     const rawid = this.getMessageRawId(message)
+    const quoted = this.buildQuotedPayload(message)
 
     const createTime = Number(message.createTime || 0)
     const imageMd5 = String(message.imageMd5 || '').trim()
@@ -976,6 +1011,7 @@ class MessagePushService {
         imageDecryptFailed,
         senderIdAlias,
         emojiUrl,
+        quoted,
         ...(video ?? {})
       }
     }
@@ -992,6 +1028,7 @@ class MessagePushService {
       sessionId,
       sessionType,
       rawid,
+      selfId: this.configService.getMyWxidCleaned() || undefined,
       avatarUrl,
       sourceName,
       senderId,
@@ -1003,6 +1040,7 @@ class MessagePushService {
       imageDecryptFailed,
       senderIdAlias,
       emojiUrl,
+      quoted,
       ...(video ?? {})
     }
   }
@@ -1609,9 +1647,13 @@ class MessagePushService {
         return cleanOfficialPrefix(message.cardNickname || '[名片]')
       case lt === 48:
         return '[位置]'
-      case (lt & 0xFF) === 49:
+      case (lt & 0xFF) === 49: {
         if (message.emojiCdnUrl) return '[表情]'
-        return cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
+        const base = cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
+        const linkUrl = String(message.linkUrl || '').trim()
+        // 卡片分享附带 URL（第二行纯链接），供下游（AstrBot 插件）按 URL 解析
+        return linkUrl ? `${base}\n${linkUrl}` : base
+      }
       default:
         return cleanOfficialPrefix(normalizeTextContent(message.parsedContent || message.rawContent) || null)
     }

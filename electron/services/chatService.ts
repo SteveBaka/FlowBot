@@ -62,6 +62,8 @@ export interface Message {
   // 引用消息相关
   quotedContent?: string
   quotedSender?: string
+  quotedSenderId?: string  // 被引用者 wxid（refermsg chatusr，self 判定键）
+  quotedSvrid?: string     // 被引用消息服务器 ID
   // 图片/视频相关
   imageMd5?: string
   imageDatName?: string
@@ -5038,6 +5040,8 @@ class ChatService {
       let emojiMd5: string | undefined
       let quotedContent: string | undefined
       let quotedSender: string | undefined
+      let quotedSenderId: string | undefined
+      let quotedSvrid: string | undefined
       let imageMd5: string | undefined
       let imageDatName: string | undefined
       let videoMd5: string | undefined
@@ -5132,6 +5136,8 @@ class ChatService {
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 43) {
         // 视频消息：优先从 packed_info_data 提取真实文件名（32位十六进制），再回退 XML
         videoMd5 = this.parseVideoFileNameFromRow(row, content)
@@ -5139,12 +5145,16 @@ class ChatService {
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 34 && content) {
         voiceDurationSeconds = this.parseVoiceDurationSeconds(content)
         // 解析语音消息中的引用信息
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 42 && content) {
         // 名片消息
         const cardInfo = this.parseCardInfo(content)
@@ -5177,6 +5187,8 @@ class ChatService {
         // 引用消息（appmsg type=57）的 quotedContent/quotedSender
         if (type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
         if (type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        if (type49Info.quotedSenderId !== undefined) quotedSenderId = type49Info.quotedSenderId
+        if (type49Info.quotedSvrid !== undefined) quotedSvrid = type49Info.quotedSvrid
         if (type49Info.xmlType === '8') {
           const emojiInfo = this.parseEmojiInfo(content)
           if (emojiInfo.cdnUrl) emojiCdnUrl = emojiInfo.cdnUrl
@@ -5186,6 +5198,8 @@ class ChatService {
         const quoteInfo = this.parseQuoteMessage(content)
         quotedContent = quoteInfo.content
         quotedSender = quoteInfo.sender
+        quotedSenderId = quoteInfo.senderId
+        quotedSvrid = quoteInfo.svrid
       }
 
       const looksLikeAppMsg = Boolean(content && (content.includes('<appmsg') || content.includes('&lt;appmsg')))
@@ -5228,6 +5242,8 @@ class ChatService {
         transferReceiverUsername = transferReceiverUsername || type49Info.transferReceiverUsername
         if (!quotedContent && type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
         if (!quotedSender && type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        if (!quotedSenderId && type49Info.quotedSenderId !== undefined) quotedSenderId = type49Info.quotedSenderId
+        if (!quotedSvrid && type49Info.quotedSvrid !== undefined) quotedSvrid = type49Info.quotedSvrid
       }
 
       const localId = this.getRowInt(row, ['local_id'], 0)
@@ -5259,6 +5275,8 @@ class ChatService {
         emojiMd5,
         quotedContent,
         quotedSender,
+        quotedSenderId,
+        quotedSvrid,
         imageMd5,
         imageDatName,
         videoMd5,
@@ -5889,7 +5907,7 @@ class ChatService {
   /**
    * 解析引用消息
    */
-  private parseQuoteMessage(content: string): { content?: string; sender?: string } {
+  private parseQuoteMessage(content: string): { content?: string; sender?: string; senderId?: string; svrid?: string } {
     try {
       const normalizedContent = this.decodeHtmlEntities(content || '')
       // 提取 refermsg 部分
@@ -5901,6 +5919,10 @@ class ChatService {
       }
 
       const referMsgXml = normalizedContent.substring(referMsgStart, referMsgEnd + 11)
+
+      // 被引用者 wxid（self 判定键）与被引用消息 svrid（reply id / 审计）
+      const senderId = this.extractXmlValue(referMsgXml, 'chatusr') || undefined
+      const svrid = this.extractXmlValue(referMsgXml, 'svrid') || undefined
 
       // 提取发送者名称
       let displayName = this.extractXmlValue(referMsgXml, 'displayname')
@@ -5960,7 +5982,9 @@ class ChatService {
 
       return {
         content: displayContent,
-        sender: displayName || undefined
+        sender: displayName || undefined,
+        senderId,
+        svrid
       }
     } catch {
       return {}
@@ -5971,7 +5995,7 @@ class ChatService {
    * 解析媒体消息(图片/视频/语音)中的引用信息
    * 这些消息的引用信息在 <extcommoninfo><refermsg> 中
    */
-  private parseMediaQuoteMessage(content: string, sessionId: string): { content?: string; sender?: string } {
+  private parseMediaQuoteMessage(content: string, sessionId: string): { content?: string; sender?: string; senderId?: string; svrid?: string } {
     try {
       const normalizedContent = this.decodeHtmlEntities(content || '')
       const referMsgStart = normalizedContent.indexOf('<refermsg>')
@@ -5990,9 +6014,12 @@ class ChatService {
         return {}
       }
 
+      // 被引用者 wxid：媒体引用同样需要 self 判定（引用 bot 图片/视频/语音场景）
+      const senderId = this.extractXmlValue(referMsgXml, 'chatusr') || undefined
+
       // 简化方案:返回 svrid 标记
       console.log('[DEBUG] parseMediaQuoteMessage - 返回标记:', `__SVRID__${svrid}__`)
-      return { content: `__SVRID__${svrid}__` }
+      return { content: `__SVRID__${svrid}__`, senderId, svrid }
     } catch {
       return {}
     }
@@ -6180,6 +6207,8 @@ class ChatService {
     xmlType?: string
     quotedContent?: string
     quotedSender?: string
+    quotedSenderId?: string
+    quotedSvrid?: string
     linkTitle?: string
     linkUrl?: string
     linkThumb?: string
@@ -6381,6 +6410,8 @@ class ChatService {
         const quoteInfo = this.parseQuoteMessage(content)
         result.quotedContent = quoteInfo.content
         result.quotedSender = quoteInfo.sender
+        result.quotedSenderId = quoteInfo.senderId
+        result.quotedSvrid = quoteInfo.svrid
       } else if (xmlType === '53') {
         result.appMsgKind = 'solitaire'
       } else if ((xmlType === '5' || xmlType === '49') && (sourceUsername?.startsWith('gh_') || appName?.includes('公众号') || sourceName)) {
