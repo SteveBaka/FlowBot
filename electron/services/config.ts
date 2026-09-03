@@ -219,8 +219,12 @@ interface ConfigSchema {
   oneBotBroadcastIntervalMs: number
   oneBotDebounceMs: number
   oneBotBatchSize: number
-  imageTransferMode: 'base64' | 'url'
-  imageServerBaseUrl: string
+  // 媒体出站传输模式（作用于图片与语音段；视频恒走 URL 直链。原名 imageTransferMode，
+  // 语音接入后与 mediaServerBaseUrl 一并更名，构造器 migrateMediaConfigKeys 存量迁移）
+  mediaTransferMode: 'base64' | 'url'
+  // 媒体内容的对外可达地址（图片/语音/视频推送直链与插件通道共用；原名 imageServerBaseUrl，
+  // 视频语音入站推送同链路后更名，构造器 migrateMediaServerBaseUrl 存量迁移）
+  mediaServerBaseUrl: string
   flowbotCommand: {
     enabled: boolean
     prefix: string
@@ -422,8 +426,8 @@ export class ConfigService {
       oneBotBroadcastIntervalMs: 50,
       oneBotDebounceMs: 350,
       oneBotBatchSize: 50,
-      imageTransferMode: 'base64',
-      imageServerBaseUrl: '',
+      mediaTransferMode: 'base64',
+      mediaServerBaseUrl: '',
       flowbotCommand: {
         enabled: true,
         prefix: '#flowbot',
@@ -464,6 +468,7 @@ export class ConfigService {
     }
     this.migrateAuthFields()
     this.migrateAiConfig()
+    this.migrateMediaConfigKeys()
   }
 
   // === 状态查询 ===
@@ -973,6 +978,30 @@ export class ConfigService {
       if (changed) {
         this.store.set('wxidConfigs', wxidConfigs)
       }
+    }
+  }
+
+  /** 媒体配置键更名迁移（2026-09-04，视频/语音入站推送与图片共用链路后归位）：
+   * imageTransferMode → mediaTransferMode、imageServerBaseUrl → mediaServerBaseUrl。
+   * 判定必须走原始持久化对象（store.store）——this.get() 对未落盘的新键会返回 defaults
+   * 里的默认值（'base64'/''），会把"存量用户设过 url 模式"误判为已迁移而跳过搬移。
+   * 旧键留在 store 中不删，回滚旧版本仍可读 */
+  private migrateMediaConfigKeys(): void {
+    let persisted: any
+    try {
+      persisted = (this.store as any).store || {}
+    } catch {
+      return
+    }
+    const legacyMode = persisted.imageTransferMode
+    if ((legacyMode === 'base64' || legacyMode === 'url') && persisted.mediaTransferMode === undefined) {
+      this.set('mediaTransferMode', legacyMode)
+      console.info('[Config] 已迁移 imageTransferMode → mediaTransferMode:', legacyMode)
+    }
+    const legacyUrl = String(persisted.imageServerBaseUrl || '').trim()
+    if (legacyUrl && !String(persisted.mediaServerBaseUrl || '').trim()) {
+      this.set('mediaServerBaseUrl', legacyUrl)
+      console.info('[Config] 已迁移 imageServerBaseUrl → mediaServerBaseUrl:', legacyUrl)
     }
   }
 

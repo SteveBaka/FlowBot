@@ -231,12 +231,13 @@ function ensureApiToken() {
 
 const imageTokens = new Map() // token -> { path, expires }
 
-// 推送图片直链基地址：优先读 WebUI 设置（WeFlow config imageServerBaseUrl，即设置页"对外可达地址"），
-// 其次 env PUSH_IMAGE_BASE_URL，最后默认 127.0.0.1:7400
+// 推送媒体直链基地址：优先读 WebUI 设置（WeFlow config mediaServerBaseUrl，原 imageServerBaseUrl，
+// 设置页"媒体传输模式 → 对外可达地址"，图片/语音/视频直链共用），兼容读旧键；其次 env
+// PUSH_IMAGE_BASE_URL，最后默认 127.0.0.1:7400
 function getPushImageBaseUrl() {
   try {
     const cfg = loadWeFlowConfig()
-    const url = String(cfg.imageServerBaseUrl || '').trim()
+    const url = String(cfg.mediaServerBaseUrl || cfg.imageServerBaseUrl || '').trim()
     if (url) return url.replace(/\/+$/, '')
   } catch {}
   return (process.env.PUSH_IMAGE_BASE_URL || '').replace(/\/+$/, '') || 'http://127.0.0.1:7400'

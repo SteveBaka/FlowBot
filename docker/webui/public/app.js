@@ -713,8 +713,8 @@ var SettingsPage = {
         wf.httpEnabled = d.httpApiEnabled || false
         wf.httpPort = d.httpApiPort || 5031
         wf.httpToken = (d.httpApiToken && d.httpApiToken !== '[encrypted]') ? d.httpApiToken : ''
-        imgTransfer.mode = d.imageTransferMode || 'base64'
-        imgTransfer.baseUrl = d.imageServerBaseUrl || ''
+        imgTransfer.mode = d.mediaTransferMode || d.imageTransferMode || 'base64'
+        imgTransfer.baseUrl = d.mediaServerBaseUrl || d.imageServerBaseUrl || ''
         if (d.flowbotCommand) {
           flowbot.enabled = d.flowbotCommand.enabled !== false
           flowbot.prefix = d.flowbotCommand.prefix || '#flowbot'
@@ -756,8 +756,8 @@ var SettingsPage = {
           httpApiEnabled: wf.httpEnabled,
           httpApiPort: Number(wf.httpPort),
           httpApiToken: wf.httpToken || undefined,
-          imageTransferMode: imgTransfer.mode,
-          imageServerBaseUrl: trimmedUrl,
+          mediaTransferMode: imgTransfer.mode,
+          mediaServerBaseUrl: trimmedUrl,
           flowbotCommand: {
             enabled: flowbot.enabled,
             prefix: flowbot.prefix || '#flowbot',
@@ -848,12 +848,12 @@ var SettingsPage = {
     '</div></transition>' +
     '</div></div></div>' +
 
-    '<div class="card"><h2>图片传输设置</h2>' +
+    '<div class="card"><h2>媒体传输模式</h2>' +
     '<div class="form-row" style="align-items:flex-start">' +
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">传输模式</label>' +
     '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-    'Base64 传输（默认，无需额外配置）；URL 传输（消息体缩小至 ~150 字节）' +
+    '作用于图片与语音段：Base64 传输（默认，无需额外配置）；URL 传输（消息体缩小至 ~150 字节）。视频恒走 URL 直链，不随此模式' +
     '</span>' +
     '</div>' +
     '<select v-model="imgTransfer.mode">' +
@@ -865,7 +865,7 @@ var SettingsPage = {
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">对外可达地址</label>' +
     '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-    '外部服务（如 AstrBot）用于下载图片的完整地址。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7400（插件推送直链与 WebUI 图片传输共用）' +
+    '媒体内容（图片/语音/视频）的对外可达地址，推送直链与插件通道共用。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7400' +
     '</span>' +
     '</div>' +
     '<input type="text" v-model="imgTransfer.baseUrl" ' +
@@ -1732,7 +1732,7 @@ var SendManagerPage = {
     '</div>' +
     '<div class="strategy-card" :class="{ on: bpParams.inboundVoicePushEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">入站语音推送</span><toggle-switch v-model="bpParams.inboundVoicePushEnabled" /></div>' +
-    '<div class="strategy-desc">收到语音时向适配器提供 WAV 音频（24kHz/16bit/mono，OneBot 走 record 段跟随图片传输模式，插件通道为 /api/media?token= 直链，1h 有效）与时长元数据，转写/ASR 由 astrbot 侧处理；base64 模式超过 10MB 的音频降级为仅 [语音] 文本；默认关，关闭时语音消息仅显示 [语音]</div>' +
+    '<div class="strategy-desc">收到语音时向适配器提供 WAV 音频（24kHz/16bit/mono，OneBot 走 record 段跟随媒体传输模式，插件通道为 /api/media?token= 直链，1h 有效）与时长元数据，转写/ASR 由 astrbot 侧处理；base64 模式超过 10MB 的音频降级为仅 [语音] 文本；默认关，关闭时语音消息仅显示 [语音]</div>' +
     '</div>' +
     '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +

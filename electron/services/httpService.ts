@@ -3646,7 +3646,7 @@ class HttpService {
                 'notificationEnabled', 'notificationFilterMode',
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
                 'logEnabled', 'bots',
-                'imageTransferMode', 'imageServerBaseUrl',
+                'mediaTransferMode', 'mediaServerBaseUrl',
                 'flowbotCommand',
                 'sendDelayMode',
                 'sendDelayCustom',
