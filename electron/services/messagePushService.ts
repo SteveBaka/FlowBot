@@ -2,7 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage } from './mediaService'
+import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage, resolveInboundVoice as mediaResolveInboundVoice } from './mediaService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
@@ -61,6 +61,13 @@ interface MessagePushPayload {
     sizeBytes?: number
     posterAvailable?: boolean
     fileMissing?: boolean
+  }
+  voicePath?: string
+  voiceMeta?: {
+    durationSec?: number
+    sizeBytes?: number
+    available: boolean
+    unavailableReason?: 'not_cached' | 'decode_failed'
   }
   quoted?: {
     senderId?: string    // 被引用者 wxid（refermsg chatusr 原样）
@@ -857,6 +864,29 @@ class MessagePushService {
     return mediaResolveInboundImage(message, sessionId)
   }
 
+  /** 入站语音（INBOUND-VOICE-PUSH-PLAN §六 #4）：开关开才回源（避免默认链路解码开销）；
+   * DB 定位/silk 解码走 chatService.getVoiceData，可用性归一走 mediaService 信号工厂 */
+  private async resolveInboundVoice(message: Message, sessionId: string) {
+    if (this.configService.get('inboundVoicePushEnabled') !== true) return undefined
+    if (Number(message.localType || 0) !== 34) return undefined
+    try {
+      const result = await chatService.getVoiceData(
+        sessionId,
+        String(message.localId),
+        Number(message.createTime) || undefined,
+        message.serverIdRaw ?? message.serverId,
+        message.senderUsername || undefined
+      )
+      return mediaResolveInboundVoice({
+        voicePath: result.voicePath,
+        durationSec: message.voiceDurationSeconds,
+        error: result.error
+      })
+    } catch {
+      return undefined
+    }
+  }
+
   private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
     if (!senderWxid) return undefined
     try {
@@ -941,6 +971,7 @@ class MessagePushService {
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
     const video = await this.resolveInboundVideo(message)
+    const voice = await this.resolveInboundVoice(message, sessionId)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1012,7 +1043,8 @@ class MessagePushService {
         senderIdAlias,
         emojiUrl,
         quoted,
-        ...(video ?? {})
+        ...(video ?? {}),
+        ...(voice ?? {})
       }
     }
 
@@ -1041,7 +1073,8 @@ class MessagePushService {
       senderIdAlias,
       emojiUrl,
       quoted,
-      ...(video ?? {})
+      ...(video ?? {}),
+      ...(voice ?? {})
     }
   }
 

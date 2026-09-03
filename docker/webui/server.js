@@ -251,7 +251,7 @@ function registerImagePath(filePath, ttlMs) {
 
 function mimeByExt(fp) {
   const ext = path.extname(fp).toLowerCase()
-  const map = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo' }
+  const map = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo', '.wav': 'audio/wav', '.silk': 'audio/silk', '.amr': 'audio/amr' }
   return map[ext] || 'application/octet-stream'
 }
 
@@ -1672,12 +1672,16 @@ function normalizePushPayload(p) {
   const realSessionId = String(p.sessionId || '')
   if (!realSessionId) return null
   // 仅转发真正的消息事件（ready/心跳等无 rawid 与内容的事件忽略）
-  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5) return null
+  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta) return null
   const isGroup = realSessionId.endsWith('@chatroom')
   // 入站视频（ADAPTER-MEDIA-CONTRACT §5）：无图无表情时 type='video'，
   // 同时透出容器内路径（同机排障用）与自建 token 直链（跨容器可用）
   const hasVideo = !!(p.videoPath || p.videoMd5 || p.videoPosterPath || p.videoMeta)
-  const type = hasVideo && !p.imagePath && !p.emojiUrl ? 'video' : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text'))
+  // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：语音消息独占事件，字段组镜像 video
+  const hasVoice = !!(p.voicePath || p.voiceMeta)
+  const type = hasVideo && !p.imagePath && !p.emojiUrl ? 'video'
+    : (hasVoice && !hasVideo && !p.imagePath && !p.emojiUrl ? 'voice'
+      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text')))
   let imageUrl
   if (p.imagePath) {
     const token = registerImagePath(p.imagePath)
@@ -1693,6 +1697,13 @@ function normalizePushPayload(p) {
     // 封面与视频同寿命 1h（对齐 OneBot 侧 cover TTL）
     const token = registerImagePath(p.videoPosterPath, 60 * 60 * 1000)
     if (token) videoPosterUrl = getPushImageBaseUrl() + '/api/image?token=' + token
+  }
+  // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：token 直链与 video 同机制（registerMediaPath，TTL 1h）；
+  // 降级（blob 未缓存/解码失败）时 voice_url 缺省，voice_meta.duration_sec 恒可用
+  let voiceUrl
+  if (p.voicePath) {
+    const token = registerMediaPath(p.voicePath)
+    if (token) voiceUrl = getPushImageBaseUrl() + '/api/media?token=' + token
   }
   // 自定义 wxid：私聊会话身份用微信号 alias
   const customWxid = isGroup ? null : getCustomWxid(realSessionId)
@@ -1724,6 +1735,12 @@ function normalizePushPayload(p) {
       video_url: videoUrl,
       video_poster_path: p.videoPosterPath || undefined,
       video_poster_url: videoPosterUrl,
+      // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：duration_sec 恒透出（来自消息 XML，降级时也有）；
+      // voice_meta.available=false 表示 WAV 不可用（未缓存/解码失败），适配器应跳过 ASR
+      voice_path: p.voicePath || undefined,
+      voice_url: voiceUrl,
+      voice_duration_sec: p.voiceMeta && Number.isFinite(Number(p.voiceMeta.durationSec)) ? Number(p.voiceMeta.durationSec) : undefined,
+      voice_meta: p.voiceMeta || undefined,
       // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，
       // 插件端据 quoted_is_self 钉死 Reply.sender_id = self_id
       quoted_sender_id: p.quoted && p.quoted.senderId ? String(p.quoted.senderId) : undefined,

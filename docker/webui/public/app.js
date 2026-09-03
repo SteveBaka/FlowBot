@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1227,7 +1227,11 @@ var SendManagerPage = {
       return '开启 · 超时 ' + Math.round(bpParams.imageCdnDirectFetchTimeoutMs / 1000) + 's'
     })
     var vidSummary = computed(function () {
-      return bpParams.videoCalibrationLogEnabled ? '标定日志开启' : '已关闭'
+      var parts = []
+      if (bpParams.inboundVideoPushEnabled) parts.push('视频推送开')
+      if (bpParams.inboundVoicePushEnabled) parts.push('语音推送开')
+      if (bpParams.videoCalibrationLogEnabled) parts.push('标定日志开')
+      return parts.length ? parts.join(' · ') : '已关闭'
     })
 
     function initParams() {
@@ -1265,6 +1269,7 @@ var SendManagerPage = {
         bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
         bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
         bpParams.inboundVideoPushEnabled = d.inboundVideoPushEnabled === true
+        bpParams.inboundVoicePushEnabled = d.inboundVoicePushEnabled === true
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1363,6 +1368,7 @@ var SendManagerPage = {
         imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
         videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
         inboundVideoPushEnabled: bpParams.inboundVideoPushEnabled === true,
+        inboundVoicePushEnabled: bpParams.inboundVoicePushEnabled === true,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1715,7 +1721,7 @@ var SendManagerPage = {
     '<div class="card config-section">' +
     '<button type="button" class="config-head" @click="secVid = !secVid">' +
     '<span class="chev" :class="{ open: secVid }">▸</span>' +
-    '<span class="config-title">视频链路</span>' +
+    '<span class="config-title">媒体链路</span>' +
     '<span class="config-summary">{{ vidSummary }}</span>' +
     '</button>' +
     '<div v-show="secVid" class="config-body">' +
@@ -1723,6 +1729,10 @@ var SendManagerPage = {
     '<div class="strategy-card" :class="{ on: bpParams.inboundVideoPushEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">入站视频推送</span><toggle-switch v-model="bpParams.inboundVideoPushEnabled" /></div>' +
     '<div class="strategy-desc">收到视频时向适配器提供视频文件 URL（/api/media?token=，1h 有效）、封面与元数据（时长/体积）；多数模型不支持视频模态，是否下载与理解由适配器和模型决定；默认关，关闭时视频消息仅显示 [视频]</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.inboundVoicePushEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">入站语音推送</span><toggle-switch v-model="bpParams.inboundVoicePushEnabled" /></div>' +
+    '<div class="strategy-desc">收到语音时向适配器提供 WAV 音频（24kHz/16bit/mono，OneBot 走 record 段跟随图片传输模式，插件通道为 /api/media?token= 直链，1h 有效）与时长元数据，转写/ASR 由 astrbot 侧处理；base64 模式超过 10MB 的音频降级为仅 [语音] 文本；默认关，关闭时语音消息仅显示 [语音]</div>' +
     '</div>' +
     '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +

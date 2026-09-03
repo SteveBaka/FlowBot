@@ -3,7 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
-import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, isThumbnailFilePath, VIDEO_TOKEN_TTL_MS } from './httpService'
+import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, registerVoiceTokenWithMeta, isThumbnailFilePath, VIDEO_TOKEN_TTL_MS } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -759,6 +759,24 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
             messageSegments.push({ type: 'image', data: { file: `file://${data.videoPosterPath}` } })
           }
           messageSegments.push({ type: 'text', data: { text: '（以上为视频封面截图，视频文件未下载）' } })
+        }
+
+        // 入站语音段（INBOUND-VOICE-PUSH-PLAN §4.2）：record 段跟随 imageTransferMode——
+        // 语音有可行 base64 形态（60s WAV ≈ 3.8MB），默认配置（无 baseUrl）内联即可用，双通道对等；
+        // base64 模式超过 voiceMaxBytes 降级为仅文本 [语音]（URL 模式不受限，token 直链 1h）。
+        if (data.voicePath && data.voiceMeta?.available !== false && fs.existsSync(data.voicePath)) {
+          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
+          if (mode === 'url' && baseUrl) {
+            const voiceToken = registerVoiceTokenWithMeta(data.voicePath)
+            messageSegments.push({ type: 'record', data: { file: `${baseUrl.replace(/\/+$/, '')}/api/media?token=${voiceToken}` } })
+          } else {
+            const buf = fs.readFileSync(data.voicePath)
+            const maxBytes = Number(getConfigRef ? (getConfigRef('voiceMaxBytes') ?? 10 * 1024 * 1024) : 10 * 1024 * 1024)
+            if (Number.isFinite(maxBytes) && maxBytes > 0 && buf.length <= maxBytes) {
+              messageSegments.push({ type: 'record', data: { file: `base64://${buf.toString('base64')}` } })
+            }
+          }
         }
 
         if (isGroup && data.content) {

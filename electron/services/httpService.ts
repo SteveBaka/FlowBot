@@ -163,7 +163,7 @@ function evictTokenSlot(now: number): void {
 /** 图片/视频 token 共用分配：节流清理过期 → 腾坑 → 16 位随机 token → 入池 */
 function allocMediaToken(
   filePath: string,
-  opts: { ttlMs: number; kind: 'image' | 'video'; isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }
+  opts: { ttlMs: number; kind: 'image' | 'video' | 'audio'; isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }
 ): string {
   const now = Date.now()
 
@@ -221,6 +221,12 @@ export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: b
  * TTL 1h 独立；仅可经 /api/media 消费 */
 export function registerVideoTokenWithMeta(videoPath: string): string {
   return allocMediaToken(videoPath, { ttlMs: VIDEO_TOKEN_TTL_MS, kind: 'video', isThumb: false })
+}
+
+/** 入站语音 token（INBOUND-VOICE-PUSH-PLAN §4.2）：复用媒体令牌池，TTL 1h 对齐视频；
+ * 仅可经 /api/media 消费 */
+export function registerVoiceTokenWithMeta(voicePath: string): string {
+  return allocMediaToken(voicePath, { ttlMs: VIDEO_TOKEN_TTL_MS, kind: 'audio', isThumb: false })
 }
 
 export function isThumbnailFilePath(filePath: string): boolean {
@@ -683,7 +689,7 @@ class HttpService {
                 return
             }
             const entry = imageTokenCache.get(token)
-            if (entry?.kind === 'video') {
+            if (entry?.kind === 'video' || entry?.kind === 'audio') {
                 this.sendError(res, 404, 'Image not found or expired')
                 return
             }
@@ -720,7 +726,8 @@ class HttpService {
                 return
             }
             const entry = imageTokenCache.get(token)
-            if (!entry || entry.kind !== 'video' || entry.expires < Date.now()) {
+            // 门禁放宽至 audio（INBOUND-VOICE-PUSH-PLAN：语音 token 仅经 /api/media 消费）
+            if (!entry || (entry.kind !== 'video' && entry.kind !== 'audio') || entry.expires < Date.now()) {
                 this.sendError(res, 404, 'Media not found or expired')
                 return
             }
@@ -731,7 +738,9 @@ class HttpService {
             const ext = path.extname(entry.imagePath).toLowerCase()
             const mimeMap: Record<string, string> = {
                 '.mp4': 'video/mp4', '.mov': 'video/quicktime',
-                '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo'
+                '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo',
+                // 语音（INBOUND-VOICE-PUSH-PLAN）：WAV 主形态；silk/amr 为原始格式预留
+                '.wav': 'audio/wav', '.silk': 'audio/silk', '.amr': 'audio/amr'
             }
             const stat = fs.statSync(entry.imagePath)
             const baseHeaders: Record<string, string | number> = {
