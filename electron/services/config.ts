@@ -222,6 +222,8 @@ interface ConfigSchema {
   // 媒体出站传输模式（作用于图片与语音段；视频恒走 URL 直链。原名 imageTransferMode，
   // 语音接入后与 mediaServerBaseUrl 一并更名，构造器 migrateMediaConfigKeys 存量迁移）
   mediaTransferMode: 'base64' | 'url'
+  // 媒体键更名一次性迁移标记（migrateMediaConfigKeys；防默认值合并视图干扰重复判定）
+  mediaConfigKeysMigrated: boolean
   // 媒体内容的对外可达地址（图片/语音/视频推送直链与插件通道共用；原名 imageServerBaseUrl，
   // 视频语音入站推送同链路后更名，构造器 migrateMediaServerBaseUrl 存量迁移）
   mediaServerBaseUrl: string
@@ -427,6 +429,7 @@ export class ConfigService {
       oneBotDebounceMs: 350,
       oneBotBatchSize: 50,
       mediaTransferMode: 'base64',
+      mediaConfigKeysMigrated: false,
       mediaServerBaseUrl: '',
       flowbotCommand: {
         enabled: true,
@@ -983,9 +986,10 @@ export class ConfigService {
 
   /** 媒体配置键更名迁移（2026-09-04，视频/语音入站推送与图片共用链路后归位）：
    * imageTransferMode → mediaTransferMode、imageServerBaseUrl → mediaServerBaseUrl。
-   * 判定必须走原始持久化对象（store.store）——this.get() 对未落盘的新键会返回 defaults
-   * 里的默认值（'base64'/''），会把"存量用户设过 url 模式"误判为已迁移而跳过搬移。
-   * 旧键留在 store 中不删，回滚旧版本仍可读 */
+   * 判定不可依赖 persisted 新键取值——conf 的 store.store 是合并默认值后的视图，
+   * 未落盘的新键会读到默认值（'base64'/''），"=== undefined" 判据失效（本次部署实测踩坑：
+   * 用户存量 url 模式被默认值写穿）。故用一次性标记：标记未落 && 旧键有值 → 无条件以旧键
+   * 为准搬移后落标记，此后永不再动（用户改新键不会被回退）；旧键留 store 不删，回滚可读 */
   private migrateMediaConfigKeys(): void {
     let persisted: any
     try {
@@ -993,16 +997,18 @@ export class ConfigService {
     } catch {
       return
     }
+    if (persisted.mediaConfigKeysMigrated === true) return
     const legacyMode = persisted.imageTransferMode
-    if ((legacyMode === 'base64' || legacyMode === 'url') && persisted.mediaTransferMode === undefined) {
+    if (legacyMode === 'base64' || legacyMode === 'url') {
       this.set('mediaTransferMode', legacyMode)
       console.info('[Config] 已迁移 imageTransferMode → mediaTransferMode:', legacyMode)
     }
     const legacyUrl = String(persisted.imageServerBaseUrl || '').trim()
-    if (legacyUrl && !String(persisted.mediaServerBaseUrl || '').trim()) {
+    if (legacyUrl) {
       this.set('mediaServerBaseUrl', legacyUrl)
       console.info('[Config] 已迁移 imageServerBaseUrl → mediaServerBaseUrl:', legacyUrl)
     }
+    this.set('mediaConfigKeysMigrated', true)
   }
 
   private migrateAiConfig(): void {
