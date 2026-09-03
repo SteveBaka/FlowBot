@@ -111,6 +111,10 @@ interface ConfigSchema {
   videoCalibrationLogEnabled: boolean
   // 入站视频推送（默认关：多数模型不支持视频模态，仅向适配器提供文件 URL 与元数据，INBOUND-VIDEO-PUSH-PLAN §三）
   inboundVideoPushEnabled: boolean
+  // 入站语音推送（默认关：转写/ASR 由 astrbot 侧处理，仅提供 WAV 与时长元数据，INBOUND-VOICE-PUSH-PLAN §三）
+  inboundVoicePushEnabled: boolean
+  // 入站语音内联传输体积闸（base64 record 段超限降级为文本 [语音]；URL 模式不受限）
+  voiceMaxBytes: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -335,6 +339,8 @@ export class ConfigService {
       imageCdnDirectFetchDiagMd5Log: true,
       videoCalibrationLogEnabled: false,
       inboundVideoPushEnabled: false,
+      inboundVoicePushEnabled: false,
+      voiceMaxBytes: 10 * 1024 * 1024,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

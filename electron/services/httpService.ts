@@ -3667,6 +3667,9 @@ class HttpService {
                 'imageCdnDirectFetchDiagMd5Log',
                 'videoCalibrationLogEnabled',
                 'inboundVideoPushEnabled',
+                // 入站语音推送（INBOUND-VOICE-PUSH-PLAN；与 config schema 同步加键，防"开关失忆"）
+                'inboundVoicePushEnabled',
+                'voiceMaxBytes',
                 // SendAck 媒体回执（WebUI「消息管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',

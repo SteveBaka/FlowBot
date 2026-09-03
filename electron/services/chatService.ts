@@ -8367,7 +8367,7 @@ class ChatService {
   /**
    * getVoiceData（主用批量专属接口读取语音数据）
    */
-  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; voicePath?: string; error?: string }> {
     const startTime = Date.now()
     const verboseVoiceTrace = process.env.WEFLOW_VOICE_TRACE === '1'
     const msgCreateTimeLabel = (value?: number): string => {
@@ -8482,24 +8482,30 @@ class ChatService {
       // 使用 sessionId + createTime + msgId 作为缓存 key，避免同秒语音串音
       const cacheKey = this.getVoiceCacheKey(sessionId, String(localId), msgCreateTime)
 
+      // WAV 落盘路径（INBOUND-VOICE-PUSH-PLAN：随成功返回透出，推送层据其注册 token；UI/导出不读，零影响）
+      const voiceCacheDir = this.getVoiceCacheDir()
+      const wavFilePath = join(voiceCacheDir, `${cacheKey}.wav`)
+
       // 检查 WAV 内存缓存
       const wavCache = this.voiceWavCache.get(cacheKey)
       if (wavCache) {
         lookupPath.push('命中内存WAV缓存')
+        // 历史内存缓存可能无对应盘文件（写盘曾失败）：补写后再透出路径，保证 voicePath 恒有效
+        if (!existsSync(wavFilePath)) {
+          await this.cacheVoiceWavToFile(cacheKey, wavCache)
+        }
         logLookupPath('success', '内存缓存')
-        return { success: true, data: wavCache.toString('base64') }
+        return { success: true, data: wavCache.toString('base64'), voicePath: wavFilePath }
       }
 
       // 检查 WAV 文件缓存
-      const voiceCacheDir = this.getVoiceCacheDir()
-      const wavFilePath = join(voiceCacheDir, `${cacheKey}.wav`)
       if (existsSync(wavFilePath)) {
         try {
           const wavData = readFileSync(wavFilePath)
           this.cacheVoiceWav(cacheKey, wavData)
           lookupPath.push('命中磁盘WAV缓存')
           logLookupPath('success', '磁盘缓存')
-          return { success: true, data: wavData.toString('base64') }
+          return { success: true, data: wavData.toString('base64'), voicePath: wavFilePath }
         } catch (e) {
           lookupPath.push('命中磁盘WAV缓存但读取失败')
           console.error('[Voice] 读取缓存文件失败:', e)
@@ -8563,13 +8569,13 @@ class ChatService {
       // 缓存 WAV 数据到内存
       this.cacheVoiceWav(cacheKey, wavData)
 
-      // 缓存 WAV 数据到文件（异步，不阻塞返回）
-      this.cacheVoiceWavToFile(cacheKey, wavData)
+      // 缓存 WAV 数据到文件（等待落盘：voicePath 随返回值透出给推送层，必须先保证文件有效）
+      await this.cacheVoiceWavToFile(cacheKey, wavData)
 
       lookupPath.push(`总耗时=${t8 - startTime}ms`)
       logLookupPath('success')
 
-      return { success: true, data: wavData.toString('base64') }
+      return { success: true, data: wavData.toString('base64'), voicePath: wavFilePath }
     } catch (e) {
       lookupPath.push(`异常: ${String(e)}`)
       logLookupPath('fail', String(e))

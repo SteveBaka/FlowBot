@@ -153,8 +153,46 @@ export async function resolveInboundVideo(message: InboundMediaMessage): Promise
   }
 }
 
-/* ── 图片消息 XML 解析（自 chatService 下沉，纯函数；chatService 薄委托保兼容）── */
+/* ── 入站语音（INBOUND-VOICE-PUSH-PLAN §四）：纯信号工厂 ──
+ * 分工与视频同构：DB 定位/silk 解码链留在 chatService（getVoiceData），mediaService
+ * 只做可用性判定与语义归一；不 import chatService（依赖图无环红线）。
+ * 超限判定不在此处：base64/url 模式对 voiceMaxBytes 的取舍属分发层知识（botManager 各自裁决，
+ * URL 模式超限仍可发 token 直链）。
+ * 语义注意：unavailableReason='not_cached' = 语音未解码（WeFlow UI 的「点击解密」态），
+ * 是缓存未命中而非数据缺失——与视频 fileMissing（文件丢失）文案严格区分。 */
+export interface InboundVoiceSignal {
+  voicePath?: string
+  voiceMeta: {
+    durationSec?: number
+    sizeBytes?: number
+    available: boolean
+    unavailableReason?: 'not_cached' | 'decode_failed'
+  }
+}
 
+export function resolveInboundVoice(input: {
+  voicePath?: string
+  durationSec?: number | string
+  error?: string
+}): InboundVoiceSignal | undefined {
+  if (ConfigService.getInstance().get('inboundVoicePushEnabled') !== true) return undefined
+  const durationRaw = Number(input.durationSec)
+  const durationSec = Number.isFinite(durationRaw) && durationRaw > 0 ? Math.round(durationRaw) : undefined
+  const voicePath = String(input.voicePath || '').trim() || undefined
+  if (!voicePath) {
+    return { voiceMeta: { durationSec, available: false, unavailableReason: input.error ? 'decode_failed' : 'not_cached' } }
+  }
+  try {
+    if (!fs.existsSync(voicePath)) {
+      return { voiceMeta: { durationSec, available: false, unavailableReason: 'not_cached' } }
+    }
+    return { voicePath, voiceMeta: { durationSec, sizeBytes: fs.statSync(voicePath).size, available: true } }
+  } catch {
+    return { voiceMeta: { durationSec, available: false, unavailableReason: 'not_cached' } }
+  }
+}
+
+/* ── 图片消息 XML 解析（自 chatService 下沉，纯函数；chatService 薄委托保兼容）── */
 function extractXmlValue(xml: string, tagName: string): string {
   const regex = new RegExp(`<${tagName}>([\\s\\S]*?)</${tagName}>`, 'i')
   const match = regex.exec(xml)

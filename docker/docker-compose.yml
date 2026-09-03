@@ -1,6 +1,6 @@
 services:
   flowbot:
-    image: flowbot:latest
+    image: unsuited/flowbot:latest
     container_name: flowbot
     restart: always
     cap_add:
