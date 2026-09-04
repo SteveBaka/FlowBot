@@ -2,7 +2,7 @@
 # Docker image smoke gate: boots the image and probes service health.
 # Usage: docker-smoke.sh <image> [report.md]
 #
-# Seeds a minimal bot config (/root/.config/WeFlow/WeFlow-config.json) so the
+# Seeds a minimal bot config (/root/.config/weflow/WeFlow-config.json) so the
 # core channels boot WITHOUT WeChat login, then probes them for real:
 #   - OneBot v11 HTTP (7100, mode=http bot): /get_version_info must answer with
 #     protocol_version v11, /get_status online, unknown action -> spec failure
@@ -40,11 +40,14 @@ wait_probe() { # wait_probe <cmd...>
   return 1
 }
 
-# Seed config: one file drives both sides (electron-store for the OneBot bot,
-# server.js reads the same path on a 5s refresh for the plugin-API bot).
+# Seed config: one file drives both sides. NOTE the lowercase path: the
+# packaged Electron app's userData is /root/.config/weflow (package.json
+# "name", NOT productName "WeFlow") — verified in a real container boot
+# ([Logger] Initialized, log dir: /root/.config/weflow/logs). server.js
+# discovers the same file via its `find /root` fallback.
 SEED_DIR=$(mktemp -d /tmp/flowbot-smoke-seed.XXXXXX)
-mkdir -p "$SEED_DIR/WeFlow"
-cat > "$SEED_DIR/WeFlow/WeFlow-config.json" <<EOF
+mkdir -p "$SEED_DIR/weflow"
+cat > "$SEED_DIR/weflow/WeFlow-config.json" <<EOF
 {"bots":[
   {"id":"ci-onebot","name":"ci-onebot","mode":"http","direction":"server","address":"","port":7100,"token":"","enabled":true},
   {"id":"ci-plugin","name":"ci-plugin","mode":"plugin","direction":"server","address":"","port":7400,"token":"$PLUGIN_TOKEN","enabled":true}
@@ -62,7 +65,7 @@ docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
 
 echo "Starting container from $IMAGE ..."
 if docker run -d --name "$CONTAINER" --shm-size=2g \
-    -v "$SEED_DIR/WeFlow:/root/.config/WeFlow" "$IMAGE" >/dev/null 2>&1; then
+    -v "$SEED_DIR/weflow:/root/.config/weflow" "$IMAGE" >/dev/null 2>&1; then
 
   # WebUI: auth-exempt endpoints prove node server.js + its config load path.
   if wait_probe curl -sf -o /dev/null http://127.0.0.1:7300/api/status; then
