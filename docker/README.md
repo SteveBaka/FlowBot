@@ -1,7 +1,7 @@
 # FlowBOT 
 
 <p align="center">
-  <i>We Chat with AI Bot.</i>
+  <img src="docker/webui/public/icon.png" alt="FlowBOT" width="60" style="vertical-align: middle;" />&nbsp;&nbsp;<i>We Chat with AI Bot.</i>
 </p>
 
 FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础之上，增加了[OneBot v11](https://github.com/botuniverse/onebot-11) 协议，旨在为 `WeFlow` Linux 客户端增加聊天协议转换，并提供 WebSocket/HTTP 支持及 WebUI 管理。 
@@ -30,8 +30,14 @@ FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础�
 | 图片发送 | 微信图片推送到外部适配器（支持 base64 / URL 模式） |
 | 图片接收 | 外部适配器图片推送到微信（仅v1.2版本之后支持） |
 | 表情解析 | 支持推送GIF以及多种表情推送到外部适配器 |
+| 视频接收 | 视频推送到外部适配器（支持 base64 / URL 模式） |
+| 语音发送 | 外部适配器视频完整推送到微信 |
+| 视频发送（实验性） | 视频推送到外部适配器（支持 base64 / URL 模式）【先行适配封面图和长度发送】 |
 
 > ⚠️由于兼容 *图片双向发送功能* ， Onebot 协议目前无法在 Astrbot 中显示真实的账号，如介意且不在意图片发送至微信的情况，可以选用 V1.2 前的版本。
+> 
+> 经过多轮开发和测试， `AstrBot` 目前推荐使用 [FlowBot适配器](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter) 。
+> 可在 `AstrBot 插件市场` 搜索 `FlowBot适配器` 并安装使用，解决了显示正确的 `xxx@Chatroom` 、`wxid` 的痛点。
 
 ## 快速开始
 
@@ -61,7 +67,7 @@ docker run -d --name FlowBOT \
   -p 7300:7300 \
   -p 7400:7400 \
   -p 7600:7600 \
-  flowbot:latest
+  unsuited/flowbot:latest
 ```
 
 > **注意**：首次使用前请修改 `VNC_PASSWORD` 为自定义强密码，避免他人通过 noVNC 登录。
@@ -109,6 +115,7 @@ WS 推送:  ws://你的IP:7400/api/v1/ws/messages?token=<Bot Token>
 7. 保存后，Bot 实例自动启动
 
 V1.4.0新增： Astrbot 插件[astrbot_plugin_flowbot_adapter](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter)，以获取实际账号。
+
 ## 构建镜像
 
 如果你没有预构建的镜像，可以自行构建：

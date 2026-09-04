@@ -1,6 +1,6 @@
 import { app } from 'electron'
-import { join } from 'path'
-import { existsSync, readdirSync, statSync, readFileSync, chmodSync } from 'fs'
+import { join, basename } from 'path'
+import { existsSync, readdirSync, statSync, readFileSync, readlinkSync, chmodSync } from 'fs'
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
@@ -135,28 +135,14 @@ export class KeyServiceLinux {
         await new Promise(r => setTimeout(r, 1000))
 
         try {
-          const { stdout } = await execAsync('pidof wechat wechat-bin xwechat', { env: envWithPath });
-          const pids = stdout.trim().split(/\s+/).filter(p => p);
+          const pids = this.discoverWechatPids();
           if (pids.length > 0) {
-            pid = parseInt(pids[0], 10);
-            console.log(`[Debug] 第 ${i + 1} 秒，通过 pidof 成功获取 PID: ${pid}`);
+            pid = pids[0];
+            console.log(`[Debug] 第 ${i + 1} 秒，通过 /proc 扫描成功获取 PID: ${pid}`);
             break;
           }
         } catch (err: any) {
-          console.log(`[Debug] 第 ${i + 1} 秒，pidof 失败: ${err.message.split('\n')[0]}`);
-
-          // Fallback: 使用 pgrep 兜底
-          try {
-            const { stdout: pgrepOut } = await execAsync('pgrep -x "wechat|wechat-bin|xwechat"', { env: envWithPath });
-            const pids = pgrepOut.trim().split(/\s+/).filter(p => p);
-            if (pids.length > 0) {
-              pid = parseInt(pids[0], 10);
-              console.log(`[Debug] 第 ${i + 1} 秒，通过 pgrep 成功获取 PID: ${pid}`);
-              break;
-            }
-          } catch (e: any) {
-            console.log(`[Debug] 第 ${i + 1} 秒，pgrep 也失败: ${e.message.split('\n')[0]}`);
-          }
+          console.log(`[Debug] 第 ${i + 1} 秒，/proc 扫描失败: ${err.message.split('\n')[0]}`);
         }
       }
 
@@ -330,7 +316,7 @@ export class KeyServiceLinux {
         if (verified === true) {
           onProgress?.('缓存密钥校验成功，已确认可用')
         } else if (verified === false) {
-          onProgress?.('已从缓存计算密钥，但未通过本地模板校验')
+          return { success: false, error: '捕获的密钥未通过本地图片校验（解不开现存 dat，疑似微信登录账号与 WeFlow 配置账号不一致），已拒绝保存' }
         }
         return { success: true, xorKey: keyObj.xorKey, aesKey, verified: verified === true }
       }
@@ -369,6 +355,24 @@ export class KeyServiceLinux {
     }
   }
 
+  /** 微信 PID 发现：直接扫 /proc/<pid>/exe 精确匹配。
+   * 不用 pidof——sysvinit 的 pidof 是 killall5 符号链接，会跳过与调用者同 session 的
+   * 进程（wechat 与 weflow 同由 start.sh 拉起、同 session），从 weflow 内永远返回空。 */
+  private discoverWechatPids(): number[] {
+    const names = new Set(['wechat', 'wechat-bin', 'xwechat'])
+    const pids: number[] = []
+    try {
+      for (const e of readdirSync('/proc')) {
+        if (!/^\d+$/.test(e)) continue
+        try {
+          const exe = readlinkSync(join('/proc', e, 'exe'))
+          if (names.has(basename(exe))) pids.push(parseInt(e, 10))
+        } catch { /* 权限不足或进程已退出，跳过 */ }
+      }
+    } catch { /* /proc 不可读 */ }
+    return pids.sort((a, b) => a - b)
+  }
+
   public async autoGetImageKeyByMemoryScan(
       accountPath: string,
       onProgress?: (msg: string) => void
@@ -389,11 +393,10 @@ export class KeyServiceLinux {
 
       onProgress?.(`XOR 密钥: 0x${xorKey.toString(16).padStart(2, '0')}，正在查找微信进程...`)
 
-      // 2. 找微信 PID
-      const { stdout } = await execAsync('pidof wechat wechat-bin xwechat').catch(() => ({ stdout: '' }))
-      const pids = stdout.trim().split(/\s+/).filter(p => p)
+      // 2. 找微信 PID（/proc/*/exe 扫描，规避 pidof 同 session 盲区）
+      const pids = this.discoverWechatPids()
       if (pids.length === 0) return { success: false, error: '微信未运行，无法扫描内存' }
-      const pid = parseInt(pids[0], 10)
+      const pid = pids[0]
 
       onProgress?.(`已找到微信进程 PID=${pid}，正在提权扫描进程内存...`);
 
@@ -418,7 +421,10 @@ export class KeyServiceLinux {
         const res = JSON.parse(memOut.trim())
 
         if (res.success) {
-          onProgress?.('内存扫描成功');
+          if (!this.verifyDerivedAesKey(String(res.key || ''), ciphertext!)) {
+            return { success: false, error: '内存扫描到的密钥未通过模板校验（解不开模板密文，疑似残留候选或账号不匹配），已拒绝保存' }
+          }
+          onProgress?.('内存扫描成功，模板校验通过');
           return { success: true, xorKey, aesKey: res.key }
         }
         return { success: false, error: res.result || '未知错误' }

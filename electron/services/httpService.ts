@@ -20,7 +20,7 @@ import { snsService } from './snsService'
 import { getPluginManager } from '../plugins/pluginManager'
 import { SendOptions, MessageType } from '../plugins/plugin-interface'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
-import { prepareVideoForSend, detectVideoExt } from './outboundMediaService'
+import { prepareVideoForSend, detectVideoExt, prepareImageForSend } from './mediaService'
 
 // ChatLab 格式定义
 interface ChatLabHeader {
@@ -134,19 +134,37 @@ interface ImageTokenEntry {
   sessionId?: string
   imageMd5?: string
   imageDatName?: string
+  kind?: 'image' | 'video'
 }
 
 const imageTokenCache = new Map<string, ImageTokenEntry>()
 const IMAGE_TOKEN_TTL_MS = 2 * 60 * 1000
+// 视频 token 单独 TTL：适配器下载大文件可能滞后，2 分钟图片级 TTL 不够用
+export const VIDEO_TOKEN_TTL_MS = 60 * 60 * 1000
 const IMAGE_TOKEN_MAX = 200
 let imageTokenLastCleanup = 0
 const IMAGE_TOKEN_CLEANUP_INTERVAL_MS = 30 * 1000
 
-export function registerImageToken(imagePath: string): string {
-  return registerImageTokenWithMeta(imagePath, { isThumb: isThumbnailFilePath(imagePath) })
+/** 池满腾坑（2026-09-02 加固）：先淘汰已过期项，保住长 TTL 视频 token
+ * 不被高频图片流量按插入序挤出；无过期项才退化为最老项淘汰 */
+function evictTokenSlot(now: number): void {
+  for (const [key, entry] of imageTokenCache) {
+    if (entry.expires < now) {
+      imageTokenCache.delete(key)
+      return
+    }
+  }
+  const oldest = imageTokenCache.keys().next().value
+  if (oldest) {
+    imageTokenCache.delete(oldest)
+  }
 }
 
-export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }): string {
+/** 图片/视频 token 共用分配：节流清理过期 → 腾坑 → 16 位随机 token → 入池 */
+function allocMediaToken(
+  filePath: string,
+  opts: { ttlMs: number; kind: 'image' | 'video' | 'audio'; isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string }
+): string {
   const now = Date.now()
 
   if (now - imageTokenLastCleanup > IMAGE_TOKEN_CLEANUP_INTERVAL_MS) {
@@ -159,10 +177,7 @@ export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: b
   }
 
   if (imageTokenCache.size >= IMAGE_TOKEN_MAX) {
-    const oldest = imageTokenCache.keys().next().value
-    if (oldest) {
-      imageTokenCache.delete(oldest)
-    }
+    evictTokenSlot(now)
   }
 
   const TOKEN_CHARS = '0123456789abcdefghijklmnopqrstuvwxyz'
@@ -175,15 +190,43 @@ export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: b
   } while (imageTokenCache.has(token))
 
   imageTokenCache.set(token, {
-    imagePath,
-    expires: now + IMAGE_TOKEN_TTL_MS,
+    imagePath: filePath,
+    expires: now + opts.ttlMs,
+    isThumb: opts.isThumb,
+    kind: opts.kind,
+    sessionId: opts.sessionId,
+    imageMd5: opts.imageMd5,
+    imageDatName: opts.imageDatName,
+  })
+
+  return token
+}
+
+export function registerImageToken(imagePath: string): string {
+  return registerImageTokenWithMeta(imagePath, { isThumb: isThumbnailFilePath(imagePath) })
+}
+
+export function registerImageTokenWithMeta(imagePath: string, meta: { isThumb: boolean; sessionId?: string; imageMd5?: string; imageDatName?: string; ttlMs?: number }): string {
+  return allocMediaToken(imagePath, {
+    ttlMs: meta.ttlMs ?? IMAGE_TOKEN_TTL_MS,
+    kind: 'image',
     isThumb: meta.isThumb,
     sessionId: meta.sessionId,
     imageMd5: meta.imageMd5,
     imageDatName: meta.imageDatName,
   })
+}
 
-  return token
+/** 入站视频 token（INBOUND-VIDEO-PUSH-PLAN §2.3）：复用图片令牌池（16 位随机 + LRU），
+ * TTL 1h 独立；仅可经 /api/media 消费 */
+export function registerVideoTokenWithMeta(videoPath: string): string {
+  return allocMediaToken(videoPath, { ttlMs: VIDEO_TOKEN_TTL_MS, kind: 'video', isThumb: false })
+}
+
+/** 入站语音 token（INBOUND-VOICE-PUSH-PLAN §4.2）：复用媒体令牌池，TTL 1h 对齐视频；
+ * 仅可经 /api/media 消费 */
+export function registerVoiceTokenWithMeta(voicePath: string): string {
+  return allocMediaToken(voicePath, { ttlMs: VIDEO_TOKEN_TTL_MS, kind: 'audio', isThumb: false })
 }
 
 export function isThumbnailFilePath(filePath: string): boolean {
@@ -264,8 +307,14 @@ class HttpService {
   private mediaUploads = new Map<string, { path: string; expires: number }>()
   private readonly mediaUploadTtlMs = 5 * 60 * 1000
 
-  // 图片发送限制（防微信粘贴冻结）：仅体积 >5MB 拒绝
-  private readonly IMAGE_SEND_MAX_BYTES = 5 * 1024 * 1024
+  // 图片发送限制（防微信粘贴冻结）：读 imageMaxBytes 配置（默认 5MB），WebUI 可调并与压缩分界点共用
+  private imageSendMaxBytes(): number {
+    try {
+      const v = this.configService?.get('imageMaxBytes')
+      if (typeof v === 'number' && Number.isFinite(v) && v > 0) return v
+    } catch {}
+    return 5 * 1024 * 1024
+  }
   // 身份库直读（WebUI 维护的 identity.db，同容器文件系统，发送前一次读取省 WCDB）
   private identityDbReadOnly: any = null
   private identityDbPath = ''
@@ -640,6 +689,10 @@ class HttpService {
                 return
             }
             const entry = imageTokenCache.get(token)
+            if (entry?.kind === 'video' || entry?.kind === 'audio') {
+                this.sendError(res, 404, 'Image not found or expired')
+                return
+            }
             let filePath = getImagePathByToken(token)
             if (!filePath) {
                 this.sendError(res, 404, 'Image not found or expired')
@@ -663,6 +716,61 @@ class HttpService {
                 'X-Content-Type-Options': 'nosniff'
             })
             fs.createReadStream(filePath).pipe(res)
+            return
+        }
+
+        if (pathname === '/api/media' && (req.method === 'GET' || req.method === 'HEAD')) {
+            const token = url.searchParams.get('token') || ''
+            if (!/^[a-z0-9]{16}$/.test(token)) {
+                this.sendError(res, 400, 'Invalid token format')
+                return
+            }
+            const entry = imageTokenCache.get(token)
+            // 门禁放宽至 audio（INBOUND-VOICE-PUSH-PLAN：语音 token 仅经 /api/media 消费）
+            if (!entry || (entry.kind !== 'video' && entry.kind !== 'audio') || entry.expires < Date.now()) {
+                this.sendError(res, 404, 'Media not found or expired')
+                return
+            }
+            if (!fs.existsSync(entry.imagePath)) {
+                this.sendError(res, 404, 'Media file missing')
+                return
+            }
+            const ext = path.extname(entry.imagePath).toLowerCase()
+            const mimeMap: Record<string, string> = {
+                '.mp4': 'video/mp4', '.mov': 'video/quicktime',
+                '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo',
+                // 语音（INBOUND-VOICE-PUSH-PLAN）：WAV 主形态；silk/amr 为原始格式预留
+                '.wav': 'audio/wav', '.silk': 'audio/silk', '.amr': 'audio/amr'
+            }
+            const stat = fs.statSync(entry.imagePath)
+            const baseHeaders: Record<string, string | number> = {
+                'Content-Type': mimeMap[ext] || 'application/octet-stream',
+                'Cache-Control': 'no-cache, max-age=0',
+                'X-Content-Type-Options': 'nosniff',
+                'Accept-Ranges': 'bytes'
+            }
+            // Range（单段 bytes=N-M / -N 后缀）：断点续传与拖动进度；非法/越界回 416
+            const rangeMatch = req.headers.range ? /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range).trim()) : null
+            if (rangeMatch && (rangeMatch[1] || rangeMatch[2])) {
+                const start = rangeMatch[1] ? parseInt(rangeMatch[1], 10) : (rangeMatch[2] ? Math.max(0, stat.size - parseInt(rangeMatch[2], 10)) : 0)
+                const end = (rangeMatch[1] && rangeMatch[2]) ? Math.min(parseInt(rangeMatch[2], 10), stat.size - 1) : stat.size - 1
+                if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= stat.size) {
+                    res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` })
+                    res.end()
+                    return
+                }
+                res.writeHead(206, {
+                    ...baseHeaders,
+                    'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+                    'Content-Length': String(end - start + 1)
+                })
+                if (req.method === 'HEAD') { res.end(); return }
+                fs.createReadStream(entry.imagePath, { start, end }).pipe(res)
+                return
+            }
+            res.writeHead(200, { ...baseHeaders, 'Content-Length': String(stat.size) })
+            if (req.method === 'HEAD') { res.end(); return }
+            fs.createReadStream(entry.imagePath).pipe(res)
             return
         }
 
@@ -2980,7 +3088,7 @@ class HttpService {
         }
         const prepared = await prepareVideoForSend(src)
         if (!prepared) {
-          console.error(`[HttpService] video normalization failed for ${String(src).slice(0, 80)}... (see [outboundMedia] logs for reason)`)
+          console.error(`[HttpService] video normalization failed for ${String(src).slice(0, 80)}... (see [mediaService] logs for reason)`)
           this.sendError(res, 400, 'video download failed or size exceeded')
           return
         }
@@ -3095,82 +3203,48 @@ class HttpService {
     imageUrl?: string,
     imageToken?: string
   ): Promise<{ path: string | null; error?: string }> {
-    // ④ image_token：上传接口返回的服务器端文件（跨设备推荐）
+    // ④ image_token：上传接口返回的服务器端文件（跨设备推荐）。
+    // 依赖本类内存态 mediaUploads 反查，故保留在本方法；查到落盘路径后仍交给 mediaService
+    // 走统一的闸 + 压缩管线。
     if (imageToken) {
       const entry = this.mediaUploads.get(String(imageToken))
       if (entry && entry.expires > Date.now() && fs.existsSync(entry.path)) {
         const err = this.validateSendImage(entry.path)
         if (err) return { path: null, error: err }
-        return { path: entry.path }
+        const prepared = await prepareImageForSend({ path: entry.path })
+        if (!prepared) return { path: null, error: '图片归一/压缩失败' }
+        return { path: prepared.imagePath }
       }
       return { path: null, error: '图片 token 无效或已过期' }
     }
-    // ① image_base64：字节内联，跨设备最可靠
+    // ① image_base64 / ② image_url / ③ image_path：交给 mediaService 统一归一（含
+    // imageMaxBytes 闸 + 15s URL 超时 + 分界点压缩）。此处仅保留错误文案包装以兼容 REST 客户端。
     if (imageBase64) {
-      try {
-        const raw = String(imageBase64)
-        const b64 = raw.includes('base64,') ? raw.slice(raw.indexOf('base64,') + 7) : raw
-        if (!/^[A-Za-z0-9+/]*={0,2}$/.test(b64.trim())) {
-          return { path: null, error: '图片 base64 解码失败（含非法字符）' }
-        }
-        const buf = Buffer.from(b64, 'base64')
-        if (buf.length > 0) {
-          if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
-            return { path: null, error: `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
-          }
-          const ext = this.detectImageExt(buf)
-          const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
-          fs.writeFileSync(tmpPath, buf)
-          const err = this.validateSendImage(tmpPath)
-          if (err) {
-            try { fs.unlinkSync(tmpPath) } catch {}
-            return { path: null, error: err }
-          }
-          return { path: tmpPath }
-        }
-      } catch {}
-      return { path: null, error: '图片 base64 解码失败' }
+      const prepared = await prepareImageForSend({ base64: imageBase64 })
+      if (!prepared) return { path: null, error: '图片 base64 解码失败' }
+      return { path: prepared.imagePath }
     }
-    // ② image_url：直链拉取（需 flowbot 可达）
     if (imageUrl) {
-      try {
-        const controller = new AbortController()
-        const timer = setTimeout(() => controller.abort(), 15000)
-        let resp: Response
-        try {
-          resp = await fetch(String(imageUrl), { signal: controller.signal })
-        } finally {
-          clearTimeout(timer)
-        }
-        if (!resp.ok) return { path: null, error: `URL 下载失败: HTTP ${resp.status}` }
-        const buf = Buffer.from(await resp.arrayBuffer())
-        if (buf.length > this.IMAGE_SEND_MAX_BYTES) {
-          return { path: null, error: `URL 图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）` }
-        }
-        const ext = this.detectImageExt(buf)
-        const tmpPath = path.join(os.tmpdir(), `weflow_http_${randomUUID()}${ext}`)
-        fs.writeFileSync(tmpPath, buf)
-        const err = this.validateSendImage(tmpPath)
-        if (err) {
-          try { fs.unlinkSync(tmpPath) } catch {}
-          return { path: null, error: err }
-        }
-        return { path: tmpPath }
-      } catch (error: any) {
-        return { path: null, error: `URL 下载失败: ${error?.name === 'AbortError' ? '超时(15s)' : error?.message || String(error)}` }
-      }
+      const prepared = await prepareImageForSend({ url: imageUrl })
+      if (!prepared) return { path: null, error: `URL 下载失败: ${this.imageUrlErrHint(imageUrl)}` }
+      return { path: prepared.imagePath }
     }
-    // ③ image_path：仅同主机（flowbot 文件系统）有效
     if (imagePath) {
       const p = String(imagePath).trim()
       if (fs.existsSync(p)) {
-        const err = this.validateSendImage(p)
-        if (err) return { path: null, error: err }
-        return { path: p }
+        const prepared = await prepareImageForSend({ path: p })
+        if (!prepared) return { path: null, error: '图片路径不可访问' }
+        return { path: prepared.imagePath }
       }
       return { path: null, error: '路径不可访问（跨主机请使用 image_token / image_base64 / image_url）' }
     }
     return { path: null, error: 'Image message requires image_token, image_base64, image_url or image_path' }
+  }
+
+  /** 构造 image_url 拉取失败的提示文案（仅供错误信息，略去详情避免暴露内部） */
+  private imageUrlErrHint(url: string): string {
+    const m = /^https?:\/\/([^/]+)/i.exec(url)
+    return m ? `HTTP/${m[1]} 下载失败` : '下载失败'
   }
 
   private detectImageExt(buf: Buffer): string {
@@ -3187,8 +3261,8 @@ class HttpService {
   private validateSendImage(filePath: string): string | null {
     try {
       const st = fs.statSync(filePath)
-      if (st.size > this.IMAGE_SEND_MAX_BYTES) {
-        return `图片过大（>${Math.round(this.IMAGE_SEND_MAX_BYTES / 1024 / 1024)}MB）`
+      if (st.size > this.imageSendMaxBytes()) {
+        return `图片过大（>${Math.round(this.imageSendMaxBytes() / 1024 / 1024)}MB）`
       }
     } catch {
       return '图片校验失败'
@@ -3556,7 +3630,7 @@ class HttpService {
     this.sendError(res, 405, `Method Not Allowed. Allowed: ${allow}`)
   }
 
-  // ─── Management API handlers ────────────────────────────────────────────
+  // Management API handlers
 
     private handleMgmtGetConfig(res: http.ServerResponse): void {
         try {
@@ -3572,7 +3646,7 @@ class HttpService {
                 'notificationEnabled', 'notificationFilterMode',
                 'myWxid', 'dbPath', 'onboardingDone', 'theme', 'language',
                 'logEnabled', 'bots',
-                'imageTransferMode', 'imageServerBaseUrl',
+                'mediaTransferMode', 'mediaServerBaseUrl',
                 'flowbotCommand',
                 'sendDelayMode',
                 'sendDelayCustom',
@@ -3586,7 +3660,26 @@ class HttpService {
                 'sendCooldownMs',
                 'sendBackoffBaseMs',
                 'imagePasteCapMs',
-                // SendAck 媒体回执（WebUI「发送管理」页读写）
+                'imageMaxBytes',
+                // 图片出站压缩（MEDIA-SERVICE §11.5）
+                'imageCompressEnabled',
+                'imageCompressKeepResolution',
+                'imageCompressFormat',
+                'imageCompressPaletteMax',
+                'imageUrlTimeoutMs',
+                // 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）
+                'imageCdnDirectFetchEnabled',
+                'imageCdnDirectFetchTimeoutMs',
+                'imageCdnDirectFetchMinIntervalMs',
+                'imageCdnDirectFetchHourlyLimit',
+                'imageCdnDirectFetchMaxAgeMs',
+                'imageCdnDirectFetchDiagMd5Log',
+                'videoCalibrationLogEnabled',
+                'inboundVideoPushEnabled',
+                // 入站语音推送（INBOUND-VOICE-PUSH-PLAN；与 config schema 同步加键，防"开关失忆"）
+                'inboundVoicePushEnabled',
+                'voiceMaxBytes',
+                // SendAck 媒体回执（WebUI「消息管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',
                 'sendAckPollIntervalMs',
@@ -3618,7 +3711,7 @@ class HttpService {
         }
     }
 
-  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  /** 发送/队列运行状态（供 WebUI「消息管理」页只读回显） */
   private handleMgmtSendStatus(res: http.ServerResponse): void {
     try {
       const sender = getEnhancedMessageSender() as any

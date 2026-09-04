@@ -91,6 +91,30 @@ interface ConfigSchema {
   sendCooldownMs: number
   sendBackoffBaseMs: number
   imagePasteCapMs: number
+  imageMaxBytes: number
+  // 图片出站压缩（MEDIA-SERVICE §11.5：分界点 + 内容类型分流 + PNG 优先）
+  imageCompressEnabled: boolean
+  imageCompressKeepResolution: boolean
+  imageCompressFormat: 'png' | 'jpeg' | 'auto'
+  imageCompressPaletteMax: number
+  imageUrlTimeoutMs: number
+  // 图片入站 CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6；默认关，验收用例 #1 通过后启用）
+  imageCdnDirectFetchEnabled: boolean
+  imageCdnDirectFetchTimeoutMs: number
+  // 风控防护（2026-09-01 拍板）：仅增量消息 + 最小间隔 + 每小时上限（WebUI 可调前两项，稳定后用户自行提升）
+  imageCdnDirectFetchMinIntervalMs: number
+  imageCdnDirectFetchHourlyLimit: number
+  imageCdnDirectFetchMaxAgeMs: number
+  // 产物 md5 与 XML 声称值比对诊断日志（仅记录不判定；用户反馈问题时开关复现）
+  imageCdnDirectFetchDiagMd5Log: boolean
+  // 视频链路标定日志（源规格 + T0；默认关，实验时开启）——后续入站视频开关同区
+  videoCalibrationLogEnabled: boolean
+  // 入站视频推送（默认关：多数模型不支持视频模态，仅向适配器提供文件 URL 与元数据，INBOUND-VIDEO-PUSH-PLAN §三）
+  inboundVideoPushEnabled: boolean
+  // 入站语音推送（默认关：转写/ASR 由 astrbot 侧处理，仅提供 WAV 与时长元数据，INBOUND-VOICE-PUSH-PLAN §三）
+  inboundVoicePushEnabled: boolean
+  // 入站语音内联传输体积闸（base64 record 段超限降级为文本 [语音]；URL 模式不受限）
+  voiceMaxBytes: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -195,8 +219,14 @@ interface ConfigSchema {
   oneBotBroadcastIntervalMs: number
   oneBotDebounceMs: number
   oneBotBatchSize: number
-  imageTransferMode: 'base64' | 'url'
-  imageServerBaseUrl: string
+  // 媒体出站传输模式（作用于图片与语音段；视频恒走 URL 直链。原名 imageTransferMode，
+  // 语音接入后与 mediaServerBaseUrl 一并更名，构造器 migrateMediaConfigKeys 存量迁移）
+  mediaTransferMode: 'base64' | 'url'
+  // 媒体键更名一次性迁移标记（migrateMediaConfigKeys；防默认值合并视图干扰重复判定）
+  mediaConfigKeysMigrated: boolean
+  // 媒体内容的对外可达地址（图片/语音/视频推送直链与插件通道共用；原名 imageServerBaseUrl，
+  // 视频语音入站推送同链路后更名，构造器 migrateMediaServerBaseUrl 存量迁移）
+  mediaServerBaseUrl: string
   flowbotCommand: {
     enabled: boolean
     prefix: string
@@ -301,6 +331,22 @@ export class ConfigService {
       sendCooldownMs: 10000,
       sendBackoffBaseMs: 1500,
       imagePasteCapMs: 1500,
+      imageMaxBytes: 5 * 1024 * 1024,
+      imageCompressEnabled: true,
+      imageCompressKeepResolution: true,
+      imageCompressFormat: 'png',
+      imageCompressPaletteMax: 256,
+      imageUrlTimeoutMs: 15000,
+      imageCdnDirectFetchEnabled: false,
+      imageCdnDirectFetchTimeoutMs: 30000,
+      imageCdnDirectFetchMinIntervalMs: 3000,
+      imageCdnDirectFetchHourlyLimit: 30,
+      imageCdnDirectFetchMaxAgeMs: 600000,
+      imageCdnDirectFetchDiagMd5Log: true,
+      videoCalibrationLogEnabled: false,
+      inboundVideoPushEnabled: false,
+      inboundVoicePushEnabled: false,
+      voiceMaxBytes: 10 * 1024 * 1024,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,
@@ -382,8 +428,9 @@ export class ConfigService {
       oneBotBroadcastIntervalMs: 50,
       oneBotDebounceMs: 350,
       oneBotBatchSize: 50,
-      imageTransferMode: 'base64',
-      imageServerBaseUrl: '',
+      mediaTransferMode: 'base64',
+      mediaConfigKeysMigrated: false,
+      mediaServerBaseUrl: '',
       flowbotCommand: {
         enabled: true,
         prefix: '#flowbot',
@@ -424,6 +471,7 @@ export class ConfigService {
     }
     this.migrateAuthFields()
     this.migrateAiConfig()
+    this.migrateMediaConfigKeys()
   }
 
   // === 状态查询 ===
@@ -934,6 +982,33 @@ export class ConfigService {
         this.store.set('wxidConfigs', wxidConfigs)
       }
     }
+  }
+
+  /** 媒体配置键更名迁移（2026-09-04，视频/语音入站推送与图片共用链路后归位）：
+   * imageTransferMode → mediaTransferMode、imageServerBaseUrl → mediaServerBaseUrl。
+   * 判定不可依赖 persisted 新键取值——conf 的 store.store 是合并默认值后的视图，
+   * 未落盘的新键会读到默认值（'base64'/''），"=== undefined" 判据失效（本次部署实测踩坑：
+   * 用户存量 url 模式被默认值写穿）。故用一次性标记：标记未落 && 旧键有值 → 无条件以旧键
+   * 为准搬移后落标记，此后永不再动（用户改新键不会被回退）；旧键留 store 不删，回滚可读 */
+  private migrateMediaConfigKeys(): void {
+    let persisted: any
+    try {
+      persisted = (this.store as any).store || {}
+    } catch {
+      return
+    }
+    if (persisted.mediaConfigKeysMigrated === true) return
+    const legacyMode = persisted.imageTransferMode
+    if (legacyMode === 'base64' || legacyMode === 'url') {
+      this.set('mediaTransferMode', legacyMode)
+      console.info('[Config] 已迁移 imageTransferMode → mediaTransferMode:', legacyMode)
+    }
+    const legacyUrl = String(persisted.imageServerBaseUrl || '').trim()
+    if (legacyUrl) {
+      this.set('mediaServerBaseUrl', legacyUrl)
+      console.info('[Config] 已迁移 imageServerBaseUrl → mediaServerBaseUrl:', legacyUrl)
+    }
+    this.set('mediaConfigKeysMigrated', true)
   }
 
   private migrateAiConfig(): void {

@@ -2,7 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { imageDecryptService } from './imageDecryptService'
+import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage, resolveInboundVoice as mediaResolveInboundVoice } from './mediaService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
@@ -53,6 +53,29 @@ interface MessagePushPayload {
   imageDecryptFailed?: boolean
   senderIdAlias?: string
   emojiUrl?: string
+  videoPath?: string
+  videoMd5?: string
+  videoPosterPath?: string
+  videoMeta?: {
+    durationSec?: number
+    sizeBytes?: number
+    posterAvailable?: boolean
+    fileMissing?: boolean
+  }
+  voicePath?: string
+  voiceMeta?: {
+    durationSec?: number
+    sizeBytes?: number
+    available: boolean
+    unavailableReason?: 'not_cached' | 'decode_failed'
+  }
+  quoted?: {
+    senderId?: string    // 被引用者 wxid（refermsg chatusr 原样）
+    senderName?: string  // 被引用者显示名（displayname）
+    content?: string     // 被引用原文（媒体引用为归一化占位）
+    svrid?: string       // 被引用消息服务器 ID
+    isSelf: boolean      // FlowBot 裁决：被引用者是否为登录账号（宽松比较）
+  }
 }
 
 const PUSH_CONFIG_KEYS = new Set([
@@ -81,8 +104,6 @@ class MessagePushService {
   private readonly messageTableRescanDelayMs = 500
   private readonly recentRevokeScanSeconds = 150
   private readonly directRevokeScanLimit = 20
-  private readonly imageDecryptMaxRetries = 3
-  private readonly imageDecryptRetryDelayMs = 1000
   private debounceTimer: ReturnType<typeof setTimeout> | null = null
   private messageTableRescanTimer: ReturnType<typeof setTimeout> | null = null
   private processing = false
@@ -833,68 +854,37 @@ class MessagePushService {
     return merged
   }
 
-  private async resolveAndDecryptImage(message: Message, sessionId: string): Promise<string | undefined> {
-    if (Number(message.localType || 0) !== 3) return undefined
-    const imageMd5 = String(message.imageMd5 || '').trim()
-    const imageDatName = String(message.imageDatName || '').trim()
-    if (!imageMd5 && !imageDatName) return undefined
-    const basePayload = {
-      sessionId,
-      imageMd5,
-      imageDatName,
-      createTime: Number(message.createTime || 0),
-      preferFilePath: true,
-      suppressEvents: true
+  /** 入站视频编排已收敛 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 1）：薄委托 */
+  private resolveInboundVideo(message: Message) {
+    return mediaResolveInboundVideo(message)
+  }
+
+  /** 入站图片编排已收敛 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 2/3）：薄委托 */
+  private resolveAndDecryptImage(message: Message, sessionId: string) {
+    return mediaResolveInboundImage(message, sessionId)
+  }
+
+  /** 入站语音（INBOUND-VOICE-PUSH-PLAN §六 #4）：开关开才回源（避免默认链路解码开销）；
+   * DB 定位/silk 解码走 chatService.getVoiceData，可用性归一走 mediaService 信号工厂 */
+  private async resolveInboundVoice(message: Message, sessionId: string) {
+    if (this.configService.get('inboundVoicePushEnabled') !== true) return undefined
+    if (Number(message.localType || 0) !== 34) return undefined
+    try {
+      const result = await chatService.getVoiceData(
+        sessionId,
+        String(message.localId),
+        Number(message.createTime) || undefined,
+        message.serverIdRaw ?? message.serverId,
+        message.senderUsername || undefined
+      )
+      return mediaResolveInboundVoice({
+        voicePath: result.voicePath,
+        durationSec: message.voiceDurationSeconds,
+        error: result.error
+      })
+    } catch {
+      return undefined
     }
-    let lastError: unknown = undefined
-    let thumbPath: string | undefined = undefined
-    for (let attempt = 0; attempt <= this.imageDecryptMaxRetries; attempt++) {
-      if (attempt > 0) {
-        await new Promise((resolve) => setTimeout(resolve, this.imageDecryptRetryDelayMs))
-      }
-      const isLastAttempt = attempt >= this.imageDecryptMaxRetries
-      const preferHd = attempt >= 1
-      const payload = { ...basePayload, preferHd }
-      try {
-        const result = await imageDecryptService.decryptImage(payload)
-        console.log(`[DIAG][MsgPush] attempt=${attempt} preferHd=${preferHd} result.success=${result?.success} isThumb=${result?.isThumb} localPath=${result?.localPath} error=${result?.error}`)
-        if (result?.success && result.localPath) {
-          if (!result.isThumb) {
-            return result.localPath
-          }
-          if (!thumbPath) {
-            thumbPath = result.localPath
-          }
-          if (isLastAttempt) {
-            return thumbPath
-          }
-          if (preferHd && imageMd5) {
-            const hdDat = imageDecryptService.findHdDatForUpgrade(sessionId, imageMd5)
-            console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat search: found=${!!hdDat} path=${hdDat}`)
-            if (hdDat) {
-              const ready = await imageDecryptService.waitForFullDatReady(hdDat, 1500)
-              console.log(`[DIAG][MsgPush] attempt=${attempt} hdDat ready=${ready}`)
-              if (ready) {
-                const hdResult = await imageDecryptService.decryptImageDirect(hdDat, sessionId)
-                console.log(`[DIAG][MsgPush] attempt=${attempt} decryptImageDirect: result=${hdResult}`)
-                if (hdResult) return hdResult
-              }
-            }
-          }
-          continue
-        }
-        lastError = result?.error || 'decrypt_failed'
-        console.log(`[DIAG][MsgPush] attempt=${attempt} failed: ${lastError}`)
-      } catch (e) {
-        lastError = e
-        console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
-      }
-    }
-    if (thumbPath) {
-      return thumbPath
-    }
-    console.warn(`[MessagePushService] Image decrypt failed after ${this.imageDecryptMaxRetries + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
-    return undefined
   }
 
   private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
@@ -937,6 +927,33 @@ class MessagePushService {
     return Array.from(new Set(ids))
   }
 
+  /**
+   * 组装引用信息（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：
+   * isSelf 是 self 映射的仲裁点——FlowBot 同时掌握 myWxid 与 chatusr，
+   * 用宽松比较（trim + lowercase）裁决，插件端据 isSelf 钉死 Reply.sender_id = self_id。
+   */
+  private buildQuotedPayload(message: Message): MessagePushPayload['quoted'] {
+    const senderId = String(message.quotedSenderId || '').trim()
+    const svrid = String(message.quotedSvrid || '').trim()
+    if (!senderId && !svrid) return undefined
+
+    let content = String(message.quotedContent || '').trim()
+    // 媒体引用在解析层先落 __SVRID__ 标记（chatService.parseMediaQuoteMessage），
+    // 推送时未回查原文，不能把内部标记透给下游
+    if (content.startsWith('__SVRID__')) content = '[媒体消息]'
+
+    const myWxid = this.configService.getMyWxidCleaned()
+    const isSelf = Boolean(senderId && myWxid && senderId.toLowerCase() === myWxid.toLowerCase())
+
+    return {
+      senderId: senderId || undefined,
+      senderName: String(message.quotedSender || '').trim() || undefined,
+      content: content || undefined,
+      svrid: svrid || undefined,
+      isSelf
+    }
+  }
+
   private async buildPayload(session: ChatSession, message: Message): Promise<MessagePushPayload | null> {
     const sessionId = String(session.username || '').trim()
     const messageKey = String(message.messageKey || '').trim()
@@ -946,12 +963,15 @@ class MessagePushService {
     const sessionType = this.getSessionType(sessionId, session)
     const content = this.getMessageDisplayContent(message)
     const rawid = this.getMessageRawId(message)
+    const quoted = this.buildQuotedPayload(message)
 
     const createTime = Number(message.createTime || 0)
     const imageMd5 = String(message.imageMd5 || '').trim()
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
+    const video = await this.resolveInboundVideo(message)
+    const voice = await this.resolveInboundVoice(message, sessionId)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1021,7 +1041,10 @@ class MessagePushService {
         imageBaseMd5: imageMd5 || undefined,
         imageDecryptFailed,
         senderIdAlias,
-        emojiUrl
+        emojiUrl,
+        quoted,
+        ...(video ?? {}),
+        ...(voice ?? {})
       }
     }
 
@@ -1037,6 +1060,7 @@ class MessagePushService {
       sessionId,
       sessionType,
       rawid,
+      selfId: this.configService.getMyWxidCleaned() || undefined,
       avatarUrl,
       sourceName,
       senderId,
@@ -1047,7 +1071,10 @@ class MessagePushService {
       imageBaseMd5: imageMd5 || undefined,
       imageDecryptFailed,
       senderIdAlias,
-      emojiUrl
+      emojiUrl,
+      quoted,
+      ...(video ?? {}),
+      ...(voice ?? {})
     }
   }
 
@@ -1653,9 +1680,13 @@ class MessagePushService {
         return cleanOfficialPrefix(message.cardNickname || '[名片]')
       case lt === 48:
         return '[位置]'
-      case (lt & 0xFF) === 49:
+      case (lt & 0xFF) === 49: {
         if (message.emojiCdnUrl) return '[表情]'
-        return cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
+        const base = cleanOfficialPrefix(message.linkTitle || message.fileName || '[消息]')
+        const linkUrl = String(message.linkUrl || '').trim()
+        // 卡片分享附带 URL（第二行纯链接），供下游（AstrBot 插件）按 URL 解析
+        return linkUrl ? `${base}\n${linkUrl}` : base
+      }
       default:
         return cleanOfficialPrefix(normalizeTextContent(message.parsedContent || message.rawContent) || null)
     }

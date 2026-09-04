@@ -1723,7 +1723,7 @@ select.panel-input {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   Filter Page (消息过滤标签与会话列表)
+   Filter Page (推送过滤标签与会话列表)
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .select-all-bar {
@@ -2315,7 +2315,7 @@ html.lg-svg .bot-card::after {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   发送管理页 — 仪表盘 / 队列 / 折叠配置 / 悬浮保存条
+   消息管理页 — 仪表盘 / 队列 / 折叠配置 / 悬浮保存条
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* 熔断警示横幅 */
@@ -2711,12 +2711,14 @@ html.lg-svg .bot-card::after {
 .strategy-name { font-size: 13.5px; font-weight: 700; color: var(--text); }
 .strategy-desc { font-size: 11.5px; color: var(--text-muted); line-height: 1.55; margin-top: 6px; }
 
-/* 悬浮保存条 */
+/* 悬浮保存条（teleport 到 body，纯视口悬浮，不可拖动） */
 .save-bar {
   position: fixed;
   bottom: 28px;
+  top: auto;
   left: 50%;
   transform: translateX(-50%);
+  height: fit-content;
   display: flex;
   align-items: center;
   gap: 12px;

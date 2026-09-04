@@ -68,6 +68,8 @@ export interface Message {
   // 引用消息
   quotedContent?: string
   quotedSender?: string
+  quotedSenderId?: string  // 被引用者 wxid（refermsg chatusr，self 判定键）
+  quotedSvrid?: string     // 被引用消息服务器 ID
   // Type 49 细分字段
   linkTitle?: string        // 链接/文件标题
   linkUrl?: string          // 链接 URL

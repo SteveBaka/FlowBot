@@ -22,8 +22,8 @@ const INTER_MESSAGE_DELAY_MS = 800
 const POST_SEND_SETTLE_MS = 500
 const INPUT_CLICK_DELAY_MS = 200
 
-// 图片粘贴防冻结：仅 >5MB 拒绝粘贴；失败熔断 30s
-const MAX_PASTE_IMAGE_BYTES = 5 * 1024 * 1024
+// 图片粘贴防冻结：默认仅 >5MB 拒绝粘贴（imageMaxBytes 可配置）；失败熔断 30s
+const DEFAULT_MAX_PASTE_IMAGE_BYTES = 5 * 1024 * 1024
 const IMAGE_PASTE_COOLDOWN_MS = 30 * 1000
 
 // ─── 自适应背压（P1-L2）──────────────────────────────────────────────
@@ -788,10 +788,11 @@ export class LinuxSender implements IPlatformSender {
       await new Promise(r => setTimeout(r, effectiveWait))
     } else if (imagePath) {
       log(`Pasting image: ${imagePath}`)
-      // 兜底：探测图片体积，>5MB 拒绝并触发熔断（防微信粘贴冻结）
+      // 兜底：探测图片体积，超 imageMaxBytes(默认5MB，可调) 拒绝并触发熔断（防微信粘贴冻结）
       const bytes = this.probeImageBytes(imagePath)
-      if (bytes !== null && bytes > MAX_PASTE_IMAGE_BYTES) {
-        warn(`Image too large to paste (${Math.round(bytes / 1024 / 1024)}MB > 5MB), rejected`)
+      const imageMax = Math.floor(getConfigNumber('imageMaxBytes', DEFAULT_MAX_PASTE_IMAGE_BYTES))
+      if (bytes !== null && bytes > imageMax) {
+        warn(`Image too large to paste (${Math.round(bytes / 1024 / 1024)}MB > ${Math.round(imageMax / 1024 / 1024)}MB), rejected`)
         this.triggerImagePasteCooldown()
         return false
       }
@@ -822,6 +823,10 @@ export class LinuxSender implements IPlatformSender {
     }
 
     log(`Pressing Enter to send...`)
+    // [Calib] T0 标记（标定协议）：受 videoCalibrationLogEnabled 开关控制（WebUI 消息管理）
+    if (ConfigService.getInstance().get('videoCalibrationLogEnabled') === true) {
+      log(`[Calib] T0 media-enter ts=${Date.now()} kind=${videoPath ? 'video' : 'image'}`)
+    }
     // 探针基线：Enter 前抓取（媒体卡片已渲染、尚未发送）——SendAck 超时时对比判定卡框/已发出。
     // 必须在 Enter 前：Enter 后输入框已被微信清空，基线=空框会导致差异恒为 0 而误判"仍在输入框"。
     if (onMediaPasted) {
@@ -1214,7 +1219,7 @@ export class LinuxSender implements IPlatformSender {
     }
   }
 
-  /** 发送/队列运行状态（供 WebUI「发送管理」页只读回显） */
+  /** 发送/队列运行状态（供 WebUI「消息管理」页只读回显） */
   getSendStatus(): Record<string, any> {
     let mode: DelayMode = this.delayMode
     try {

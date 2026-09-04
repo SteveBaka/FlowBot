@@ -16,7 +16,7 @@ import { wcdbService } from './services/wcdbService'
 import { chatService } from './services/chatService'
 import { imageDecryptService } from './services/imageDecryptService'
 import { imagePreloadService } from './services/imagePreloadService'
-import { prepareVideoForSend } from './services/outboundMediaService'
+import { prepareVideoForSend, prepareImageForSend } from './services/mediaService'
 import { analyticsService } from './services/analyticsService'
 import { groupAnalyticsService } from './services/groupAnalyticsService'
 import { annualReportService } from './services/annualReportService'
@@ -4510,7 +4510,7 @@ app.whenReady().then(async () => {
 
   await httpService.autoStart()
 
-  // ─── 图片文件 TTL 清理 ──────────────────────────────────────────────
+  // 图片文件 TTL 清理
   interface PendingCleanup {
     imagePath: string
     expiresAt: number
@@ -4567,61 +4567,9 @@ app.whenReady().then(async () => {
     }
   }
 
-  async function prepareImageForSend(fileUrl: string): Promise<{ imagePath: string; mime: string } | null> {
-    if (!fileUrl) return null
-    try {
-      if (fileUrl.startsWith('base64://')) {
-        const b64 = fileUrl.slice(9)
-        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}.png`)
-        await writeFile(tmpPath, Buffer.from(b64, 'base64'))
-        return { imagePath: tmpPath, mime: 'image/png' }
-      }
-      if (fileUrl.startsWith('file://')) {
-        const filePath = decodeURIComponent(fileUrl.slice(7))
-        const ext = extname(filePath).toLowerCase() || '.png'
-        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}${ext}`)
-        await copyFile(filePath, tmpPath)
-        const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.gif' ? 'image/gif' : ext === '.bmp' ? 'image/bmp' : ext === '.webp' ? 'image/webp' : 'image/png'
-        return { imagePath: tmpPath, mime }
-      }
-      if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://')) {
-        const mod = fileUrl.startsWith('https') ? https : http
-        const result = await new Promise<{ data: Buffer; contentType: string | undefined }>((resolve, reject) => {
-          mod.get(fileUrl, (res) => {
-            if (res.statusCode !== 200) { reject(new Error(`HTTP ${res.statusCode}`)); return }
-            const contentType = res.headers['content-type']
-            const chunks: Buffer[] = []
-            res.on('data', (c: Buffer) => chunks.push(c))
-            res.on('end', () => resolve({ data: Buffer.concat(chunks), contentType }))
-            res.on('error', reject)
-          }).on('error', reject)
-        })
-        let ext = '.png'
-        let mime = 'image/png'
-        if (result.contentType) {
-          const ct = result.contentType.toLowerCase().split(';')[0].trim()
-          if (ct === 'image/jpeg') { ext = '.jpg'; mime = 'image/jpeg' }
-          else if (ct === 'image/gif') { ext = '.gif'; mime = 'image/gif' }
-          else if (ct === 'image/bmp') { ext = '.bmp'; mime = 'image/bmp' }
-          else if (ct === 'image/webp') { ext = '.webp'; mime = 'image/webp' }
-        } else {
-          const header = result.data.subarray(0, 4)
-          if (header[0] === 0xFF && header[1] === 0xD8) { ext = '.jpg'; mime = 'image/jpeg' }
-          else if (header[0] === 0x47 && header[1] === 0x49) { ext = '.gif'; mime = 'image/gif' }
-          else if (header[0] === 0x42 && header[1] === 0x4D) { ext = '.bmp'; mime = 'image/bmp' }
-          else if (header[0] === 0x52 && header[1] === 0x49) { ext = '.webp'; mime = 'image/webp' }
-        }
-        const tmpPath = join(tmpdir(), `weflow_ob_${randomUUID()}${ext}`)
-        await writeFile(tmpPath, result.data)
-        return { imagePath: tmpPath, mime }
-      }
-      return null
-    } catch (e) {
-      console.error('[App] prepareImageForSend failed:', e)
-      return null
-    }
-  }
-
+  // 图片归一已收敛到 mediaService.prepareImageForSend（阶段 2）：OneBot 图片路径直接复用，
+  // 统一超时 + imageMaxBytes 闸 + 分界点压缩（§11.5），修复原本地版"无超时无闸"（OneBot 大图卡顿根因）。
+  // 原 prepareImageForSend 本地实现（:4570-4623）已删除，调用点解析到 import 的 mediaService 版本。
   // 启动 OneBot bot 管理器
   try {
     const { startBotManager, setBotMessageCallback } = require('./services/botManager')

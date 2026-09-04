@@ -29,19 +29,16 @@ function getStaticFfmpegPath(): string | null {
       }
     }
 
-    // 方法2: 手动构建路径（开发环境）
-    const devPath = join(process.cwd(), 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
-    if (existsSync(devPath)) {
-      return devPath
+    // 方法2: 开发环境 / 方法3: 打包环境（平台感知，同 mediaService.getFfmpegPath）
+    const bin = process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg'
+    const candidates: string[] = [
+      join(process.cwd(), 'node_modules', 'ffmpeg-static', bin)
+    ]
+    if (app?.isPackaged && process.resourcesPath) {
+      candidates.unshift(join(process.resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', bin))
     }
-
-    // 方法3: 打包后的路径
-    if (app?.isPackaged) {
-      const resourcesPath = process.resourcesPath
-      const packedPath = join(resourcesPath, 'app.asar.unpacked', 'node_modules', 'ffmpeg-static', 'ffmpeg.exe')
-      if (existsSync(packedPath)) {
-        return packedPath
-      }
+    for (const p of candidates) {
+      if (existsSync(p)) return p
     }
 
     return null

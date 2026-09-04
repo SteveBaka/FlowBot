@@ -3,6 +3,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { execSync, spawn } = require('child_process')
+const { Readable } = require('stream')
 
 const PORT = process.env.WEBUI_PORT || 7300
 // 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
@@ -230,33 +231,109 @@ function ensureApiToken() {
 
 const imageTokens = new Map() // token -> { path, expires }
 
-// 推送图片直链基地址：优先读 WebUI 设置（WeFlow config imageServerBaseUrl，即设置页"对外可达地址"），
-// 其次 env PUSH_IMAGE_BASE_URL，最后默认 127.0.0.1:7400
+// 推送媒体直链基地址：优先读 WebUI 设置（WeFlow config mediaServerBaseUrl，原 imageServerBaseUrl，
+// 设置页"媒体传输模式 → 对外可达地址"，图片/语音/视频直链共用），兼容读旧键；其次 env
+// PUSH_IMAGE_BASE_URL，最后默认 127.0.0.1:7400
 function getPushImageBaseUrl() {
   try {
     const cfg = loadWeFlowConfig()
-    const url = String(cfg.imageServerBaseUrl || '').trim()
+    const url = String(cfg.mediaServerBaseUrl || cfg.imageServerBaseUrl || '').trim()
     if (url) return url.replace(/\/+$/, '')
   } catch {}
   return (process.env.PUSH_IMAGE_BASE_URL || '').replace(/\/+$/, '') || 'http://127.0.0.1:7400'
 }
 
-function registerImagePath(filePath) {
+function registerImagePath(filePath, ttlMs) {
   if (!filePath || !fs.existsSync(filePath)) return null
-  let token = ''
-  const chars = '0123456789abcdefghijklmnopqrstuvwxyz'
-  do {
-    token = ''
-    for (let i = 0; i < 16; i++) token += chars[Math.floor(Math.random() * 36)]
-  } while (imageTokens.has(token))
-  imageTokens.set(token, { path: filePath, expires: Date.now() + 120000 })
+  const token = randMediaToken()
+  imageTokens.set(token, { path: filePath, expires: Date.now() + (ttlMs || 120000) })
   return token
 }
 
 function mimeByExt(fp) {
   const ext = path.extname(fp).toLowerCase()
-  const map = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp' }
+  const map = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.mp4': 'video/mp4', '.mov': 'video/quicktime', '.mkv': 'video/x-matroska', '.webm': 'video/webm', '.avi': 'video/x-msvideo', '.wav': 'audio/wav', '.silk': 'audio/silk', '.amr': 'audio/amr' }
   return map[ext] || 'application/octet-stream'
+}
+
+// 视频文件自建 token（插件 API 通道视频直链）：与 imageTokens 同构，TTL 1h 对齐
+// OneBot 侧 /api/media；文件与本进程同容器，直接读盘服务，无需回源 5031
+const mediaTokens = new Map() // token -> { path, expires }
+const MEDIA_TOKEN_TTL_MS = 60 * 60 * 1000
+
+function randMediaToken() {
+  const chars = '0123456789abcdefghijklmnopqrstuvwxyz'
+  let token = ''
+  do {
+    token = ''
+    for (let i = 0; i < 16; i++) token += chars[Math.floor(Math.random() * 36)]
+  } while (imageTokens.has(token) || mediaTokens.has(token))
+  return token
+}
+
+function registerMediaPath(filePath) {
+  if (!filePath || !fs.existsSync(filePath)) return null
+  const token = randMediaToken()
+  mediaTokens.set(token, { path: filePath, expires: Date.now() + MEDIA_TOKEN_TTL_MS })
+  return token
+}
+
+/** 带 Range/HEAD 的文件服务（/api/media 自建 token 路径）：
+ * 单段 bytes=N-M / -N 后缀；非法/越界回 416；HEAD 只回头 */
+function serveFileWithRange(req, res, filePath, contentType) {
+  let stat
+  try { stat = fs.statSync(filePath) } catch { json(res, { ok: false, error: 'Media file missing' }, 404); return }
+  const base = { 'Content-Type': contentType, 'Cache-Control': 'no-cache, max-age=0', 'Accept-Ranges': 'bytes' }
+  const m = req.headers && req.headers.range ? /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range).trim()) : null
+  if (m && (m[1] || m[2])) {
+    let start = m[1] ? parseInt(m[1], 10) : (m[2] ? Math.max(0, stat.size - parseInt(m[2], 10)) : 0)
+    let end = (m[1] && m[2]) ? Math.min(parseInt(m[2], 10), stat.size - 1) : stat.size - 1
+    if (isNaN(start) || isNaN(end) || start > end || start >= stat.size) {
+      res.writeHead(416, { 'Content-Range': 'bytes */' + stat.size })
+      res.end()
+      return
+    }
+    res.writeHead(206, Object.assign({}, base, { 'Content-Range': 'bytes ' + start + '-' + end + '/' + stat.size, 'Content-Length': end - start + 1 }))
+    if (req.method === 'HEAD') { res.end(); return }
+    fs.createReadStream(filePath, { start: start, end: end }).pipe(res)
+    return
+  }
+  res.writeHead(200, Object.assign({}, base, { 'Content-Length': stat.size }))
+  if (req.method === 'HEAD') { res.end(); return }
+  fs.createReadStream(filePath).pipe(res)
+}
+
+// /api/media 统一入口（7300 主服务与 7400 插件 API 共用）：
+// 自建 token 直接读盘；未命中回源 5031（Range/HEAD 头透传，206/Content-Range 原样回传）
+async function serveMediaToken(req, res, token) {
+  if (!/^[a-z0-9]{16}$/.test(token || '')) {
+    json(res, { ok: false, error: 'Invalid token format' }, 400)
+    return
+  }
+  const localEntry = mediaTokens.get(token)
+  if (localEntry && localEntry.expires > Date.now()) {
+    serveFileWithRange(req, res, localEntry.path, mimeByExt(localEntry.path))
+    return
+  }
+  try {
+    const headers = {}
+    if (req.headers && req.headers.range) headers['Range'] = req.headers.range
+    const resp = await fetch('http://127.0.0.1:' + FLOW_PORT + '/api/media?token=' + token, { method: req.method === 'HEAD' ? 'HEAD' : 'GET', headers: headers })
+    if (!resp.ok || (req.method !== 'HEAD' && !resp.body)) {
+      json(res, { ok: false, error: 'Media not found or expired' }, resp.status)
+      return
+    }
+    const out = { 'Content-Type': resp.headers.get('content-type') || 'application/octet-stream', 'Cache-Control': 'no-cache, max-age=0', 'Accept-Ranges': 'bytes' }
+    for (const k of ['content-length', 'content-range']) {
+      const v = resp.headers.get(k)
+      if (v) out[k] = v
+    }
+    res.writeHead(resp.status, out)
+    if (req.method === 'HEAD') { res.end(); return }
+    Readable.fromWeb(resp.body).pipe(res)
+  } catch (err) {
+    json(res, { ok: false, error: 'Media service unavailable' }, 502)
+  }
 }
 
 // ─── Disclaimer persistence ───────────────────────────────────────────────────
@@ -429,7 +506,14 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image') {
+  // 入站视频 token（INBOUND-VIDEO-PUSH-PLAN §2.3）：自建 token 直接读盘（带 Range/HEAD），
+  // 否则回源 5031 流式转发（serveMediaToken，7300/7400 共用）
+  if (p === '/api/media' && (req.method === 'GET' || req.method === 'HEAD')) {
+    await serveMediaToken(req, res, url.searchParams.get('token'))
+    return
+  }
+
+  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image' && p !== '/api/media') {
     if (!isAuthenticated(req)) {
       json(res, { ok: false, error: 'Unauthorized' }, 401)
       return
@@ -1106,6 +1190,13 @@ function startPluginApiServer(port, token) {
       return
     }
 
+    // 视频直链（ADAPTER-MEDIA-CONTRACT §2.1）：与 /api/image 同构免鉴权，
+    // 自建 token 读盘 + Range/HEAD，未命中回源 5031
+    if (p === '/api/media' && (req.method === 'GET' || req.method === 'HEAD')) {
+      await serveMediaToken(req, res, u.searchParams.get('token'))
+      return
+    }
+
     // API Key 鉴权（该 bot 的 token，即 AstrBot 适配器所用）
     if (p.startsWith('/api/') && !isAuthorized(req, token)) {
       json(res, { ok: false, error: 'Unauthorized' }, 401)
@@ -1582,13 +1673,38 @@ function normalizePushPayload(p) {
   const realSessionId = String(p.sessionId || '')
   if (!realSessionId) return null
   // 仅转发真正的消息事件（ready/心跳等无 rawid 与内容的事件忽略）
-  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl) return null
+  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta) return null
   const isGroup = realSessionId.endsWith('@chatroom')
-  const type = p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text')
+  // 入站视频（ADAPTER-MEDIA-CONTRACT §5）：无图无表情时 type='video'，
+  // 同时透出容器内路径（同机排障用）与自建 token 直链（跨容器可用）
+  const hasVideo = !!(p.videoPath || p.videoMd5 || p.videoPosterPath || p.videoMeta)
+  // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：语音消息独占事件，字段组镜像 video
+  const hasVoice = !!(p.voicePath || p.voiceMeta)
+  const type = hasVideo && !p.imagePath && !p.emojiUrl ? 'video'
+    : (hasVoice && !hasVideo && !p.imagePath && !p.emojiUrl ? 'voice'
+      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text')))
   let imageUrl
   if (p.imagePath) {
     const token = registerImagePath(p.imagePath)
     if (token) imageUrl = getPushImageBaseUrl() + '/api/image?token=' + token
+  }
+  let videoUrl
+  if (p.videoPath) {
+    const token = registerMediaPath(p.videoPath)
+    if (token) videoUrl = getPushImageBaseUrl() + '/api/media?token=' + token
+  }
+  let videoPosterUrl
+  if (p.videoPosterPath) {
+    // 封面与视频同寿命 1h（对齐 OneBot 侧 cover TTL）
+    const token = registerImagePath(p.videoPosterPath, 60 * 60 * 1000)
+    if (token) videoPosterUrl = getPushImageBaseUrl() + '/api/image?token=' + token
+  }
+  // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：token 直链与 video 同机制（registerMediaPath，TTL 1h）；
+  // 降级（blob 未缓存/解码失败）时 voice_url 缺省，voice_meta.duration_sec 恒可用
+  let voiceUrl
+  if (p.voicePath) {
+    const token = registerMediaPath(p.voicePath)
+    if (token) voiceUrl = getPushImageBaseUrl() + '/api/media?token=' + token
   }
   // 自定义 wxid：私聊会话身份用微信号 alias
   const customWxid = isGroup ? null : getCustomWxid(realSessionId)
@@ -1613,7 +1729,26 @@ function normalizePushPayload(p) {
       image_path: p.imagePath || undefined,
       image_url: imageUrl,
       emoji_url: p.emojiUrl || undefined,
-      group_name: isGroup ? (p.groupName || undefined) : undefined
+      group_name: isGroup ? (p.groupName || undefined) : undefined,
+      video_path: p.videoPath || undefined,
+      video_md5: p.videoMd5 || undefined,
+      video_meta: p.videoMeta || undefined,
+      video_url: videoUrl,
+      video_poster_path: p.videoPosterPath || undefined,
+      video_poster_url: videoPosterUrl,
+      // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：duration_sec 恒透出（来自消息 XML，降级时也有）；
+      // voice_meta.available=false 表示 WAV 不可用（未缓存/解码失败），适配器应跳过 ASR
+      voice_path: p.voicePath || undefined,
+      voice_url: voiceUrl,
+      voice_duration_sec: p.voiceMeta && Number.isFinite(Number(p.voiceMeta.durationSec)) ? Number(p.voiceMeta.durationSec) : undefined,
+      voice_meta: p.voiceMeta || undefined,
+      // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，
+      // 插件端据 quoted_is_self 钉死 Reply.sender_id = self_id
+      quoted_sender_id: p.quoted && p.quoted.senderId ? String(p.quoted.senderId) : undefined,
+      quoted_sender_name: p.quoted && p.quoted.senderName ? String(p.quoted.senderName) : undefined,
+      quoted_content: p.quoted && p.quoted.content ? String(p.quoted.content) : undefined,
+      quoted_svrid: p.quoted && p.quoted.svrid ? String(p.quoted.svrid) : undefined,
+      quoted_is_self: p.quoted ? Boolean(p.quoted.isSelf) : undefined
     }
   }
 }

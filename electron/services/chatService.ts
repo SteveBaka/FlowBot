@@ -10,6 +10,7 @@ import * as crypto from 'crypto'
 import { app, BrowserWindow, dialog } from 'electron'
 import { ConfigService } from './config'
 import { wcdbService } from './wcdbService'
+import { parseImageCdnFetchParams } from './mediaService'
 import { MessageCacheService } from './messageCacheService'
 import { ContactCacheService, ContactCacheEntry } from './contactCacheService'
 import { SessionStatsCacheService, SessionStatsCacheEntry, SessionStatsCacheStats } from './sessionStatsCacheService'
@@ -61,6 +62,8 @@ export interface Message {
   // 引用消息相关
   quotedContent?: string
   quotedSender?: string
+  quotedSenderId?: string  // 被引用者 wxid（refermsg chatusr，self 判定键）
+  quotedSvrid?: string     // 被引用消息服务器 ID
   // 图片/视频相关
   imageMd5?: string
   imageDatName?: string
@@ -5037,6 +5040,8 @@ class ChatService {
       let emojiMd5: string | undefined
       let quotedContent: string | undefined
       let quotedSender: string | undefined
+      let quotedSenderId: string | undefined
+      let quotedSvrid: string | undefined
       let imageMd5: string | undefined
       let imageDatName: string | undefined
       let videoMd5: string | undefined
@@ -5131,6 +5136,8 @@ class ChatService {
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 43) {
         // 视频消息：优先从 packed_info_data 提取真实文件名（32位十六进制），再回退 XML
         videoMd5 = this.parseVideoFileNameFromRow(row, content)
@@ -5138,12 +5145,16 @@ class ChatService {
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 34 && content) {
         voiceDurationSeconds = this.parseVoiceDurationSeconds(content)
         // 解析语音消息中的引用信息
         const quoteInfo = this.parseMediaQuoteMessage(content, sessionId)
         if (quoteInfo.content) quotedContent = quoteInfo.content
         if (quoteInfo.sender) quotedSender = quoteInfo.sender
+        if (quoteInfo.senderId) quotedSenderId = quoteInfo.senderId
+        if (quoteInfo.svrid) quotedSvrid = quoteInfo.svrid
       } else if (localType === 42 && content) {
         // 名片消息
         const cardInfo = this.parseCardInfo(content)
@@ -5176,6 +5187,8 @@ class ChatService {
         // 引用消息（appmsg type=57）的 quotedContent/quotedSender
         if (type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
         if (type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        if (type49Info.quotedSenderId !== undefined) quotedSenderId = type49Info.quotedSenderId
+        if (type49Info.quotedSvrid !== undefined) quotedSvrid = type49Info.quotedSvrid
         if (type49Info.xmlType === '8') {
           const emojiInfo = this.parseEmojiInfo(content)
           if (emojiInfo.cdnUrl) emojiCdnUrl = emojiInfo.cdnUrl
@@ -5185,6 +5198,8 @@ class ChatService {
         const quoteInfo = this.parseQuoteMessage(content)
         quotedContent = quoteInfo.content
         quotedSender = quoteInfo.sender
+        quotedSenderId = quoteInfo.senderId
+        quotedSvrid = quoteInfo.svrid
       }
 
       const looksLikeAppMsg = Boolean(content && (content.includes('<appmsg') || content.includes('&lt;appmsg')))
@@ -5227,6 +5242,8 @@ class ChatService {
         transferReceiverUsername = transferReceiverUsername || type49Info.transferReceiverUsername
         if (!quotedContent && type49Info.quotedContent !== undefined) quotedContent = type49Info.quotedContent
         if (!quotedSender && type49Info.quotedSender !== undefined) quotedSender = type49Info.quotedSender
+        if (!quotedSenderId && type49Info.quotedSenderId !== undefined) quotedSenderId = type49Info.quotedSenderId
+        if (!quotedSvrid && type49Info.quotedSvrid !== undefined) quotedSvrid = type49Info.quotedSvrid
       }
 
       const localId = this.getRowInt(row, ['local_id'], 0)
@@ -5258,6 +5275,8 @@ class ChatService {
         emojiMd5,
         quotedContent,
         quotedSender,
+        quotedSenderId,
+        quotedSvrid,
         imageMd5,
         imageDatName,
         videoMd5,
@@ -5650,6 +5669,15 @@ class ChatService {
   }
 
   /**
+   * 解析图片消息的 CDN 直取参数（IMAGE-HD-DOWNLOAD-ANALYSIS §8.4/§8.6）
+   * 4.x 的 cdn*url 是 DER filekey 而非 URL；直取需要 filekey+aeskey+length 三参数
+   * 实现已下沉 mediaService（MEDIA-INBOUND-CONVERGENCE-PLAN Step 2/3），此处薄委托保兼容
+   */
+  parseImageCdnFetchParams(content: string): { fileKey?: string; aesKey?: string; md5?: string; fileLen?: number; hdLen?: number } {
+    return parseImageCdnFetchParams(content)
+  }
+
+  /**
    * 解析视频MD5
    * 注意：提取 md5 字段用于查询 hardlink.db，获取实际视频文件名
    */
@@ -5879,7 +5907,7 @@ class ChatService {
   /**
    * 解析引用消息
    */
-  private parseQuoteMessage(content: string): { content?: string; sender?: string } {
+  private parseQuoteMessage(content: string): { content?: string; sender?: string; senderId?: string; svrid?: string } {
     try {
       const normalizedContent = this.decodeHtmlEntities(content || '')
       // 提取 refermsg 部分
@@ -5891,6 +5919,10 @@ class ChatService {
       }
 
       const referMsgXml = normalizedContent.substring(referMsgStart, referMsgEnd + 11)
+
+      // 被引用者 wxid（self 判定键）与被引用消息 svrid（reply id / 审计）
+      const senderId = this.extractXmlValue(referMsgXml, 'chatusr') || undefined
+      const svrid = this.extractXmlValue(referMsgXml, 'svrid') || undefined
 
       // 提取发送者名称
       let displayName = this.extractXmlValue(referMsgXml, 'displayname')
@@ -5950,7 +5982,9 @@ class ChatService {
 
       return {
         content: displayContent,
-        sender: displayName || undefined
+        sender: displayName || undefined,
+        senderId,
+        svrid
       }
     } catch {
       return {}
@@ -5961,7 +5995,7 @@ class ChatService {
    * 解析媒体消息(图片/视频/语音)中的引用信息
    * 这些消息的引用信息在 <extcommoninfo><refermsg> 中
    */
-  private parseMediaQuoteMessage(content: string, sessionId: string): { content?: string; sender?: string } {
+  private parseMediaQuoteMessage(content: string, sessionId: string): { content?: string; sender?: string; senderId?: string; svrid?: string } {
     try {
       const normalizedContent = this.decodeHtmlEntities(content || '')
       const referMsgStart = normalizedContent.indexOf('<refermsg>')
@@ -5980,9 +6014,12 @@ class ChatService {
         return {}
       }
 
+      // 被引用者 wxid：媒体引用同样需要 self 判定（引用 bot 图片/视频/语音场景）
+      const senderId = this.extractXmlValue(referMsgXml, 'chatusr') || undefined
+
       // 简化方案:返回 svrid 标记
       console.log('[DEBUG] parseMediaQuoteMessage - 返回标记:', `__SVRID__${svrid}__`)
-      return { content: `__SVRID__${svrid}__` }
+      return { content: `__SVRID__${svrid}__`, senderId, svrid }
     } catch {
       return {}
     }
@@ -6170,6 +6207,8 @@ class ChatService {
     xmlType?: string
     quotedContent?: string
     quotedSender?: string
+    quotedSenderId?: string
+    quotedSvrid?: string
     linkTitle?: string
     linkUrl?: string
     linkThumb?: string
@@ -6371,6 +6410,8 @@ class ChatService {
         const quoteInfo = this.parseQuoteMessage(content)
         result.quotedContent = quoteInfo.content
         result.quotedSender = quoteInfo.sender
+        result.quotedSenderId = quoteInfo.senderId
+        result.quotedSvrid = quoteInfo.svrid
       } else if (xmlType === '53') {
         result.appMsgKind = 'solitaire'
       } else if ((xmlType === '5' || xmlType === '49') && (sourceUsername?.startsWith('gh_') || appName?.includes('公众号') || sourceName)) {
@@ -8326,7 +8367,7 @@ class ChatService {
   /**
    * getVoiceData（主用批量专属接口读取语音数据）
    */
-  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; error?: string }> {
+  async getVoiceData(sessionId: string, msgId: string, createTime?: number, serverId?: string | number, senderWxidOpt?: string): Promise<{ success: boolean; data?: string; voicePath?: string; error?: string }> {
     const startTime = Date.now()
     const verboseVoiceTrace = process.env.WEFLOW_VOICE_TRACE === '1'
     const msgCreateTimeLabel = (value?: number): string => {
@@ -8441,24 +8482,30 @@ class ChatService {
       // 使用 sessionId + createTime + msgId 作为缓存 key，避免同秒语音串音
       const cacheKey = this.getVoiceCacheKey(sessionId, String(localId), msgCreateTime)
 
+      // WAV 落盘路径（INBOUND-VOICE-PUSH-PLAN：随成功返回透出，推送层据其注册 token；UI/导出不读，零影响）
+      const voiceCacheDir = this.getVoiceCacheDir()
+      const wavFilePath = join(voiceCacheDir, `${cacheKey}.wav`)
+
       // 检查 WAV 内存缓存
       const wavCache = this.voiceWavCache.get(cacheKey)
       if (wavCache) {
         lookupPath.push('命中内存WAV缓存')
+        // 历史内存缓存可能无对应盘文件（写盘曾失败）：补写后再透出路径，保证 voicePath 恒有效
+        if (!existsSync(wavFilePath)) {
+          await this.cacheVoiceWavToFile(cacheKey, wavCache)
+        }
         logLookupPath('success', '内存缓存')
-        return { success: true, data: wavCache.toString('base64') }
+        return { success: true, data: wavCache.toString('base64'), voicePath: wavFilePath }
       }
 
       // 检查 WAV 文件缓存
-      const voiceCacheDir = this.getVoiceCacheDir()
-      const wavFilePath = join(voiceCacheDir, `${cacheKey}.wav`)
       if (existsSync(wavFilePath)) {
         try {
           const wavData = readFileSync(wavFilePath)
           this.cacheVoiceWav(cacheKey, wavData)
           lookupPath.push('命中磁盘WAV缓存')
           logLookupPath('success', '磁盘缓存')
-          return { success: true, data: wavData.toString('base64') }
+          return { success: true, data: wavData.toString('base64'), voicePath: wavFilePath }
         } catch (e) {
           lookupPath.push('命中磁盘WAV缓存但读取失败')
           console.error('[Voice] 读取缓存文件失败:', e)
@@ -8522,13 +8569,13 @@ class ChatService {
       // 缓存 WAV 数据到内存
       this.cacheVoiceWav(cacheKey, wavData)
 
-      // 缓存 WAV 数据到文件（异步，不阻塞返回）
-      this.cacheVoiceWavToFile(cacheKey, wavData)
+      // 缓存 WAV 数据到文件（等待落盘：voicePath 随返回值透出给推送层，必须先保证文件有效）
+      await this.cacheVoiceWavToFile(cacheKey, wavData)
 
       lookupPath.push(`总耗时=${t8 - startTime}ms`)
       logLookupPath('success')
 
-      return { success: true, data: wavData.toString('base64') }
+      return { success: true, data: wavData.toString('base64'), voicePath: wavFilePath }
     } catch (e) {
       lookupPath.push(`异常: ${String(e)}`)
       logLookupPath('fail', String(e))

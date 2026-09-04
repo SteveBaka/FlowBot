@@ -713,8 +713,8 @@ var SettingsPage = {
         wf.httpEnabled = d.httpApiEnabled || false
         wf.httpPort = d.httpApiPort || 5031
         wf.httpToken = (d.httpApiToken && d.httpApiToken !== '[encrypted]') ? d.httpApiToken : ''
-        imgTransfer.mode = d.imageTransferMode || 'base64'
-        imgTransfer.baseUrl = d.imageServerBaseUrl || ''
+        imgTransfer.mode = d.mediaTransferMode || d.imageTransferMode || 'base64'
+        imgTransfer.baseUrl = d.mediaServerBaseUrl || d.imageServerBaseUrl || ''
         if (d.flowbotCommand) {
           flowbot.enabled = d.flowbotCommand.enabled !== false
           flowbot.prefix = d.flowbotCommand.prefix || '#flowbot'
@@ -756,8 +756,8 @@ var SettingsPage = {
           httpApiEnabled: wf.httpEnabled,
           httpApiPort: Number(wf.httpPort),
           httpApiToken: wf.httpToken || undefined,
-          imageTransferMode: imgTransfer.mode,
-          imageServerBaseUrl: trimmedUrl,
+          mediaTransferMode: imgTransfer.mode,
+          mediaServerBaseUrl: trimmedUrl,
           flowbotCommand: {
             enabled: flowbot.enabled,
             prefix: flowbot.prefix || '#flowbot',
@@ -848,12 +848,12 @@ var SettingsPage = {
     '</div></transition>' +
     '</div></div></div>' +
 
-    '<div class="card"><h2>图片传输设置</h2>' +
+    '<div class="card"><h2>媒体传输模式</h2>' +
     '<div class="form-row" style="align-items:flex-start">' +
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">传输模式</label>' +
     '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-    'Base64 传输（默认，无需额外配置）；URL 传输（消息体缩小至 ~150 字节）' +
+    '作用于图片与语音段：Base64 传输（默认，无需额外配置）；URL 传输（消息体缩小至 ~150 字节）。视频恒走 URL 直链，不随此模式' +
     '</span>' +
     '</div>' +
     '<select v-model="imgTransfer.mode">' +
@@ -865,7 +865,7 @@ var SettingsPage = {
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">对外可达地址</label>' +
     '<span style="font-size:12px;color:var(--text-muted);line-height:1.4">' +
-    '外部服务（如 AstrBot）用于下载图片的完整地址。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7400（插件推送直链与 WebUI 图片传输共用）' +
+    '媒体内容（图片/语音/视频）的对外可达地址，推送直链与插件通道共用。请填写从 AstrBot 所在机器能访问到的 IP 和端口。格式: http://&lt;宿主机IP&gt;:7400' +
     '</span>' +
     '</div>' +
     '<input type="text" v-model="imgTransfer.baseUrl" ' +
@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1208,6 +1208,8 @@ var SendManagerPage = {
     var secStrategy = ref(false)
     var secBp = ref(false)
     var secAck = ref(false)
+    var secCdn = ref(false)
+    var secVid = ref(false)
     var strategySummary = computed(function () {
       var n = (mergeEnabled.value ? 1 : 0) + (dedupEnabled.value ? 1 : 0) + (priorityEnabled.value ? 1 : 0) + (dynamicIntervalEnabled.value ? 1 : 0)
       return '开启 ' + n + ' / 4 项'
@@ -1219,6 +1221,17 @@ var SendManagerPage = {
     var ackSummary = computed(function () {
       if (!ackParams.enabled) return '已关闭'
       return '图 ' + Math.round(ackParams.timeoutImageMs / 1000) + 's · 视频 ' + Math.round(ackParams.timeoutVideoMs / 1000) + 's'
+    })
+    var cdnSummary = computed(function () {
+      if (!bpParams.imageCdnDirectFetchEnabled) return '已关闭（实验）'
+      return '开启 · 超时 ' + Math.round(bpParams.imageCdnDirectFetchTimeoutMs / 1000) + 's'
+    })
+    var vidSummary = computed(function () {
+      var parts = []
+      if (bpParams.inboundVideoPushEnabled) parts.push('视频推送开')
+      if (bpParams.inboundVoicePushEnabled) parts.push('语音推送开')
+      if (bpParams.videoCalibrationLogEnabled) parts.push('标定日志开')
+      return parts.length ? parts.join(' · ') : '已关闭'
     })
 
     function initParams() {
@@ -1243,6 +1256,20 @@ var SendManagerPage = {
         bpParams.cooldownMs = d.sendCooldownMs || 10000
         bpParams.backoffBaseMs = d.sendBackoffBaseMs || 1500
         bpParams.imagePasteCapMs = d.imagePasteCapMs || 1500
+        bpParams.imageMaxBytes = (d.imageMaxBytes && d.imageMaxBytes > 0) ? Math.round(d.imageMaxBytes / (1024 * 1024)) : 5
+        bpParams.imageCompressEnabled = d.imageCompressEnabled !== false
+        bpParams.imageCompressKeepResolution = d.imageCompressKeepResolution !== false
+        bpParams.imageCompressFormat = d.imageCompressFormat || 'png'
+        bpParams.imageCompressPaletteMax = d.imageCompressPaletteMax || 256
+        bpParams.imageUrlTimeoutMs = d.imageUrlTimeoutMs || 15000
+        bpParams.imageCdnDirectFetchEnabled = d.imageCdnDirectFetchEnabled === true
+        bpParams.imageCdnDirectFetchTimeoutMs = d.imageCdnDirectFetchTimeoutMs || 30000
+        bpParams.imageCdnDirectFetchMinIntervalMs = (d.imageCdnDirectFetchMinIntervalMs !== undefined) ? d.imageCdnDirectFetchMinIntervalMs : 3000
+        bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
+        bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
+        bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
+        bpParams.inboundVideoPushEnabled = d.inboundVideoPushEnabled === true
+        bpParams.inboundVoicePushEnabled = d.inboundVoicePushEnabled === true
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1328,6 +1355,20 @@ var SendManagerPage = {
         sendCooldownMs: Math.max(1000, Number(bpParams.cooldownMs) || 10000),
         sendBackoffBaseMs: Math.max(100, Number(bpParams.backoffBaseMs) || 1500),
         imagePasteCapMs: Math.max(400, Number(bpParams.imagePasteCapMs) || 1500),
+        imageMaxBytes: Math.max(1, Math.min(20, Number(bpParams.imageMaxBytes) || 5)) * (1024 * 1024),
+        imageCompressEnabled: !!bpParams.imageCompressEnabled,
+        imageCompressKeepResolution: !!bpParams.imageCompressKeepResolution,
+        imageCompressFormat: ['png', 'jpeg', 'auto'].includes(bpParams.imageCompressFormat) ? bpParams.imageCompressFormat : 'png',
+        imageCompressPaletteMax: Math.max(2, Math.min(256, Number(bpParams.imageCompressPaletteMax) || 256)),
+        imageUrlTimeoutMs: Math.max(1000, Number(bpParams.imageUrlTimeoutMs) || 15000),
+        imageCdnDirectFetchEnabled: !!bpParams.imageCdnDirectFetchEnabled,
+        imageCdnDirectFetchTimeoutMs: Math.max(5000, Math.min(120000, Number(bpParams.imageCdnDirectFetchTimeoutMs) || 30000)),
+        imageCdnDirectFetchMinIntervalMs: isFinite(Number(bpParams.imageCdnDirectFetchMinIntervalMs)) ? Math.max(0, Math.min(60000, Number(bpParams.imageCdnDirectFetchMinIntervalMs))) : 3000,
+        imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
+        imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
+        videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
+        inboundVideoPushEnabled: bpParams.inboundVideoPushEnabled === true,
+        inboundVoicePushEnabled: bpParams.inboundVoicePushEnabled === true,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1437,14 +1478,14 @@ var SendManagerPage = {
       queueBars: queueBars, trend: trend, pipeline: pipeline,
       nowElapsed: nowElapsed, typeLabel: typeLabel, urgencyClass: urgencyClass,
       tiers: tiers, tierName: tierName, setTier: setTier, customEditing: customEditing, overriddenKeys: overriddenKeys,
-      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck,
-      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary,
+      secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck, secCdn: secCdn, secVid: secVid,
+      strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary, cdnSummary: cdnSummary, vidSummary: vidSummary,
       dirty: dirty, discardChanges: discardChanges
     }
   },
   template: '<div>' +
     '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">发送管理</h1><p class="subtitle">发送流水线状态与节律配置</p></div>' +
+    '<div><h1 class="page-title" style="margin:0">消息管理</h1><p class="subtitle">发送流水线状态与节律配置</p></div>' +
     '</div>' +
 
     '<transition name="fade-slide">' +
@@ -1652,11 +1693,88 @@ var SendManagerPage = {
     '<div class="strategy-top"><span class="strategy-name">大图粘贴等待上限</span><span class="opt-input"><input type="number" min="400" step="100" v-model.number="bpParams.imagePasteCapMs">ms</span></div>' +
     '<div class="strategy-desc">大图（≥1MB）粘贴后到发送的最大等待；小图用基准不变，默认 1500</div>' +
     '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">图片大小上限</span><span class="opt-input"><input type="number" min="1" max="20" step="1" v-model.number="bpParams.imageMaxBytes">MB</span></div>' +
+    '<div class="strategy-desc">超过该体积的图片拒绝粘贴（防微信冻结，默认 5MB）；部分插件生成图约 5.26MB，可按需上调至 20MB；也是图片压缩的分界点</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCompressEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">图片压缩（大图）</span><toggle-switch v-model="bpParams.imageCompressEnabled" /></div>' +
+    '<div class="strategy-desc">超过图片大小上限的大图，发送前经 ffmpeg 压缩进分界点（默认开；仅大图触发，小图直通零开销）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">压缩格式</span><span class="opt-input"><select v-model="bpParams.imageCompressFormat"><option value="png">PNG（近无损，微信必支持）</option><option value="jpeg">JPEG（照片）</option><option value="auto">自动（内容探测）</option></select></span></div>' +
+    '<div class="strategy-desc">漫画/图标/截图用 PNG 降位深；照片用 JPEG；auto 由内容色数探测决定（默认 PNG）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">保分辨率</span><toggle-switch v-model="bpParams.imageCompressKeepResolution" /></div>' +
+    '<div class="strategy-desc">压缩不降像素（默认开，保清晰）；关闭后超阈压缩允许降分辨率兜底（画质会下降）</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">PNG调色板色数</span><span class="opt-input"><input type="number" min="2" max="256" step="1" v-model.number="bpParams.imageCompressPaletteMax">色</span></div>' +
+    '<div class="strategy-desc">PNG 降位深最大色数（默认 256 近无损；低则更小但有色带）</div>' +
+    '</div>' +
     '</div>' +
     '</transition>' +
     '</div>' +
     '</div>' +
 
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secVid = !secVid">' +
+    '<span class="chev" :class="{ open: secVid }">▸</span>' +
+    '<span class="config-title">媒体链路</span>' +
+    '<span class="config-summary">{{ vidSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secVid" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: bpParams.inboundVideoPushEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">入站视频推送</span><toggle-switch v-model="bpParams.inboundVideoPushEnabled" /></div>' +
+    '<div class="strategy-desc">收到视频时向适配器提供视频文件 URL（/api/media?token=，1h 有效）、封面与元数据（时长/体积）；多数模型不支持视频模态，是否下载与理解由适配器和模型决定；默认关，关闭时视频消息仅显示 [视频]</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.inboundVoicePushEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">入站语音推送</span><toggle-switch v-model="bpParams.inboundVoicePushEnabled" /></div>' +
+    '<div class="strategy-desc">收到语音时向适配器提供 WAV 音频（24kHz/16bit/mono，OneBot 走 record 段跟随媒体传输模式，插件通道为 /api/media?token= 直链，1h 有效）与时长元数据，转写/ASR 由 astrbot 侧处理；base64 模式超过 10MB 的音频降级为仅 [语音] 文本；默认关，关闭时语音消息仅显示 [语音]</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +
+    '<div class="strategy-desc">发送视频时在容器日志记录源规格（体积/时长/分辨率/码率）与 Enter 时刻（[Calib] 标记），用于量化发送耗时；默认关，仅标定/排查时开启</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+
+    '<div class="card config-section">' +
+    '<button type="button" class="config-head" @click="secCdn = !secCdn">' +
+    '<span class="chev" :class="{ open: secCdn }">▸</span>' +
+    '<span class="config-title">图片入站原图（CDN 直取）</span>' +
+    '<span class="config-summary">{{ cdnSummary }}</span>' +
+    '</button>' +
+    '<div v-show="secCdn" class="config-body">' +
+    '<div class="config-opt-grid cols1">' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">CDN 直取原图（实验）</span><toggle-switch v-model="bpParams.imageCdnDirectFetchEnabled" /></div>' +
+    '<div class="strategy-desc">仅缩略图消息的原图兜底：本地读取（_h.dat > .dat > _t.dat）与 HD 升级全失败、只剩缩略图时，调用内置 ptrace 注入器毫秒级驱动微信自身 CDN 库直取并解密原图（零 hook、零 frida、进程不驻留；需微信在线登录态，默认关）。任何失败都自动降级回缩略图，绝不阻断推送。防护：仅近 10 分钟内的新消息（禁历史回填）、同一图 6 小时内仅尝试一次、最小间隔与每小时上限限流、超时/错误码不重试直接降级</div>' +
+    '</div>' +
+    '</div>' +
+    '<div class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">直取超时</span><span class="opt-input"><input type="number" min="5000" step="1000" v-model.number="bpParams.imageCdnDirectFetchTimeoutMs">ms</span></div>' +
+    '<div class="strategy-desc">直取请求发起到产物落盘的等待上限，期间每 500ms 轮询、尺寸稳定即判定完成（默认 30000，钳制 5000–120000）。超时即放弃该图并降级缩略图——不重试，避免对同一 CDN 对象反复请求</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">最小间隔</span><span class="opt-input"><input type="number" min="0" step="500" v-model.number="bpParams.imageCdnDirectFetchMinIntervalMs">ms</span></div>' +
+    '<div class="strategy-desc">两次直取请求的最小时间间隔（默认 3000，钳制 0–60000；0 为不限间隔，但仍受每小时上限约束）。未到间隔的消息不排队等待，直接降级缩略图</div>' +
+    '</div>' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">每小时上限</span><span class="opt-input"><input type="number" min="1" step="5" v-model.number="bpParams.imageCdnDirectFetchHourlyLimit">张</span></div>' +
+    '<div class="strategy-desc">滑动 1 小时窗口内的直取张数上限（默认 30，钳制 1–600）。超限后该小时内的图片全部降级缩略图；运行稳定后可自行逐步提升</div>' +
+    '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchDiagMd5Log }">' +
+    '<div class="strategy-top"><span class="strategy-name">md5 比对诊断日志</span><toggle-switch v-model="bpParams.imageCdnDirectFetchDiagMd5Log" /></div>' +
+    '<div class="strategy-desc">直取成功后，将产物 md5 与消息 XML 声称的 md5 比对并记录日志（仅记录，不参与成败判定——服务端对象与声称值本就无关）。反馈问题时开启此开关，在容器日志中检索「诊断：产物 md5」即可提供该行</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
+    '</div>' +
     '<div class="card config-section">' +
     '<button type="button" class="config-head" @click="secAck = !secAck">' +
     '<span class="chev" :class="{ open: secAck }">▸</span>' +
@@ -1729,6 +1847,7 @@ var SendManagerPage = {
     '</div>' +
     '</div>' +
 
+    '<teleport to="body">' +
     '<transition name="fade-up">' +
     '<div v-if="dirty" class="save-bar">' +
     '<span class="save-bar-dot"></span>' +
@@ -1737,6 +1856,7 @@ var SendManagerPage = {
     '<button class="btn btn-primary btn-sm" :disabled="saving" @click="saveMode">{{ saving ? "保存中…" : "保存配置" }}</button>' +
     '</div>' +
     '</transition>' +
+    '</teleport>' +
     '</div>'
 }
 
@@ -2017,7 +2137,7 @@ var FilterPage = {
     }
   },
   template: '<div>' +
-    '<h1 class="page-title">消息推送过滤</h1>' +
+    '<h1 class="page-title">推送过滤</h1>' +
     '<div class="card">' +
     '<div class="form-row"><label>启用消息推送</label>' +
     '<toggle-switch v-model="pushEnabled" /></div>' +
@@ -2057,9 +2177,9 @@ var routes = [
   { path: '/', component: HomePage, meta: { title: '首页' } },
   { path: '/bot', component: BotPage, meta: { title: 'Bot 配置' } },
   { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
-  { path: '/filter', component: FilterPage, meta: { title: '消息过滤' } },
+  { path: '/filter', component: FilterPage, meta: { title: '推送过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
-  { path: '/send', component: SendManagerPage, meta: { title: '发送管理' } },
+  { path: '/send', component: SendManagerPage, meta: { title: '消息管理' } },
   { path: '/logs', component: LogsPage, meta: { title: '日志' } },
   { path: '/about', component: AboutPage, meta: { title: '关于' } },
   { path: '/login', component: LoginPage, meta: { title: '登录' } }
@@ -2084,10 +2204,10 @@ var App = {
     var navItems = [
       { path: '/', label: '首页', icon: '<svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>' },
       { path: '/bot', label: 'Bot 配置', icon: '<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>' },
+      { path: '/filter', label: '推送过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
+      { path: '/send', label: '消息管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
-      { path: '/filter', label: '消息过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
-      { path: '/send', label: '发送管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
     ]

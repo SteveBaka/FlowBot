@@ -3,7 +3,7 @@ import { logger } from './logger'
 import { wcdbService } from './wcdbService'
 import { chatService } from './chatService'
 import * as fs from 'fs'
-import { registerImageToken, registerImageTokenWithMeta, isThumbnailFilePath } from './httpService'
+import { registerImageToken, registerImageTokenWithMeta, registerVideoTokenWithMeta, registerVoiceTokenWithMeta, isThumbnailFilePath, VIDEO_TOKEN_TTL_MS } from './httpService'
 
 const GROUP_TTL_MS = 5 * 60 * 1000
 const PRIVATE_TTL_MS = 10 * 60 * 1000
@@ -705,8 +705,8 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
         const messageSegments: Array<{ type: string; data: Record<string, string> }> = []
 
         if (data.imagePath && fs.existsSync(data.imagePath)) {
-          const mode = getConfigRef ? (getConfigRef('imageTransferMode') || 'base64') : 'base64'
-          const baseUrl = getConfigRef ? (getConfigRef('imageServerBaseUrl') || '') : ''
+          const mode = getConfigRef ? (getConfigRef('mediaTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('mediaServerBaseUrl') || '') : ''
 
           if (mode === 'url' && baseUrl) {
             const isThumb = isThumbnailFilePath(data.imagePath)
@@ -726,6 +726,57 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
         } else if (data.emojiUrl) {
           messageSegments.push({ type: 'image', data: { file: data.emojiUrl } })
+        }
+
+        // 入站视频段（ADAPTER-MEDIA-CONTRACT §3）：视频无 base64 可行形态，
+        // 配置了 mediaServerBaseUrl 即发 video 段（不再跟随图片传输模式）；
+        // 未配置 baseUrl 才退化为仅元数据。
+        if (data.videoPath && fs.existsSync(data.videoPath)) {
+          const baseUrl = getConfigRef ? (getConfigRef('mediaServerBaseUrl') || '') : ''
+          if (baseUrl) {
+            const videoToken = registerVideoTokenWithMeta(data.videoPath)
+            const videoUrl = `${baseUrl.replace(/\/+$/, '')}/api/media?token=${videoToken}`
+            // astrbot Video 组件自带 cover 字段（components.py:288），封面直接挂段内
+            const videoData: Record<string, string> = { file: videoUrl }
+            if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+              // cover 与视频本体同寿命（1h），避免图片级 2min TTL 先过期导致封面 404
+              data.videoPosterUrl = `${baseUrl.replace(/\/+$/, '')}/api/image?token=${registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false, ttlMs: VIDEO_TOKEN_TTL_MS })}`
+              videoData.cover = data.videoPosterUrl
+            }
+            messageSegments.push({ type: 'video', data: videoData })
+          } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+            // 无对外地址：视频本体无处可链，仅元数据；封面落 file://（同机场景）
+            data.videoPosterUrl = `file://${data.videoPosterPath}`
+          }
+        } else if (data.videoPosterPath && fs.existsSync(data.videoPosterPath)) {
+          // 视频本体缺失（群视频懒下载）：降级推封面，标注是视频便于模型辨别。
+          // 配置了对外地址就走 URL（file:// 跨容器不可达），无 baseUrl 才回退 file://
+          const baseUrl = getConfigRef ? (getConfigRef('mediaServerBaseUrl') || '') : ''
+          if (baseUrl) {
+            const posterToken = registerImageTokenWithMeta(data.videoPosterPath, { isThumb: false, ttlMs: VIDEO_TOKEN_TTL_MS })
+            messageSegments.push({ type: 'image', data: { file: `${baseUrl.replace(/\/+$/, '')}/api/image?token=${posterToken}` } })
+          } else {
+            messageSegments.push({ type: 'image', data: { file: `file://${data.videoPosterPath}` } })
+          }
+          messageSegments.push({ type: 'text', data: { text: '（以上为视频封面截图，视频文件未下载）' } })
+        }
+
+        // 入站语音段（INBOUND-VOICE-PUSH-PLAN §4.2）：record 段跟随 mediaTransferMode——
+        // 语音有可行 base64 形态（60s WAV ≈ 3.8MB），默认配置（无 baseUrl）内联即可用，双通道对等；
+        // base64 模式超过 voiceMaxBytes 降级为仅文本 [语音]（URL 模式不受限，token 直链 1h）。
+        if (data.voicePath && data.voiceMeta?.available !== false && fs.existsSync(data.voicePath)) {
+          const mode = getConfigRef ? (getConfigRef('mediaTransferMode') || 'base64') : 'base64'
+          const baseUrl = getConfigRef ? (getConfigRef('mediaServerBaseUrl') || '') : ''
+          if (mode === 'url' && baseUrl) {
+            const voiceToken = registerVoiceTokenWithMeta(data.voicePath)
+            messageSegments.push({ type: 'record', data: { file: `${baseUrl.replace(/\/+$/, '')}/api/media?token=${voiceToken}` } })
+          } else {
+            const buf = fs.readFileSync(data.voicePath)
+            const maxBytes = Number(getConfigRef ? (getConfigRef('voiceMaxBytes') ?? 10 * 1024 * 1024) : 10 * 1024 * 1024)
+            if (Number.isFinite(maxBytes) && maxBytes > 0 && buf.length <= maxBytes) {
+              messageSegments.push({ type: 'record', data: { file: `base64://${buf.toString('base64')}` } })
+            }
+          }
         }
 
         if (isGroup && data.content) {
