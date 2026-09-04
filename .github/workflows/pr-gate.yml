@@ -203,10 +203,18 @@ jobs:
         if: always()
         run: cat pr-gate-report.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Post sticky PR comment
+      # 每轮以新评论发布(而非原地更新):GitHub 不提醒评论编辑,原地更新
+      # 容易被忽略;历史报告按时间留痕,便于复核对照
+      - name: Post PR report comment
         if: github.event_name == 'pull_request'
-        uses: marocchino/sticky-pull-request-comment@v2
+        uses: actions/github-script@v7
         with:
-          header: pr-gate
-          path: pr-gate-report.md
-          skip_unchanged: true
+          script: |
+            const fs = require('fs')
+            const body = fs.readFileSync('pr-gate-report.md', 'utf8')
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body
+            })
