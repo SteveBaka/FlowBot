@@ -207,7 +207,7 @@ jobs:
       # 容易被忽略;历史报告按时间留痕,便于复核对照
       - name: Post PR report comment
         if: github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v9
         with:
           script: |
             const fs = require('fs')
