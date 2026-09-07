@@ -106,7 +106,7 @@ jobs:
 
       - name: Dependency review (PR only, blocking)
         if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
+        uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high
 
