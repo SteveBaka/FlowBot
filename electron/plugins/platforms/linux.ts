@@ -796,16 +796,31 @@ export class LinuxSender implements IPlatformSender {
         this.triggerImagePasteCooldown()
         return false
       }
-      const mime = this.detectImageMime(imagePath)
-      const ok = await xclipSetImage(imagePath, mime)
-      if (!ok) {
-        warn('xclipSetImage failed, triggering image paste cooldown')
-        this.triggerImagePasteCooldown()
-        return false
+      // GIF 动画无法经位图剪贴板存活：X11 image/* 剪贴板目标是单帧光栅协议，微信按位图
+      // 解码只取第一帧（丢动画，对端收到静态图）。改走文件粘贴（uri-list，与视频同路）——
+      // 实测（2026-09-11 noVNC）微信按扩展名识别为动画表情，剪贴板预览与对端均可动。
+      if (imagePath.toLowerCase().endsWith('.gif')) {
+        const gifOk = await xclipSetFile(imagePath)
+        if (!gifOk) {
+          warn('xclipSetFile(GIF) failed, triggering image paste cooldown')
+          this.triggerImagePasteCooldown()
+          return false
+        }
+        await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
+        await run(`xdotool key --window "${wid}" ctrl+v`)
+        log('GIF pasted as file to clipboard successfully')
+      } else {
+        const mime = this.detectImageMime(imagePath)
+        const ok = await xclipSetImage(imagePath, mime)
+        if (!ok) {
+          warn('xclipSetImage failed, triggering image paste cooldown')
+          this.triggerImagePasteCooldown()
+          return false
+        }
+        await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
+        await run(`xdotool key --window "${wid}" ctrl+v`)
+        log('Image pasted to clipboard successfully')
       }
-      await new Promise(r => setTimeout(r, this.delay.imageClipSettle))
-      await run(`xdotool key --window "${wid}" ctrl+v`)
-      log('Image pasted to clipboard successfully')
       // 体积自适应等待：基准 imagePasteSettle（标准 400ms），大图按比例增量封顶 1500ms，
       // 小图用基准值不额外等待（避免小图也变慢而堵塞队列）
       const baseWait = this.delay.imagePasteSettle
