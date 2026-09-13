@@ -285,6 +285,7 @@ const bots: Map<string, BotEntry> = new Map()
 let onMessageCallback: ((msg: any) => void) | null = null
 let currentSelfWxid = ''
 let getConfigRef: ((key: string) => any) | null = null
+let healthCheckTimer: ReturnType<typeof setInterval> | null = null
 
 export function setBotMessageCallback(cb: (msg: any) => void) {
   onMessageCallback = cb
@@ -341,10 +342,74 @@ export async function startBotManager(
     await startBot(cfg, getConfig)
   }
 
-  setInterval(() => { healthCheckAll() }, 30_000)
+  if (!healthCheckTimer) {
+    healthCheckTimer = setInterval(() => { healthCheckAll() }, 30_000)
+  }
+}
+
+// 运行实例与配置对账：WebUI 保存 bot 后由 mgmt 链路调用，保证
+// 增/删/改（含地址、端口、token）都实时落到运行实例上，
+// 杜绝孤儿 OneBotWsClient/OneBotServer 继续重连旧地址或占用端口。
+const BOT_CONFIG_FIELDS: (keyof BotConfig)[] = ['name', 'mode', 'direction', 'address', 'port', 'token', 'enabled']
+
+function botConfigDiffers(entry: BotEntry, cfg: BotConfig): boolean {
+  return BOT_CONFIG_FIELDS.some(f => (entry as BotConfig)[f] !== cfg[f])
+}
+
+export async function applyBotsConfig(
+  rawBots: string | BotConfig[],
+  getConfig: (key: string) => any
+): Promise<{ started: string[]; stopped: string[]; updated: string[] }> {
+  getConfigRef = getConfig
+  const desired = parseBotsConfig(rawBots)
+  const desiredById = new Map(desired.map(c => [c.id, c]))
+  const started: string[] = []
+  const stopped: string[] = []
+  const updated: string[] = []
+
+  // 已删除 / 已禁用 / 配置有变 / 状态异常 的运行实例：停掉旧的再按需重启
+  for (const [id, entry] of bots) {
+    const cfg = desiredById.get(id)
+    if (!cfg || cfg.enabled === false) {
+      await stopBot(id)
+      bots.delete(id)
+      stopped.push(id)
+      log(`BotManager: Bot "${entry.name}" (${id}) removed from config, stopped`)
+      continue
+    }
+    if (entry.status === 'running' && !botConfigDiffers(entry, cfg)) continue
+    // startBot 内部会先 stop 旧实例再重建
+    await startBot(cfg, getConfig)
+    updated.push(id)
+  }
+
+  // 新增的 bot：启动；禁用态的登记为 stopped（与 startBotManager 行为一致）
+  for (const cfg of desired) {
+    if (bots.has(cfg.id)) continue
+    if (!cfg.enabled) {
+      log(`BotManager: Skipping disabled bot "${cfg.name}" (${cfg.id})`)
+      bots.set(cfg.id, {
+        ...cfg,
+        server: null,
+        status: 'stopped'
+      })
+      continue
+    }
+    await startBot(cfg, getConfig)
+    started.push(cfg.id)
+  }
+
+  if (started.length || stopped.length || updated.length) {
+    log(`BotManager: Config reconciled — started: [${started}] updated: [${updated}] stopped: [${stopped}]`)
+  }
+  return { started, stopped, updated }
 }
 
 async function startBot(cfg: BotConfig, getConfig: (key: string) => any): Promise<void> {
+  // 覆盖前先停掉同 id 的旧实例，避免孤儿 OneBotWsClient 继续重连旧地址
+  if (bots.has(cfg.id)) {
+    await stopBot(cfg.id)
+  }
   log(`BotManager: Starting bot "${cfg.name}" on port ${cfg.port} (${cfg.mode}/${cfg.direction})...`)
 
   const entry: BotEntry = {

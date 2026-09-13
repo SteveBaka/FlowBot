@@ -3749,6 +3749,7 @@ class HttpService {
   private async handleMgmtSetConfig(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
       const updated: string[] = []
+      let botsConfigRaw: string | Record<string, any>[] | undefined
       for (const [key, value] of Object.entries(body)) {
         try {
           if ((this.configService as any).store?.set) {
@@ -3757,8 +3758,20 @@ class HttpService {
             (this.configService as any).set(key, value)
           }
           updated.push(key)
+          if (key === 'bots') botsConfigRaw = value
         } catch (e) {
           console.warn(`[HttpService] Failed to set config key "${key}":`, e)
+        }
+      }
+      // bot 配置变更立即对账运行实例（启停/重建），与 WebUI 插件通道刷新对等
+      if (botsConfigRaw !== undefined) {
+        try {
+          const r = await botManager.applyBotsConfig(botsConfigRaw, (key: string) => {
+            return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
+          })
+          console.log(`[HttpService] Bots config reconciled: ${JSON.stringify(r)}`)
+        } catch (e) {
+          console.warn('[HttpService] Bots config reconciliation failed:', e)
         }
       }
       this.sendJson(res, { success: true, updated })
@@ -3824,10 +3837,11 @@ class HttpService {
   private async handleMgmtBotStart(req: http.IncomingMessage, res: http.ServerResponse, body: Record<string, any>): Promise<void> {
     try {
       const rawBots = (this.configService as any).store?.get?.('bots') ?? (this.configService as any).get?.('bots')
-      await botManager.startBotManager(rawBots || '[]', (key: string) => {
+      // 对账语义：新增的启动、删除的停止、配置变更的重建（而非跳过运行中的）
+      const r = await botManager.applyBotsConfig(rawBots || '[]', (key: string) => {
         return (this.configService as any).store?.get?.(key) ?? (this.configService as any).get?.(key)
       })
-      this.sendJson(res, { success: true })
+      this.sendJson(res, { success: true, ...r })
     } catch (error) {
       this.sendError(res, 500, String(error))
     }
