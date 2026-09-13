@@ -1207,6 +1207,15 @@ function startPluginApiServer(port, token) {
     const entry = pluginApiServers.get(port)
     if (entry) entry.lastHttpAt = Date.now()
 
+    // 机器人自身身份（GET /api/v1/bot/self）：配置态 myWxid（清洗后）为权威源、
+    // 身份库学习值兜底——插件通道版「lifecycle connect」，适配器启动预热即知 wxid，
+    // 消除"等首条推送才知道我是谁"的双端盲区（OneBot 侧无此问题，见 botManager 启动喂入）
+    if (p === '/api/v1/bot/self' && req.method === 'GET') {
+      const botSelf = getBotSelfId()
+      json(res, { ok: true, self_id: botSelf.self_id, source: botSelf.source })
+      return
+    }
+
     // 插件 API 代理（排除 mgmt，最小权限）
     if (p.startsWith('/api/v1/') && !p.startsWith('/api/v1/mgmt/')) {
       try {
@@ -1468,6 +1477,34 @@ function rememberAvatar(wxid, avatarUrl) {
       identityMemory.set(id, Object.assign({}, existing, { avatar_url: url, updated_at: Date.now() }))
     }
   } catch (e) {}
+}
+
+// 机器人自身身份权威值（IDENTITY 链路）：WeFlow 配置态 myWxid（清洗后）优先，
+// 身份库学习值（getSelfWxid，首条推送才写入）兜底——与 OneBot 通道「启动即喂入」
+// （main.ts:4743 → startBotManager(myWxid)）语义对齐，消除"首条推送才知"的冷启动盲区
+// 与换号后吐旧号问题。
+// 清洗逻辑逐字复刻主进程 configService.cleanAccountDirName（config.ts:1090）——server.js
+// 为独立 Node 进程调不到 configService，产出形态必须与推送 payload.selfId
+// （getMyWxidCleaned）严格一致，否则适配器侧唤醒/回显过滤/引用裁决全部错位。
+function cleanAccountDirNameWxid(dirName) {
+  const trimmed = String(dirName || '').trim()
+  if (!trimmed) return ''
+  if (trimmed.toLowerCase().startsWith('wxid_')) {
+    const m = trimmed.match(/^(wxid_[^_]+)/i)
+    return m ? m[1] : trimmed
+  }
+  const suffixMatch = trimmed.match(/^(.+)_([a-zA-Z0-9]{4})$/)
+  return suffixMatch ? suffixMatch[1] : trimmed
+}
+
+function getBotSelfId() {
+  try {
+    const fromConfig = cleanAccountDirNameWxid(loadWeFlowConfig().myWxid)
+    if (fromConfig) return { self_id: fromConfig, source: 'config' }
+  } catch (e) {}
+  const learned = getSelfWxid()
+  if (learned) return { self_id: learned, source: 'learned' }
+  return { self_id: undefined, source: 'none' }
 }
 
 // 同步各群成员群昵称 → group_nicknames 表（供 @ 链路 / 未来特性读身份库）
