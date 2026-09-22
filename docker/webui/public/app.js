@@ -1020,7 +1020,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false, forwardImageMediaEnabled: true, forwardMediaTimeoutMs: 3000 })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1231,6 +1231,7 @@ var SendManagerPage = {
       if (bpParams.inboundVideoPushEnabled) parts.push('视频推送开')
       if (bpParams.inboundVoicePushEnabled) parts.push('语音推送开')
       if (bpParams.videoCalibrationLogEnabled) parts.push('标定日志开')
+      parts.push(bpParams.forwardImageMediaEnabled ? ('含图还原开 · 延时闸 ' + ((bpParams.forwardMediaTimeoutMs || 3000) / 1000) + 's') : '含图还原关')
       return parts.length ? parts.join(' · ') : '已关闭'
     })
 
@@ -1270,6 +1271,8 @@ var SendManagerPage = {
         bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
         bpParams.inboundVideoPushEnabled = d.inboundVideoPushEnabled === true
         bpParams.inboundVoicePushEnabled = d.inboundVoicePushEnabled === true
+        bpParams.forwardImageMediaEnabled = d.forwardImageMediaEnabled !== false
+        bpParams.forwardMediaTimeoutMs = d.forwardMediaTimeoutMs || 3000
         ackParams.enabled = d.sendAckEnabled !== false
         ackParams.probeEnabled = d.sendAckInputClearProbeEnabled === true
         ackParams.timeoutImageMs = d.sendAckTimeoutMsImage || 3000
@@ -1369,6 +1372,8 @@ var SendManagerPage = {
         videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
         inboundVideoPushEnabled: bpParams.inboundVideoPushEnabled === true,
         inboundVoicePushEnabled: bpParams.inboundVoicePushEnabled === true,
+        forwardImageMediaEnabled: bpParams.forwardImageMediaEnabled === true,
+        forwardMediaTimeoutMs: bpParams.forwardMediaTimeoutMs || 3000,
         sendAckEnabled: !!ackParams.enabled,
         sendAckInputClearProbeEnabled: !!ackParams.probeEnabled,
         sendAckTimeoutMsImage: Math.max(500, Number(ackParams.timeoutImageMs) || 3000),
@@ -1734,9 +1739,19 @@ var SendManagerPage = {
     '<div class="strategy-top"><span class="strategy-name">入站语音推送</span><toggle-switch v-model="bpParams.inboundVoicePushEnabled" /></div>' +
     '<div class="strategy-desc">收到语音时向适配器提供 WAV 音频（24kHz/16bit/mono，OneBot 走 record 段跟随媒体传输模式，插件通道为 /api/media?token= 直链，1h 有效）与时长元数据，转写/ASR 由 astrbot 侧处理；base64 模式超过 10MB 的音频降级为仅 [语音] 文本；默认关，关闭时语音消息仅显示 [语音]</div>' +
     '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.forwardImageMediaEnabled }">' +
+    '<div class="strategy-top"><span class="strategy-name">合并转发含图还原（实验性）</span><toggle-switch v-model="bpParams.forwardImageMediaEnabled" /></div>' +
+    '<div class="strategy-desc">合并转发里的图片条目尝试媒体还原（直链下载 / CDN 直取 / 缩略兜底，成功则条目带 media_url / media_thumb_url 供适配器渲染）。该能力尚不完善（老图受"仅增量"门禁、缩略直取待修，常见 too_old / thumb_only 降级）；关闭后图片条目零延迟只推 [图片] 文本占位，表情直链 / 视频 / 时长元数据与渲染全文不受影响；默认开，可随时热切换</div>' +
+    '</div>' +
     '<div class="strategy-card" :class="{ on: bpParams.videoCalibrationLogEnabled }">' +
     '<div class="strategy-top"><span class="strategy-name">视频发送标定日志</span><toggle-switch v-model="bpParams.videoCalibrationLogEnabled" /></div>' +
     '<div class="strategy-desc">发送视频时在容器日志记录源规格（体积/时长/分辨率/码率）与 Enter 时刻（[Calib] 标记），用于量化发送耗时；默认关，仅标定/排查时开启</div>' +
+    '</div>' +
+    '</div>' +
+    '<div class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">转发媒体延时闸</span><span class="opt-input"><input type="number" min="500" step="500" v-model.number="bpParams.forwardMediaTimeoutMs">ms</span></div>' +
+    '<div class="strategy-desc">合并转发媒体还原相对推送的额外延迟硬上限（默认 3000，钳制 500–60000），含单条在途下载也强制生效；超时条目 media_error=skipped、文本行照常秒达。网络慢、想多给下载时间可调大；求快可调小甚至贴近 500</div>' +
     '</div>' +
     '</div>' +
     '</div>' +

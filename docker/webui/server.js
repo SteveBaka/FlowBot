@@ -1706,6 +1706,37 @@ function broadcastPushEvent(obj) {
   }
 }
 
+// 合并转发条目媒体 token 化（INBOUND-FORWARD-PUSH-PLAN-PHASE2 §3.1）：
+// Electron 侧还原产物以 media_path / media_thumb_path 内部字段随 payload 到达，
+// 此处注册 token 直链后删除路径（契约原则 4：真实文件路径不对适配器暴露）。
+// token TTL 统一 1h（与 video/voice 同寿命，避免"分析慢一点就 404"）；emoji 透传的
+// 微信 CDN 直链（media_url 已终态）不注册、不改写。
+function mapForwardItemMedia(it) {
+  if (!it || typeof it !== 'object') return it
+  const out = Object.assign({}, it)
+  if (out.media_path) {
+    const token = registerMediaPath(out.media_path)
+    if (token) {
+      out.media_url = getPushImageBaseUrl() + '/api/media?token=' + token
+      out.media_token_ttl_ms = MEDIA_TOKEN_TTL_MS
+    }
+    delete out.media_path
+  }
+  if (out.media_thumb_path) {
+    // 缩略图/封面与媒体同寿命 1h（对齐 video_poster_url TTL 先例）
+    const token = registerImagePath(out.media_thumb_path, 60 * 60 * 1000)
+    if (token) {
+      out.media_thumb_url = getPushImageBaseUrl() + '/api/image?token=' + token
+      out.media_token_ttl_ms = 60 * 60 * 1000
+    }
+    delete out.media_thumb_path
+  }
+  if (Array.isArray(out.chat_record_items)) {
+    out.chat_record_items = out.chat_record_items.map(mapForwardItemMedia)
+  }
+  return out
+}
+
 function normalizePushPayload(p) {
   const realSessionId = String(p.sessionId || '')
   if (!realSessionId) return null
@@ -1786,7 +1817,7 @@ function normalizePushPayload(p) {
       forward_text: p.forwardText || undefined,
       forward_title: p.forwardTitle || undefined,
       forward_count: p.forwardCount ?? (hasForward ? p.forwardItems.length : undefined),
-      forward_items: hasForward ? p.forwardItems : undefined,
+      forward_items: hasForward ? p.forwardItems.map(mapForwardItemMedia) : undefined,
       forward_truncated: p.forwardTruncated === true ? true : undefined,
       forward_max_items: p.forwardMaxItems ?? undefined,
       // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，

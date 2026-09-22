@@ -3433,9 +3433,11 @@ class ExportService {
     if (desc) return desc
     if (title) return title
     switch (item.datatype) {
+      case 2:
       case 3: return '[图片]'
       case 34: return '[语音消息]'
       case 43: return '[视频]'
+      case 37:
       case 47: return '[表情包]'
       case 49:
       case 8: return title ? `[文件] ${title}` : '[文件]'

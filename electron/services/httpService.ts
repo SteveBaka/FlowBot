@@ -3697,6 +3697,11 @@ class HttpService {
                 'forwardMaxItems',
                 'forwardMaxDepth',
                 'forwardMaxChars',
+                // 合并转发条目媒体还原（PHASE2 P1；与 config schema 同步加键）
+                'inboundForwardMediaEnabled',
+                'forwardImageMediaEnabled',
+                'forwardMaxMedia',
+                'forwardMediaTimeoutMs',
                 // SendAck 媒体回执（WebUI「消息管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',
