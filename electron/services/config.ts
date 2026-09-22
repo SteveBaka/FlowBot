@@ -115,6 +115,21 @@ interface ConfigSchema {
   inboundVoicePushEnabled: boolean
   // 入站语音内联传输体积闸（base64 record 段超限降级为文本 [语音]；URL 模式不受限）
   voiceMaxBytes: number
+  // 入站合并转发（聊天记录）结构化推送（INBOUND-FORWARD-PUSH-PLAN；content 恒为渲染全文，
+  // 必要功能默认开——WebUI 不提供开关，仅 API 可调）
+  inboundForwardPushEnabled: boolean
+  // 合并转发条数/嵌套深度/渲染文本字符闸
+  forwardMaxItems: number
+  forwardMaxDepth: number
+  forwardMaxChars: number
+  // 合并转发条目媒体还原（PHASE2 P1：图/表情/视频 token 化；语音 not_recoverable、文件 skipped）
+  inboundForwardMediaEnabled: boolean
+  // 合并转发内图片条目媒体还原（下载尝试；能力尚不完善，WebUI 可关）——关闭后图片条目零延迟只推 [图片] 占位
+  forwardImageMediaEnabled: boolean
+  // 单事件媒体还原上限（超出的图片/视频 media_error:'skipped'）
+  forwardMaxMedia: number
+  // 媒体相位总延时闸（毫秒）：保护推送延迟（实测无闸时含图转发阻塞 30s），超时条目 media_error:'skipped'
+  forwardMediaTimeoutMs: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -347,6 +362,14 @@ export class ConfigService {
       inboundVideoPushEnabled: false,
       inboundVoicePushEnabled: false,
       voiceMaxBytes: 10 * 1024 * 1024,
+      inboundForwardPushEnabled: true,
+      forwardMaxItems: 200,
+      forwardMaxDepth: 3,
+      forwardMaxChars: 8000,
+      inboundForwardMediaEnabled: true,
+      forwardImageMediaEnabled: true,
+      forwardMaxMedia: 20,
+      forwardMediaTimeoutMs: 3000,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

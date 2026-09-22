@@ -864,6 +864,72 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           messageSegments.push({ type: 'text', data: { text: data.content || '' } })
         }
 
+        // 合并转发条目媒体段（INBOUND-FORWARD-PUSH-PLAN-PHASE2 P1 双通道红利，2026-09-22）：
+        // 渲染全文 text 段之后追加条目媒体段（image/emoji→image，video→video+cover），
+        // 事件附 forward_items（与插件 API 同形状，容器内路径剥除）。渲染文本不动——
+        // LLM 文本分析口径与插件通道逐字节一致。
+        let forwardItemsOut: any[] | undefined
+        if (Array.isArray(data.forwardItems) && data.forwardItems.length > 0) {
+          const fwdMode = getConfigRef ? (getConfigRef('mediaTransferMode') || 'base64') : 'base64'
+          const fwdBaseUrl = getConfigRef ? (getConfigRef('mediaServerBaseUrl') || '') : ''
+          const mapForwardNodes = (nodes: any[]): any[] => {
+            const outArr: any[] = []
+            for (const raw of nodes) {
+              if (!raw || typeof raw !== 'object') { outArr.push(raw); continue }
+              const out: any = Object.assign({}, raw)
+              const bodyPath = typeof raw.media_path === 'string' && raw.media_path ? raw.media_path : ''
+              const thumbPath = typeof raw.media_thumb_path === 'string' && raw.media_thumb_path ? raw.media_thumb_path : ''
+              delete out.media_path
+              delete out.media_thumb_path
+              const kind = raw.media_kind
+              const hasBody = raw.media_available === true && !!bodyPath
+              try {
+                if (kind === 'emoji' && raw.media_url) {
+                  out.media_url = raw.media_url
+                  messageSegments.push({ type: 'image', data: { file: String(raw.media_url) } })
+                } else if (kind === 'video' && hasBody && fwdBaseUrl) {
+                  const file = `${fwdBaseUrl.replace(/\/+$/, '')}/api/media?token=${registerVideoTokenWithMeta(bodyPath)}`
+                  out.media_url = file
+                  out.media_token_ttl_ms = VIDEO_TOKEN_TTL_MS
+                  const videoData: Record<string, string> = { file }
+                  if (thumbPath) {
+                    const cover = `${fwdBaseUrl.replace(/\/+$/, '')}/api/image?token=${registerImageTokenWithMeta(thumbPath, { isThumb: false, ttlMs: VIDEO_TOKEN_TTL_MS })}`
+                    out.media_thumb_url = cover
+                    videoData.cover = cover
+                  }
+                  messageSegments.push({ type: 'video', data: videoData })
+                } else if ((kind === 'image' || kind === 'emoji') && (hasBody || thumbPath)) {
+                  const p = hasBody ? bodyPath : thumbPath
+                  if (fwdMode === 'url' && fwdBaseUrl) {
+                    const isThumb = !hasBody
+                    const token = registerImageTokenWithMeta(p, {
+                      isThumb,
+                      sessionId: isThumb ? data.sessionId : undefined,
+                      imageMd5: isThumb ? raw.media_md5 : undefined
+                    })
+                    const file = `${fwdBaseUrl.replace(/\/+$/, '')}/api/image?token=${token}`
+                    if (hasBody) out.media_url = file
+                    else out.media_thumb_url = file
+                    messageSegments.push({ type: 'image', data: { file } })
+                  } else {
+                    // base64 模式：15MB 内联上限（20MB 图的 base64 ≈ 27MB 会撑爆 WS 帧），超限跳段保字段
+                    const buf = fs.readFileSync(p)
+                    if (buf.length <= 15 * 1024 * 1024) {
+                      messageSegments.push({ type: 'image', data: { file: `base64://${buf.toString('base64')}` } })
+                    }
+                  }
+                }
+              } catch { /* 单条媒体段失败不阻断 */ }
+              if (Array.isArray(raw.chat_record_items)) {
+                out.chat_record_items = mapForwardNodes(raw.chat_record_items)
+              }
+              outArr.push(out)
+            }
+            return outArr
+          }
+          forwardItemsOut = mapForwardNodes(data.forwardItems)
+        }
+
         const baseMsg: any = {
           time: Math.floor(Date.now() / 1000),
           self_id: selfId,
@@ -876,6 +942,12 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
           user_id: senderUserId,
           message: messageSegments,
           raw_message: data.content || '',
+          // 合并转发结构化字段（与插件 API 同名同形，路径已剥除；OneBot 消费方可选读）
+          forward_items: forwardItemsOut,
+          forward_title: data.forwardTitle || undefined,
+          forward_count: data.forwardCount ?? (forwardItemsOut ? forwardItemsOut.length : undefined),
+          forward_truncated: data.forwardTruncated === true ? true : undefined,
+          forward_max_items: data.forwardMaxItems ?? undefined,
           // 头像 CDN 链接（wx.qlogo.cn），供 OneBot 消费方取用
           avatar: data.avatarUrl ? String(data.avatarUrl) : undefined,
           sender: {

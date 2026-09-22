@@ -2622,8 +2622,21 @@ class HttpService {
         return title ? `[链接] ${title}` : '[链接]'
       case '6':
         return title ? `[文件] ${title}` : '[文件]'
-      case '19':
+      case '19': {
+        // F5（INBOUND-FORWARD-PUSH-PLAN）：拉取 API 与推送同语义——chatService 单点渲染全文；
+        // 解析失败/无条目回退标题占位
+        try {
+          const dto = chatService.getForwardChatRecordDTO(msg)
+          if (dto && dto.items.length > 0) {
+            const maxItems = Math.floor(Number(this.configService.get('forwardMaxItems'))) || 200
+            const maxDepth = Math.floor(Number(this.configService.get('forwardMaxDepth'))) || 3
+            const maxChars = Math.floor(Number(this.configService.get('forwardMaxChars'))) || 8000
+            const { items, truncated, total } = chatService.clipForwardItems(dto.items, maxItems, maxDepth)
+            return chatService.renderForwardText(dto.title, items, { total, truncated, kept: items.length, maxChars })
+          }
+        } catch {}
         return title ? `[聊天记录] ${title}` : '[聊天记录]'
+      }
       case '33':
       case '36':
         return title ? `[小程序] ${title}` : '[小程序]'
@@ -3679,6 +3692,16 @@ class HttpService {
                 // 入站语音推送（INBOUND-VOICE-PUSH-PLAN；与 config schema 同步加键，防"开关失忆"）
                 'inboundVoicePushEnabled',
                 'voiceMaxBytes',
+                // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN；与 config schema 同步加键）
+                'inboundForwardPushEnabled',
+                'forwardMaxItems',
+                'forwardMaxDepth',
+                'forwardMaxChars',
+                // 合并转发条目媒体还原（PHASE2 P1；与 config schema 同步加键）
+                'inboundForwardMediaEnabled',
+                'forwardImageMediaEnabled',
+                'forwardMaxMedia',
+                'forwardMediaTimeoutMs',
                 // SendAck 媒体回执（WebUI「消息管理」页读写）
                 'sendAckEnabled',
                 'sendAckUseEventMonitor',

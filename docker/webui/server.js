@@ -1706,20 +1706,54 @@ function broadcastPushEvent(obj) {
   }
 }
 
+// 合并转发条目媒体 token 化（INBOUND-FORWARD-PUSH-PLAN-PHASE2 §3.1）：
+// Electron 侧还原产物以 media_path / media_thumb_path 内部字段随 payload 到达，
+// 此处注册 token 直链后删除路径（契约原则 4：真实文件路径不对适配器暴露）。
+// token TTL 统一 1h（与 video/voice 同寿命，避免"分析慢一点就 404"）；emoji 透传的
+// 微信 CDN 直链（media_url 已终态）不注册、不改写。
+function mapForwardItemMedia(it) {
+  if (!it || typeof it !== 'object') return it
+  const out = Object.assign({}, it)
+  if (out.media_path) {
+    const token = registerMediaPath(out.media_path)
+    if (token) {
+      out.media_url = getPushImageBaseUrl() + '/api/media?token=' + token
+      out.media_token_ttl_ms = MEDIA_TOKEN_TTL_MS
+    }
+    delete out.media_path
+  }
+  if (out.media_thumb_path) {
+    // 缩略图/封面与媒体同寿命 1h（对齐 video_poster_url TTL 先例）
+    const token = registerImagePath(out.media_thumb_path, 60 * 60 * 1000)
+    if (token) {
+      out.media_thumb_url = getPushImageBaseUrl() + '/api/image?token=' + token
+      out.media_token_ttl_ms = 60 * 60 * 1000
+    }
+    delete out.media_thumb_path
+  }
+  if (Array.isArray(out.chat_record_items)) {
+    out.chat_record_items = out.chat_record_items.map(mapForwardItemMedia)
+  }
+  return out
+}
+
 function normalizePushPayload(p) {
   const realSessionId = String(p.sessionId || '')
   if (!realSessionId) return null
   // 仅转发真正的消息事件（ready/心跳等无 rawid 与内容的事件忽略）
-  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta) return null
+  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta && !p.forwardItems) return null
   const isGroup = realSessionId.endsWith('@chatroom')
   // 入站视频（ADAPTER-MEDIA-CONTRACT §5）：无图无表情时 type='video'，
   // 同时透出容器内路径（同机排障用）与自建 token 直链（跨容器可用）
   const hasVideo = !!(p.videoPath || p.videoMd5 || p.videoPosterPath || p.videoMeta)
   // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：语音消息独占事件，字段组镜像 video
   const hasVoice = !!(p.voicePath || p.voiceMeta)
+  // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §4.3）：media 类型优先（同帧异常时保守选 media），
+  // forward 次之；content 恒为渲染全文（§3.8-3 兼容规则，旧适配器 Plain(content) 即可分析）
+  const hasForward = Array.isArray(p.forwardItems) && p.forwardItems.length > 0
   const type = hasVideo && !p.imagePath && !p.emojiUrl ? 'video'
     : (hasVoice && !hasVideo && !p.imagePath && !p.emojiUrl ? 'voice'
-      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text')))
+      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : (hasForward ? 'forward' : 'text'))))
   let imageUrl
   if (p.imagePath) {
     const token = registerImagePath(p.imagePath)
@@ -1759,7 +1793,7 @@ function normalizePushPayload(p) {
       sender_id: senderId,
       sender_name: p.senderName || p.senderCard || p.sourceName || p.groupName || p.senderId || undefined,
       type: type,
-      content: String(p.content || ''),
+      content: String(p.content || p.forwardText || ''),
       timestamp: Number(p.timestamp || 0),
       avatar_url: p.avatarUrl ? String(p.avatarUrl) : undefined,
       group_avatar_url: p.groupAvatarUrl ? String(p.groupAvatarUrl) : undefined,
@@ -1779,6 +1813,13 @@ function normalizePushPayload(p) {
       voice_url: voiceUrl,
       voice_duration_sec: p.voiceMeta && Number.isFinite(Number(p.voiceMeta.durationSec)) ? Number(p.voiceMeta.durationSec) : undefined,
       voice_meta: p.voiceMeta || undefined,
+      // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §3.3）：content 与 forward_text 同值恒为渲染全文
+      forward_text: p.forwardText || undefined,
+      forward_title: p.forwardTitle || undefined,
+      forward_count: p.forwardCount ?? (hasForward ? p.forwardItems.length : undefined),
+      forward_items: hasForward ? p.forwardItems.map(mapForwardItemMedia) : undefined,
+      forward_truncated: p.forwardTruncated === true ? true : undefined,
+      forward_max_items: p.forwardMaxItems ?? undefined,
       // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，
       // 插件端据 quoted_is_self 钉死 Reply.sender_id = self_id
       quoted_sender_id: p.quoted && p.quoted.senderId ? String(p.quoted.senderId) : undefined,

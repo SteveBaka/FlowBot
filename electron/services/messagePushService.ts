@@ -2,7 +2,7 @@ import { ConfigService } from './config'
 import { chatService, type ChatSession, type Message } from './chatService'
 import { wcdbService } from './wcdbService'
 import { httpService } from './httpService'
-import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage, resolveInboundVoice as mediaResolveInboundVoice } from './mediaService'
+import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as mediaResolveInboundImage, resolveInboundVoice as mediaResolveInboundVoice, resolveForwardMediaForItems } from './mediaService'
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
@@ -69,6 +69,13 @@ interface MessagePushPayload {
     available: boolean
     unavailableReason?: 'not_cached' | 'decode_failed'
   }
+  // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §3.3；content 与 forwardText 同值恒为渲染全文）
+  forwardText?: string
+  forwardTitle?: string
+  forwardCount?: number
+  forwardItems?: any[]
+  forwardTruncated?: boolean
+  forwardMaxItems?: number
   quoted?: {
     senderId?: string    // 被引用者 wxid（refermsg chatusr 原样）
     senderName?: string  // 被引用者显示名（displayname）
@@ -887,6 +894,54 @@ class MessagePushService {
     }
   }
 
+  /** 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §4.2 F2）：开关开 + Type49 且解析出条目才产信号，
+   * 仅标题保持现状（type=text 占位），避免假 forward；解析失败绝不抛出推送循环。
+   * P1 媒体相位（PHASE2 §3.1）：clip → render 后按 rawItems 对条目挂 media_* 结构化字段，
+   * 不改渲染文本（OneBot 通道 content 逐字节不变，媒体只进结构化字段）。 */
+  private async resolveInboundForward(message: Message, messageCreateTimeSec: number) {
+    if (this.configService.get('inboundForwardPushEnabled') !== true) return undefined
+    if ((Number(message.localType || 0) & 0xFF) !== 49) return undefined
+    try {
+      const parsed = chatService.getForwardChatRecordDTO(message)
+      if (!parsed || parsed.items.length === 0) return undefined
+      const maxItems = Math.floor(Number(this.configService.get('forwardMaxItems'))) || 200
+      const maxDepth = Math.floor(Number(this.configService.get('forwardMaxDepth'))) || 3
+      const maxChars = Math.floor(Number(this.configService.get('forwardMaxChars'))) || 8000
+      const { items, rawItems, truncated, total } = chatService.clipForwardItems(parsed.items, maxItems, maxDepth, parsed.rawItems)
+      const forwardText = chatService.renderForwardText(parsed.title, items, {
+        total,
+        truncated,
+        kept: items.length,
+        maxChars
+      })
+      // PHASE2 P1：转发内图片/表情/视频 token 化（语音/文件按契约降级）；失败绝不阻断文本推送。
+      // 延时闸 forwardMediaTimeoutMs（默认 3s）硬控媒体相对推送的额外延迟。
+      if (this.configService.get('inboundForwardMediaEnabled') === true) {
+        const maxMedia = Math.floor(Number(this.configService.get('forwardMaxMedia'))) || 20
+        const mediaTimeoutMs = Math.min(60000, Math.max(500, Math.floor(Number(this.configService.get('forwardMediaTimeoutMs'))) || 3000))
+        try {
+          await resolveForwardMediaForItems(items, rawItems, {
+            maxMedia,
+            messageCreateTimeSec,
+            timeoutMs: mediaTimeoutMs
+          })
+        } catch (e) {
+          console.warn('[MessagePushService] forward media resolve failed (non-fatal):', e)
+        }
+      }
+      return {
+        forwardText,
+        forwardTitle: parsed.title || undefined,
+        forwardCount: items.length,
+        forwardItems: items,
+        forwardTruncated: truncated === true ? true : undefined,
+        forwardMaxItems: maxItems
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
     if (!senderWxid) return undefined
     try {
@@ -972,6 +1027,7 @@ class MessagePushService {
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
     const video = await this.resolveInboundVideo(message)
     const voice = await this.resolveInboundVoice(message, sessionId)
+    const forward = await this.resolveInboundForward(message, createTime)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1035,7 +1091,6 @@ class MessagePushService {
         senderId,
         senderName,
         senderCard,
-        content,
         timestamp: createTime,
         imagePath,
         imageBaseMd5: imageMd5 || undefined,
@@ -1044,7 +1099,10 @@ class MessagePushService {
         emojiUrl,
         quoted,
         ...(video ?? {}),
-        ...(voice ?? {})
+        ...(voice ?? {}),
+        ...(forward ?? {}),
+        // content 恒为渲染全文（§3.8-3 兼容规则：旧适配器 Plain(content) 即可分析）
+        content: forward?.forwardText ?? content
       }
     }
 
@@ -1065,7 +1123,6 @@ class MessagePushService {
       sourceName,
       senderId,
       senderName: sourceName,
-      content,
       timestamp: createTime,
       imagePath,
       imageBaseMd5: imageMd5 || undefined,
@@ -1074,7 +1131,9 @@ class MessagePushService {
       emojiUrl,
       quoted,
       ...(video ?? {}),
-      ...(voice ?? {})
+      ...(voice ?? {}),
+      ...(forward ?? {}),
+      content: forward?.forwardText ?? content
     }
   }
 

@@ -5,7 +5,7 @@
  * MEDIA-SERVICE-DESIGN.md §六；本模块只产出「信号」（临时文件 + mime），
  * 剪贴板装载（xclip）留在发送线程（linux.ts）同步执行。
  */
-import { randomUUID } from 'crypto'
+import { createDecipheriv, createHash, randomUUID } from 'crypto'
 import { tmpdir } from 'os'
 import * as fs from 'fs'
 import * as fsp from 'fs/promises'
@@ -46,7 +46,7 @@ function videoUrlTimeoutMs(): number {
  * 写入 tmpdir 后无人回收：发送成功不删、失败也不删，只随容器重建消失。
  * 对齐 cdnFetchService.sweepExpiredProducts 模式：按前缀 + mtime 惰性清扫，
  * 仅删本模块命名产物，24h 龄期保证不误删在用文件。 */
-const OUTBOUND_TMP_PREFIXES = ['weflow_obv_', 'weflow_img_', 'weflow_comp_']
+const OUTBOUND_TMP_PREFIXES = ['weflow_obv_', 'weflow_img_', 'weflow_comp_', 'weflow_fwd_']
 const OUTBOUND_TMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const OUTBOUND_TMP_SWEEP_INTERVAL_MS = 60 * 60 * 1000
 let lastOutboundTmpSweep = 0
@@ -1028,5 +1028,655 @@ async function tryCompressImage(imagePath: string, size: number): Promise<string
   } catch {
     return null
   }
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ * 入站合并转发条目媒体还原（INBOUND-FORWARD-PUSH-PLAN-PHASE2 §3.1 P1）
+ *
+ * 输入：chatService 解析出的 raw dataitem（aeskey / dataurl / cdn 字段等）。
+ * 输出：挂到 DTO item 上的 media_* 结构化字段（wire 契约 snake_case）。
+ * 原则：推送不内联 base64——本地产物由 server.js 注册 token 直链（emoji 例外，
+ * 直接透传微信 CDN 直链，与常规 emoji_url 同消费方式）；单条失败不阻断文本行；
+ * 不触发微信下载（cdnFetch 除外，且受 imageCdnDirectFetchEnabled + 风控门禁约束）。
+ * 还原产物落 tmpdir（weflow_fwd_ 前缀，24h 惰性清扫）。
+ * ══════════════════════════════════════════════════════════════════ */
+
+export type ForwardMediaKind = 'image' | 'video' | 'voice' | 'file' | 'emoji'
+
+/** DTO item 媒体挂载目标（字段名与 chatService.ForwardItemDTO / PHASE2 §3.1.1 契约一致） */
+export interface ForwardMediaAttachTarget {
+  datatype?: number
+  media_kind?: ForwardMediaKind
+  media_url?: string
+  media_thumb_url?: string
+  media_duration_sec?: number
+  media_bytes?: number
+  media_md5?: string
+  media_available?: boolean
+  media_error?: string
+  media_token_ttl_ms?: number
+  media_path?: string
+  media_thumb_path?: string
+  chat_record_items?: any[]
+}
+
+/** raw dataitem 媒体原料（chatService.parseForwardChatRecordDataItem 输出子集） */
+interface ForwardMediaRaw {
+  dataurl?: string
+  datathumburl?: string
+  datacdnurl?: string
+  cdnthumburl?: string
+  cdndatakey?: string
+  cdnthumbkey?: string
+  aeskey?: string
+  md5?: string
+  fullmd5?: string
+  thumbfullmd5?: string
+  datasize?: number
+  thumbsize?: number
+  duration?: number
+  sourcetime?: string
+  srcMsgCreateTime?: number
+  externurl?: string
+  cdnurlstring?: string
+  encrypturlstring?: string
+  chatRecordList?: any[]
+}
+
+interface ForwardItemMediaResult {
+  kind: ForwardMediaKind
+  path?: string
+  thumbPath?: string
+  url?: string
+  durationSec?: number
+  bytes?: number
+  md5?: string
+  available: boolean
+  error?: string
+}
+
+const FORWARD_MEDIA_KIND_BY_DATATYPE: Record<number, ForwardMediaKind> = {
+  2: 'image', // 相片（真实数据实证与 datatype=3 同映射）
+  3: 'image',
+  34: 'voice',
+  43: 'video',
+  37: 'emoji', // 動態貼圖（uiemoticon 表情族，实测 datatype=37）
+  47: 'emoji',
+  8: 'file',
+  49: 'file'
+}
+
+/** 单事件媒体还原总时间闸默认值（毫秒）——以 config `forwardMediaTimeoutMs` 为准（默认 3000）。
+ * 实测无闸时含图转发的缩略下载等待会把推送阻塞 30s，此闸保护投递延迟。 */
+const FORWARD_MEDIA_DEFAULT_TIMEOUT_MS = 3000
+const FORWARD_MEDIA_DOWNLOAD_TIMEOUT_MS = 15000
+const FORWARD_MEDIA_VIDEO_TIMEOUT_MS = 20000
+const FORWARD_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+const FORWARD_THUMB_MAX_BYTES = 2 * 1024 * 1024
+
+/** 下载地址门禁（安全红线）：只允许公网 http(s)；封禁环回 / 私网 / 链路本地 / IPv6 字面量 */
+function isPublicHttpUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(String(rawUrl || ''))
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+    const host = u.hostname.toLowerCase()
+    if (!host) return false
+    if (host.includes(':')) return false // IPv6 字面量一律拒绝（CDN 均为域名/IPv4）
+    if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.localhost')) return false
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
+    if (m) {
+      const a = Number(m[1]); const b = Number(m[2])
+      if (a === 0 || a === 10 || a === 127 || a >= 224) return false
+      if (a === 169 && b === 254) return false
+      if (a === 172 && b >= 16 && b <= 31) return false
+      if (a === 192 && b === 168) return false
+    }
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 图片魔数门禁（与 snsService.isValidImageBuffer 同构）：解密结果必须是合法图片头 */
+function isValidForwardImageMagic(buf: Buffer): boolean {
+  if (!buf || buf.length < 12) return false
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return true
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return true
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return true
+  if (buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+    && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return true
+  return false
+}
+
+function detectForwardImageExt(buf: Buffer): string | null {
+  if (buf[0] === 0x47 && buf[1] === 0x49 && buf[2] === 0x46) return '.gif'
+  if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47) return '.png'
+  if (buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF) return '.jpg'
+  if (buf.length >= 12 && buf[0] === 0x52 && buf[1] === 0x49 && buf[2] === 0x46 && buf[3] === 0x46
+    && buf[8] === 0x57 && buf[9] === 0x45 && buf[10] === 0x42 && buf[11] === 0x50) return '.webp'
+  return null
+}
+
+/** 密钥派生（与 snsService.buildKeyTries 同构：hex-decode / utf8-16 / md5 / base64） */
+function buildForwardAesKeyTries(aesKey: string): Buffer[] {
+  const key = String(aesKey || '')
+  if (!key) return []
+  const tries: Buffer[] = []
+  const hexStr = key.replace(/\s/g, '')
+  if (hexStr.length >= 32 && /^[0-9a-fA-F]+$/.test(hexStr)) {
+    try {
+      const keyBuf = Buffer.from(hexStr.slice(0, 32), 'hex')
+      if (keyBuf.length === 16) tries.push(keyBuf)
+    } catch { /* 非法 hex 跳过 */ }
+  }
+  if (key.length >= 16) tries.push(Buffer.from(key, 'utf8').subarray(0, 16))
+  tries.push(createHash('md5').update(key).digest())
+  try {
+    const b64Buf = Buffer.from(key, 'base64')
+    if (b64Buf.length >= 16) tries.push(b64Buf.subarray(0, 16))
+  } catch { /* 非法 base64 跳过 */ }
+  return tries
+}
+
+/** 复合密钥字段（cdnthumbkey / cdndatakey）："key-加密段长-总长" → 取 key 与加密前缀长 */
+function parseCompositeCdnKey(value?: string): { key: string; encPrefixLen?: number } {
+  const raw = String(value || '').trim()
+  if (!raw) return { key: '' }
+  const parts = raw.split('-')
+  const key = (parts[0] || '').trim()
+  let encPrefixLen: number | undefined
+  const n = parseInt(parts[1] || '', 10)
+  if (Number.isFinite(n) && n > 0 && n % 16 === 0) encPrefixLen = n
+  return { key, encPrefixLen }
+}
+
+/** 4.x 的 cdndataurl / cdnthumburl 是 DER filekey（hex blob）而非 URL——据此形态分流 */
+function isHexFileKey(value: string): boolean {
+  const s = String(value || '').trim()
+  return s.length >= 32 && /^[0-9a-fA-F]+$/.test(s)
+}
+
+/**
+ * 微信 CDN 媒体 blob 解密尝试（魔数门禁：结果必须是合法图片头才被接受）。
+ * 同构于 snsService.decryptEmojiAes（ciphertalk 逆向实现）的收敛子集：
+ * 分段前缀布局（cdnthumbkey 段长）/ 整段 ECB / CBC(IV=key) / CBC(IV=头 16B)。
+ */
+function tryDecryptForwardImageBlob(encData: Buffer, keyMaterials: string[], encPrefixLen?: number): Buffer | null {
+  if (!encData || encData.length < 16) return null
+  const keys: Buffer[] = []
+  for (const material of keyMaterials) {
+    for (const k of buildForwardAesKeyTries(material)) {
+      if (k.length === 16 && !keys.some((ex) => ex.equals(k))) keys.push(k)
+    }
+  }
+  for (const key of keys) {
+    // ① 分段布局：[encPrefixLen 密文][其后明文]
+    if (encPrefixLen && encPrefixLen > 0 && encPrefixLen <= encData.length && encPrefixLen % 16 === 0) {
+      try {
+        const dec = createDecipheriv('aes-128-ecb', key, null)
+        dec.setAutoPadding(false)
+        const head = Buffer.concat([dec.update(encData.subarray(0, encPrefixLen)), dec.final()])
+        const merged = Buffer.concat([head, encData.subarray(encPrefixLen)])
+        if (isValidForwardImageMagic(merged)) return merged
+      } catch { /* 尝试下一个 */ }
+    }
+    if (encData.length % 16 !== 0) continue
+    // ② 整段 ECB
+    try {
+      const dec = createDecipheriv('aes-128-ecb', key, null)
+      dec.setAutoPadding(false)
+      const out = Buffer.concat([dec.update(encData), dec.final()])
+      if (isValidForwardImageMagic(out)) return out
+    } catch { /* 尝试下一个 */ }
+    // ③ CBC：IV = key
+    try {
+      const dec = createDecipheriv('aes-128-cbc', key, key)
+      dec.setAutoPadding(true)
+      const out = Buffer.concat([dec.update(encData), dec.final()])
+      if (isValidForwardImageMagic(out)) return out
+    } catch { /* 尝试下一个 */ }
+    // ④ CBC：IV = 头 16 字节
+    if (encData.length > 32) {
+      try {
+        const dec = createDecipheriv('aes-128-cbc', key, encData.subarray(0, 16))
+        dec.setAutoPadding(true)
+        const out = Buffer.concat([dec.update(encData.subarray(16)), dec.final()])
+        if (isValidForwardImageMagic(out)) return out
+      } catch { /* 尝试下一个 */ }
+    }
+  }
+  return null
+}
+
+/** 明文（合法图片魔数）直接可用；否则按密钥材料尝试解密 */
+function normalizeForwardImageBuffer(buf: Buffer, keyMaterials: string[], encPrefixLen?: number): Buffer | null {
+  if (!buf || buf.length === 0) return null
+  if (isValidForwardImageMagic(buf)) return buf
+  return tryDecryptForwardImageBlob(buf, keyMaterials, encPrefixLen)
+}
+
+/** http(s) 下载（超时 + 大小闸 + 防盗链 UA + 有限跳转）；destPath 给定时流式落盘 */
+async function downloadForwardHttp(
+  url: string,
+  opts: { maxBytes: number; timeoutMs: number; destPath?: string; redirectsLeft?: number }
+): Promise<{ buf?: Buffer; destPath?: string; bytes: number }> {
+  const redirectsLeft = opts.redirectsLeft ?? 3
+  const mod = url.startsWith('https') ? https : http
+  return await new Promise((resolve, reject) => {
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let fileHandle: fsp.FileHandle | undefined
+    const chunks: Buffer[] = []
+    let total = 0
+    let outStream: fs.WriteStream | undefined
+    const settle = (fn: () => void): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      fn()
+    }
+    const fail = (err: Error): void => {
+      settle(() => {
+        try { outStream?.destroy() } catch { /* 忽略 */ }
+        void fileHandle?.close().catch(() => undefined)
+        if (opts.destPath) { try { fs.unlinkSync(opts.destPath) } catch { /* 半成品可能不存在 */ } }
+        reject(err)
+      })
+    }
+    const req = mod.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Accept': '*/*'
+      }
+    }, (res) => {
+      const code = res.statusCode || 0
+      if (code >= 301 && code <= 308 && res.headers.location) {
+        settle(() => {
+          req.destroy()
+          res.resume()
+          if (redirectsLeft <= 0) { reject(new Error('too many redirects')); return }
+          const next = new URL(res.headers.location as string, url).toString()
+          downloadForwardHttp(next, { ...opts, redirectsLeft: redirectsLeft - 1 }).then(resolve, reject)
+        })
+        return
+      }
+      if (code !== 200) {
+        fail(new Error(`HTTP ${code}`))
+        return
+      }
+      if (opts.destPath) {
+        outStream = fs.createWriteStream(opts.destPath, { mode: 0o600 })
+        outStream.on('error', (e: Error) => fail(e))
+      }
+      res.on('data', (c: Buffer) => {
+        total += c.length
+        if (total > opts.maxBytes) {
+          fail(new Error(`size exceeded: ${total} > ${opts.maxBytes}`))
+          res.destroy()
+          return
+        }
+        if (outStream) outStream.write(c)
+        else chunks.push(c)
+      })
+      res.on('end', () => {
+        settle(() => {
+          if (outStream) {
+            outStream.end(() => resolve({ destPath: opts.destPath, bytes: total }))
+          } else {
+            resolve({ buf: Buffer.concat(chunks), bytes: total })
+          }
+        })
+      })
+      res.on('error', (e: Error) => fail(e))
+    })
+    timer = setTimeout(() => {
+      fail(new Error(`download timeout after ${opts.timeoutMs}ms`))
+      req.destroy()
+    }, opts.timeoutMs)
+    req.on('error', (e: Error) => fail(e))
+  })
+}
+
+async function writeForwardMediaTmp(buf: Buffer, ext: string): Promise<string> {
+  const tmpPath = path.join(tmpdir(), `weflow_fwd_${randomUUID()}${ext}`)
+  await fsp.writeFile(tmpPath, buf, { mode: 0o600 })
+  return tmpPath
+}
+
+/** 条目源消息时间 → ms（cdnFetch 仅增量门禁输入）：srcMsgCreateTime（unix 秒）优先，
+ * sourcetime 容错解析次之（"2026-9-22 21:15" 非补零格式，Date 严格解析会 NaN），最后回退转发消息时间 */
+function forwardItemCreateTimeMs(raw: ForwardMediaRaw, fallbackSec: number): number {
+  const t = Number(raw.srcMsgCreateTime)
+  if (Number.isFinite(t) && t > 0) return Math.floor(t) * 1000
+  const s = String(raw.sourcetime || '').trim()
+  if (s) {
+    const m = /(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(s)
+    if (m) {
+      const ms = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), Number(m[6] || '0')).getTime()
+      if (Number.isFinite(ms) && ms > 0) return ms
+    }
+  }
+  return Math.floor(Number(fallbackSec) || 0) * 1000
+}
+
+/** 缩略/封面还原（PHASE2 P1 §3.1.3 + 方案 A，2026-09-22 拍板）：
+ * URL 形态 → https 直下；DER hex 形态（4.x cdnthumburl 实测）→ thumb cdnFetch。
+ * **免年龄闸**——"仅增量"门禁的本意是"超龄消息永久降级缩略图"，而转发场景缩略不在本地、
+ * 必须走 CDN 才能兑现该降级；单 filekey 单次 + 限流闸照旧兜底。 */
+async function resolveForwardThumbnail(
+  raw: ForwardMediaRaw,
+  deadlineAt: number
+): Promise<{ path?: string; error?: string; rejected?: boolean }> {
+  const timeLeft = (): number => Math.max(0, deadlineAt - Date.now())
+  const thumbUrl = raw.datathumburl && isPublicHttpUrl(raw.datathumburl) ? raw.datathumburl : ''
+  const thumbKey = isHexFileKey(raw.cdnthumburl || '')
+    ? raw.cdnthumburl
+    : (isHexFileKey(raw.datathumburl || '') ? raw.datathumburl : '')
+  if (raw.datathumburl && !thumbUrl && !thumbKey) return { rejected: true }
+  if (thumbUrl) {
+    try {
+      const r = await downloadForwardHttp(thumbUrl, { maxBytes: FORWARD_THUMB_MAX_BYTES, timeoutMs: Math.min(FORWARD_MEDIA_DOWNLOAD_TIMEOUT_MS, Math.max(200, timeLeft())) })
+      const comp = parseCompositeCdnKey(raw.cdnthumbkey)
+      const keyMaterials = [comp.key, raw.cdndatakey || '', raw.aeskey || ''].filter(Boolean) as string[]
+      const img = r.buf ? normalizeForwardImageBuffer(r.buf, keyMaterials, comp.encPrefixLen) : null
+      if (img) return { path: await writeForwardMediaTmp(img, detectForwardImageExt(img) || '.jpg') }
+      return { error: 'decode_failed' }
+    } catch {
+      return { error: 'download_failed' }
+    }
+  }
+  if (thumbKey) {
+    const thumbAes = raw.cdnthumbkey || raw.cdndatakey || raw.aeskey || ''
+    const thumbLen = Number(raw.thumbsize) || 0
+    if (ConfigService.getInstance().get('imageCdnDirectFetchEnabled') !== true) return { error: 'cdn_unavailable' }
+    if (!thumbAes || !(thumbLen > 0)) return { error: 'cdn_unavailable' }
+    try {
+      const r = await cdnFetchService.fetch({
+        fileKey: String(thumbKey),
+        aesKey: String(thumbAes),
+        fileLen: thumbLen,
+        fullPath: cdnFetchService.buildSavePath(raw.thumbfullmd5 || 'fwdthumb'),
+        md5: raw.thumbfullmd5,
+        // 方案 A：缩略免年龄闸，不传 messageCreateTime（单 key 单次 + 限流仍在）
+        messageCreateTime: undefined,
+        timeoutMs: Math.max(200, timeLeft())
+      })
+      if (r.success && r.localPath) return { path: r.localPath }
+      return { error: r.error || 'cdn_failed' }
+    } catch {
+      return { error: 'cdn_failed' }
+    }
+  }
+  return {}
+}
+
+async function resolveOneForwardMedia(
+  raw: ForwardMediaRaw,
+  kind: ForwardMediaKind,
+  opts: { messageCreateTimeSec: number; deadlineAt: number }
+): Promise<ForwardItemMediaResult> {
+  const md5 = String(raw.fullmd5 || raw.md5 || '') || undefined
+  const durationRaw = Number(raw.duration)
+  const durationSec = Number.isFinite(durationRaw) && durationRaw > 0 ? Math.round(durationRaw) : undefined
+  // 相位剩余时间：所有下载/直取的单次上限都不超过它（延时闸 forwardMediaTimeoutMs 的传导）
+  const timeLeft = (): number => Math.max(0, opts.deadlineAt - Date.now())
+
+  if (kind === 'voice') {
+    // 转发内嵌语音常缺少可定位的 silk blob（PHASE2 §3.1.4-2），本期不承诺还原
+    return { kind, durationSec, md5, available: false, error: 'not_recoverable' }
+  }
+  if (kind === 'file') {
+    // 文件本体默认不还原（PHASE2 §3.1.3：体积/权限），仅保留描述字段
+    return { kind, available: false, error: 'skipped' }
+  }
+  if (kind === 'emoji') {
+    // 表情/動態貼圖：微信 CDN 直链透传（47 dataurl/datathumburl；37 externurl/cdnurlstring/encrypturlstring）
+    let sawRejected = false
+    let url = ''
+    for (const u of [raw.dataurl, raw.datathumburl, raw.externurl, raw.cdnurlstring, raw.encrypturlstring]) {
+      if (!u) continue
+      if (isPublicHttpUrl(u)) { url = u; break }
+      sawRejected = true
+    }
+    if (url) return { kind, url, md5, available: true }
+    return { kind, md5, available: false, error: sawRejected ? 'url_rejected' : 'no_source' }
+  }
+
+  let lastError: string | undefined
+  let sawRejected = false
+
+  if (kind === 'image') {
+    // 含图还原开关（forwardImageMediaEnabled，WebUI「媒体链路」可关）：该能力尚不完善
+    //（老图受仅增量门禁、缩略直取待修）——关闭时图片条目零 I/O 直接降级占位，文本行不受影响
+    if (ConfigService.getInstance().get('forwardImageMediaEnabled') !== true) {
+      return { kind, md5, durationSec, available: false, error: 'skipped' }
+    }
+    let imgPath: string | undefined
+    // ① 无风控直链（dataurl；datacdnurl 为真实 URL 形态时同用）
+    const bodyUrls = [raw.dataurl, isHexFileKey(raw.datacdnurl || '') ? undefined : raw.datacdnurl]
+    for (const u of bodyUrls) {
+      if (!u) continue
+      if (!isPublicHttpUrl(u)) { sawRejected = true; continue }
+      try {
+        const r = await downloadForwardHttp(u, { maxBytes: FORWARD_IMAGE_MAX_BYTES, timeoutMs: Math.min(FORWARD_MEDIA_DOWNLOAD_TIMEOUT_MS, Math.max(200, timeLeft())) })
+        const comp = parseCompositeCdnKey(raw.cdndatakey)
+        const keyMaterials = [comp.key, raw.aeskey || ''].filter(Boolean) as string[]
+        const img = r.buf ? normalizeForwardImageBuffer(r.buf, keyMaterials, comp.encPrefixLen) : null
+        if (img) {
+          imgPath = await writeForwardMediaTmp(img, detectForwardImageExt(img) || '.jpg')
+          break
+        }
+        lastError = 'decode_failed'
+      } catch {
+        lastError = 'download_failed'
+      }
+    }
+    // ② cdnFetch 正文（4.x 实测原料：fileKey=datacdnurl/DER、aesKey=cdndatakey、fileLen=datasize；
+    // 幻影字段 aeskey 只作旧版兜底）。受 imageCdnDirectFetchEnabled + 仅增量年龄闸（方案 A 保闸）
+    const bodyFileKey = isHexFileKey(raw.datacdnurl || '') ? String(raw.datacdnurl) : ''
+    const bodyAesKey = String(raw.cdndatakey || raw.aeskey || '')
+    const bodyFileLen = Number(raw.datasize) || 0
+    if (!imgPath && (bodyFileKey || bodyAesKey)) {
+      if (ConfigService.getInstance().get('imageCdnDirectFetchEnabled') !== true || !(bodyFileKey && bodyAesKey && bodyFileLen > 0)) {
+        lastError = lastError || 'cdn_unavailable'
+      } else {
+        try {
+          const r = await cdnFetchService.fetch({
+            fileKey: bodyFileKey,
+            aesKey: bodyAesKey,
+            fileLen: bodyFileLen,
+            fullPath: cdnFetchService.buildSavePath(raw.fullmd5 || raw.md5 || 'fwdimg'),
+            md5: raw.md5,
+            messageCreateTime: forwardItemCreateTimeMs(raw, opts.messageCreateTimeSec),
+            timeoutMs: Math.max(200, timeLeft())
+          })
+          if (r.success && r.localPath) {
+            imgPath = r.localPath
+          } else {
+            lastError = lastError || r.error || 'cdn_failed'
+          }
+        } catch {
+          lastError = lastError || 'cdn_failed'
+        }
+      }
+    }
+    // ③ 缩略降级（URL 直下 / DER hex 走 thumb cdnFetch，免年龄闸）
+    let thumbPath: string | undefined
+    let thumbError: string | undefined
+    if (!imgPath) {
+      const thumb = await resolveForwardThumbnail(raw, opts.deadlineAt)
+      thumbPath = thumb.path
+      thumbError = thumb.error
+      if (thumb.rejected) sawRejected = true
+    }
+    let bytes: number | undefined
+    if (imgPath) {
+      try { bytes = fs.statSync(imgPath).size } catch { /* stat 失败不阻断 */ }
+    }
+    return {
+      kind,
+      path: imgPath,
+      thumbPath,
+      bytes,
+      md5,
+      durationSec,
+      available: !!imgPath,
+      // thumb 成功优先标 thumb_only；失败时报 thumb 的真实错误（不被正文错误遮蔽），
+      // 再退正文错误 / 来源分流
+      error: imgPath ? undefined
+        : thumbPath ? 'thumb_only'
+        : (thumbError || lastError || (sawRejected ? 'url_rejected' : 'no_source'))
+    }
+  }
+
+  // kind === 'video'
+  let videoPath: string | undefined
+  let thumbPath: string | undefined
+  // ① 本地视频缓存（videoService 按 md5；同 resolveInboundVideo 复用产物）
+  if (md5) {
+    try {
+      const info = await videoService.getVideoInfo(md5, { includePoster: true, posterFormat: 'fileUrl' })
+      if (info?.exists && info.videoUrl && fs.existsSync(info.videoUrl)) {
+        videoPath = info.videoUrl
+        if (info.coverUrl && info.coverUrl.startsWith('file://')) {
+          try {
+            const coverPath = fileURLToPath(info.coverUrl)
+            if (fs.existsSync(coverPath)) thumbPath = coverPath
+          } catch { /* 封面路径解析失败不阻断 */ }
+        }
+      }
+    } catch { /* 缓存查询失败继续 */ }
+  }
+  // ② dataurl 下载（体积闸 videoMaxBytes）
+  if (!videoPath && raw.dataurl) {
+    if (!isPublicHttpUrl(raw.dataurl)) {
+      sawRejected = true
+    } else {
+      try {
+        const dest = path.join(tmpdir(), `weflow_fwd_${randomUUID()}.mp4`)
+        await downloadForwardHttp(raw.dataurl, {
+          maxBytes: videoMaxBytes(),
+          timeoutMs: Math.min(FORWARD_MEDIA_VIDEO_TIMEOUT_MS, Math.max(200, timeLeft())),
+          destPath: dest
+        })
+        videoPath = dest
+        try {
+          const head = Buffer.alloc(16)
+          const fd = await fsp.open(dest, 'r')
+          try { await fd.read(head, 0, 16, 0) } finally { await fd.close() }
+          const ext = detectVideoExt(head)
+          if (ext && ext !== '.mp4') {
+            const renamed = dest.replace(/\.mp4$/, ext)
+            await fsp.rename(dest, renamed)
+            videoPath = renamed
+          }
+        } catch { /* 探测失败保持 .mp4 */ }
+      } catch (e) {
+        lastError = /size exceeded/.test(String(e)) ? 'too_large' : 'download_failed'
+      }
+    }
+  }
+  // ③ 封面（URL 直下 / DER hex 走 thumb cdnFetch；body 成败都提供——Video 段 cover 独立有用）
+  let thumbError: string | undefined
+  if (!thumbPath) {
+    const thumb = await resolveForwardThumbnail(raw, opts.deadlineAt)
+    thumbPath = thumb.path
+    thumbError = thumb.error
+    if (thumb.rejected) sawRejected = true
+  }
+  let bytes: number | undefined
+  if (videoPath) {
+    try { bytes = fs.statSync(videoPath).size } catch { /* stat 失败不阻断 */ }
+  }
+  return {
+    kind,
+    path: videoPath,
+    thumbPath,
+    bytes,
+    md5,
+    durationSec,
+    available: !!videoPath,
+    error: videoPath ? undefined
+      : thumbPath ? 'thumb_only'
+      : (thumbError || lastError || (sawRejected ? 'url_rejected' : 'no_source'))
+  }
+}
+
+/** 转发条目媒体还原编排（PHASE2 §4.2.2）：深度优先、预算内尽力、单条失败不阻断。
+ * 延时闸：整相位（含单条在途尝试）受 timeoutMs 硬超时（config forwardMediaTimeoutMs，默认 3s），
+ * 超时条目 media_error:'skipped'——保护推送投递延迟（实测无闸时含图转发阻塞 30s）。 */
+export async function resolveForwardMediaForItems(
+  items: ForwardMediaAttachTarget[],
+  rawItems: any[],
+  opts: { maxMedia: number; messageCreateTimeSec: number; timeoutMs?: number }
+): Promise<void> {
+  const maxMedia = Number.isFinite(opts.maxMedia) && opts.maxMedia > 0 ? Math.floor(opts.maxMedia) : 20
+  const timeoutMs = Number.isFinite(opts.timeoutMs) && (opts.timeoutMs as number) > 0
+    ? Math.floor(opts.timeoutMs as number)
+    : FORWARD_MEDIA_DEFAULT_TIMEOUT_MS
+  const deadline = Date.now() + timeoutMs
+  let budget = maxMedia
+
+  const attach = (item: ForwardMediaAttachTarget, r: ForwardItemMediaResult): void => {
+    item.media_kind = r.kind
+    item.media_available = r.available === true
+    if (r.error) item.media_error = r.error
+    if (r.path) item.media_path = r.path
+    if (r.thumbPath) item.media_thumb_path = r.thumbPath
+    if (r.url) item.media_url = r.url
+    if (Number.isFinite(r.durationSec)) item.media_duration_sec = r.durationSec
+    if (Number.isFinite(r.bytes)) item.media_bytes = r.bytes
+    if (r.md5) item.media_md5 = r.md5
+  }
+
+  const walk = async (nodes: ForwardMediaAttachTarget[], raws: any[]): Promise<void> => {
+    for (let i = 0; i < nodes.length; i++) {
+      const item = nodes[i]
+      if (!item || typeof item !== 'object') continue
+      const raw = (raws && raws[i]) || undefined
+      const kind = FORWARD_MEDIA_KIND_BY_DATATYPE[Number(item.datatype) || 0]
+      if (kind) {
+        const needsBudget = kind === 'image' || kind === 'video'
+        if (needsBudget && (budget <= 0 || Date.now() > deadline)) {
+          attach(item, { kind, available: false, error: 'skipped' })
+        } else {
+          if (needsBudget) budget -= 1
+          const remaining = deadline - Date.now()
+          let result: ForwardItemMediaResult
+          if (remaining <= 0) {
+            result = { kind, available: false, error: 'skipped' }
+          } else {
+            // 单条硬超时竞速：在途下载/直取（如 thumb cdnFetch 的微信进程等待）不得突破延时闸
+            let timer: ReturnType<typeof setTimeout> | undefined
+            try {
+              result = await Promise.race([
+                resolveOneForwardMedia((raw && typeof raw === 'object') ? raw as ForwardMediaRaw : {}, kind, {
+                  messageCreateTimeSec: opts.messageCreateTimeSec,
+                  deadlineAt: deadline
+                }),
+                new Promise<ForwardItemMediaResult>((resolve) => {
+                  timer = setTimeout(() => resolve({ kind, available: false, error: 'skipped' }), remaining)
+                })
+              ])
+            } catch {
+              result = { kind, available: false, error: 'resolve_exception' }
+            } finally {
+              if (timer) clearTimeout(timer)
+            }
+          }
+          attach(item, result)
+          // 诊断日志（ADAPTER-FORWARD-MEDIA-NOSOURCE §5.1）：原料/结果一览，定位 no_source 与错误遮蔽类问题
+          const rawAny = (raw && typeof raw === 'object') ? raw as any : {}
+          console.log(`[ForwardMedia] kind=${kind} ok=${result.available === true} err=${result.error || '-'} body=${!!result.path} thumb=${!!result.thumbPath} url=${!!result.url} has_dataurl=${!!rawAny.dataurl} has_cdnkey=${!!(rawAny.cdndatakey || rawAny.aeskey)} has_filekey=${isHexFileKey(rawAny.datacdnurl || '')} has_thumbkey=${isHexFileKey(rawAny.cdnthumburl || '')} datasize=${Number(rawAny.datasize) || 0} thumbsize=${Number(rawAny.thumbsize) || 0}`)
+        }
+      }
+      if (Array.isArray(item.chat_record_items) && item.chat_record_items.length > 0) {
+        const nestedRaw = raw && typeof raw === 'object' ? (raw as any).chatRecordList : undefined
+        await walk(item.chat_record_items, Array.isArray(nestedRaw) ? nestedRaw : [])
+      }
+    }
+  }
+
+  await walk(items, rawItems || [])
 }
 

@@ -35,6 +35,8 @@ export interface CdnFetchRequest {
   md5?: string
   /** 消息 createTime（ms）；「仅增量」门禁依据，超龄消息永久降级缩略图（禁历史回填） */
   messageCreateTime?: number
+  /** 单次下载等待上限（ms）；缺省取 imageCdnDirectFetchTimeoutMs（默认 30s）。转发媒体传小值控制推送延迟 */
+  timeoutMs?: number
 }
 
 export type CdnFetchDisposition = 'retry_once' | 'permanent_thumb' | 'impl_bug' | 'unknown'
@@ -237,7 +239,8 @@ export class CdnFetchService {
       return { success: false, error: `cdn_ret_${ret}`, code: ret, disposition: mapCdnErrorCode(ret) }
     }
     // ret=0 受理 → 产物由微信 CDN 线程异步落盘，轮询（500ms 间隔 / 超时上限）
-    const ok = await this.waitForFile(req.fullPath, this.getTimeoutMs())
+    const waitMs = Number(req.timeoutMs) > 0 ? Math.min(Number(req.timeoutMs), this.getTimeoutMs()) : this.getTimeoutMs()
+    const ok = await this.waitForFile(req.fullPath, waitMs)
     if (!ok) {
       // 保守处置：超时不重试（避免对同一 filekey 反复请求）
       return { success: false, error: 'timeout', code: 0, disposition: 'permanent_thumb' }
