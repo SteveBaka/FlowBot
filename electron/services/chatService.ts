@@ -148,6 +148,29 @@ export interface Message {
 
 type ResourceMessageType = 'image' | 'video' | 'voice' | 'file'
 
+/* 入站合并转发推送 DTO（INBOUND-FORWARD-PUSH-PLAN §3.5，wire 字段 snake_case）。
+ * 一期省略 aeskey / cdn 字段 / md5 / srcMsgLocalid 等纯还原材料，二期媒体还原再补。 */
+export interface ForwardItemDTO {
+  datatype: number
+  sourcename: string
+  sourcetime?: string
+  sourcetime_ts?: number
+  datadesc?: string
+  datatitle?: string
+  fileext?: string
+  datasize?: number
+  dataurl?: string
+  datathumburl?: string
+  chat_record_title?: string
+  chat_record_desc?: string
+  chat_record_items?: ForwardItemDTO[]
+}
+
+export interface ForwardRecordDTO {
+  title: string
+  items: ForwardItemDTO[]
+}
+
 interface ResourceMessageItem extends Message {
   sessionId: string
   sessionDisplayName?: string
@@ -6743,6 +6766,184 @@ class ChatService {
       chatRecordDesc,
       chatRecordList
     }
+  }
+
+  /* ── 入站合并转发推送（INBOUND-FORWARD-PUSH-PLAN §4.5 F1）：DTO + 截断 + 渲染单点 ──
+   * parse 复用现有 parseForwardChatRecordList / message.chatRecordList，渲染格式与
+   * exportService.buildForwardChatRecordLines 同构（§3.4 权威规则）。exportService 的
+   * 统一化留 PHASE2 P0；禁止在 server.js / 适配器侧另起 XML 解析。 */
+
+  private toForwardItemDTO(raw: any): ForwardItemDTO | undefined {
+    if (!raw || typeof raw !== 'object') return undefined
+    // 数字实体兜底解码（真实样本 recorditem 双层编码：&amp;#x20; 单次命名实体解码后仍留 &#x20;）
+    const decodeNumeric = (s: string): string =>
+      s.replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+        .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+    const datatype = Number(raw.datatype) || 0
+    const sourcetime = String(raw.sourcetime || '') || undefined
+    let sourcetime_ts: number | undefined
+    if (sourcetime) {
+      const ts = Math.floor(new Date(sourcetime.replace(' ', 'T')).getTime() / 1000)
+      if (Number.isFinite(ts) && ts > 0) sourcetime_ts = ts
+    }
+    const dto: ForwardItemDTO = {
+      datatype,
+      sourcename: decodeNumeric(String(raw.sourcename || '')),
+      sourcetime,
+      sourcetime_ts,
+      datadesc: raw.datadesc ? decodeNumeric(raw.datadesc) : undefined,
+      datatitle: raw.datatitle ? decodeNumeric(raw.datatitle) : undefined,
+      fileext: raw.fileext || undefined,
+      datasize: Number.isFinite(raw.datasize) ? raw.datasize : undefined,
+      dataurl: raw.dataurl || undefined,
+      datathumburl: raw.datathumburl || undefined
+    }
+    if (datatype === 17) {
+      dto.chat_record_title = raw.chatRecordTitle ? decodeNumeric(raw.chatRecordTitle) : undefined
+      dto.chat_record_desc = raw.chatRecordDesc ? decodeNumeric(raw.chatRecordDesc) : undefined
+      const nested = Array.isArray(raw.chatRecordList) ? raw.chatRecordList : undefined
+      if (nested && nested.length > 0) {
+        dto.chat_record_items = nested.map((it: any) => this.toForwardItemDTO(it)).filter(Boolean) as ForwardItemDTO[]
+      }
+    }
+    return dto
+  }
+
+  /** 合并转发 DTO：message.chatRecordList（行映射已解析）优先，rawContent 解析兜底 */
+  getForwardChatRecordDTO(message: {
+    rawContent?: string
+    content?: string | null
+    chatRecordTitle?: string
+    chatRecordList?: any[]
+  }): ForwardRecordDTO | undefined {
+    try {
+      const raw = String(message.rawContent || message.content || '')
+      let rawItems: any[] | undefined = Array.isArray(message.chatRecordList) && message.chatRecordList.length > 0
+        ? message.chatRecordList
+        : this.parseForwardChatRecordList(raw)
+      if (!rawItems || rawItems.length === 0) return undefined
+      // 标题提取与 exportService.formatForwardChatRecordContent 同源（§3.4-1）；
+      // 不取 parseType49 的 '聊天记录' 兜底值，空标题只保留前缀
+      const title =
+        this.extractXmlValue(raw, 'nickname') ||
+        this.extractXmlValue(raw, 'title') ||
+        this.extractXmlValue(raw, 'des') ||
+        this.extractXmlValue(raw, 'displayname') ||
+        (message.chatRecordTitle && message.chatRecordTitle !== '聊天记录' ? message.chatRecordTitle : '') ||
+        ''
+      const items = rawItems.map((it) => this.toForwardItemDTO(it)).filter(Boolean) as ForwardItemDTO[]
+      return items.length > 0 ? { title, items } : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** 条数/深度截断（§3.5）：maxItems 为顶层+嵌套合计闸；深度 ≥ maxDepth 的嵌套不再递归。
+   * 必须先 clip 再 render，保证 forward_count 与文本一致（§4.2 红线）。 */
+  clipForwardItems(
+    items: ForwardItemDTO[],
+    maxItems: number,
+    maxDepth: number
+  ): { items: ForwardItemDTO[]; truncated: boolean; total: number } {
+    let total = 0
+    let kept = 0
+    let truncated = false
+    const limit = Number.isFinite(maxItems) && maxItems > 0 ? maxItems : 200
+    const depthLimit = Number.isFinite(maxDepth) && maxDepth > 0 ? maxDepth : 3
+
+    const walk = (nodes: ForwardItemDTO[], depth: number): ForwardItemDTO[] => {
+      const out: ForwardItemDTO[] = []
+      for (const node of nodes) {
+        total += 1
+        if (kept >= limit) {
+          truncated = true
+          continue
+        }
+        kept += 1
+        const copy: ForwardItemDTO = { ...node }
+        if (copy.chat_record_items !== undefined) {
+          if (depth + 1 >= depthLimit) {
+            // 深度闸：空数组 = 已折叠，render 端输出"（层级过深，已省略）"占位行
+            copy.chat_record_items = []
+            truncated = true
+          } else {
+            copy.chat_record_items = walk(copy.chat_record_items, depth + 1)
+          }
+        }
+        out.push(copy)
+      }
+      return out
+    }
+
+    return { items: walk(items, 0), truncated, total }
+  }
+
+  /** 渲染全文（§3.4 契约，与 exportService.buildForwardChatRecordLines 同构）：
+   * 标题行 + `{sourcename}: {text}` 行；嵌套缩进 2 空格（上限 8）；条目间不空行；
+   * 截断/深度折叠按契约追加占位行；maxChars 按行截断。 */
+  renderForwardText(
+    title: string,
+    items: ForwardItemDTO[],
+    opts: { total: number; truncated: boolean; kept: number; maxChars?: number }
+  ): string {
+    const itemText = (item: ForwardItemDTO): string => {
+      const desc = (item.datadesc || '').trim()
+      const itemTitle = (item.datatitle || '').trim()
+      if (desc) return desc
+      if (itemTitle) return itemTitle
+      switch (item.datatype) {
+        case 2:
+        case 3: return '[图片]'
+        case 34: return '[语音消息]'
+        case 43: return '[视频]'
+        case 47: return '[表情包]'
+        case 8:
+        case 49: return '[文件]'
+        case 17: return item.chat_record_desc || itemTitle || '[聊天记录]'
+        default: return '[消息]'
+      }
+    }
+    const buildLines = (nodes: ForwardItemDTO[], depth: number): string[] => {
+      const indent = depth > 0 ? '  '.repeat(Math.min(depth, 8)) : ''
+      const lines: string[] = []
+      for (const node of nodes) {
+        const prefix = node.sourcename ? `${node.sourcename}: ` : ''
+        if (node.datatype === 17 || node.chat_record_items !== undefined) {
+          const nestedTitle = node.chat_record_title || node.datatitle || node.chat_record_desc || '聊天记录'
+          if (Array.isArray(node.chat_record_items) && node.chat_record_items.length === 0) {
+            lines.push(`${indent}${prefix}[转发的聊天记录]${nestedTitle}（层级过深，已省略）`)
+          } else {
+            lines.push(`${indent}${prefix}[转发的聊天记录]${nestedTitle}`)
+            if (node.chat_record_items && node.chat_record_items.length > 0) {
+              lines.push(...buildLines(node.chat_record_items, depth + 1))
+            }
+          }
+        } else {
+          lines.push(`${indent}${prefix}${itemText(node)}`)
+        }
+      }
+      return lines
+    }
+
+    const header = title ? `[转发的聊天记录]${title}` : '[转发的聊天记录]'
+    const lines = buildLines(items, 0)
+    const all = lines.length > 0 ? [header, ...lines] : [header]
+    if (opts.truncated) {
+      all.push(`…（已截断，共 ${opts.total} 条，仅推送前 ${opts.kept} 条）`)
+    }
+    let text = all.join('\n')
+    const maxChars = Number(opts.maxChars)
+    if (Number.isFinite(maxChars) && maxChars > 0 && text.length > maxChars) {
+      const clipped: string[] = []
+      let size = 0
+      for (const line of all) {
+        if (size + line.length + 1 > maxChars) break
+        clipped.push(line)
+        size += line.length + 1
+      }
+      text = clipped.join('\n')
+    }
+    return text
   }
 
   //手动查找 media_*.db 文件（当 WCDB数据服务不支持 listMediaDbs 时的 fallback）

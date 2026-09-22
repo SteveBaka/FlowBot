@@ -1710,16 +1710,19 @@ function normalizePushPayload(p) {
   const realSessionId = String(p.sessionId || '')
   if (!realSessionId) return null
   // 仅转发真正的消息事件（ready/心跳等无 rawid 与内容的事件忽略）
-  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta) return null
+  if (p.rawid == null && !p.content && !p.imagePath && !p.emojiUrl && !p.videoPath && !p.videoMd5 && !p.voicePath && !p.voiceMeta && !p.forwardItems) return null
   const isGroup = realSessionId.endsWith('@chatroom')
   // 入站视频（ADAPTER-MEDIA-CONTRACT §5）：无图无表情时 type='video'，
   // 同时透出容器内路径（同机排障用）与自建 token 直链（跨容器可用）
   const hasVideo = !!(p.videoPath || p.videoMd5 || p.videoPosterPath || p.videoMeta)
   // 入站语音（INBOUND-VOICE-PUSH-PLAN §4.4）：语音消息独占事件，字段组镜像 video
   const hasVoice = !!(p.voicePath || p.voiceMeta)
+  // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §4.3）：media 类型优先（同帧异常时保守选 media），
+  // forward 次之；content 恒为渲染全文（§3.8-3 兼容规则，旧适配器 Plain(content) 即可分析）
+  const hasForward = Array.isArray(p.forwardItems) && p.forwardItems.length > 0
   const type = hasVideo && !p.imagePath && !p.emojiUrl ? 'video'
     : (hasVoice && !hasVideo && !p.imagePath && !p.emojiUrl ? 'voice'
-      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : 'text')))
+      : (p.imagePath ? 'image' : (p.emojiUrl ? 'emoji' : (hasForward ? 'forward' : 'text'))))
   let imageUrl
   if (p.imagePath) {
     const token = registerImagePath(p.imagePath)
@@ -1759,7 +1762,7 @@ function normalizePushPayload(p) {
       sender_id: senderId,
       sender_name: p.senderName || p.senderCard || p.sourceName || p.groupName || p.senderId || undefined,
       type: type,
-      content: String(p.content || ''),
+      content: String(p.content || p.forwardText || ''),
       timestamp: Number(p.timestamp || 0),
       avatar_url: p.avatarUrl ? String(p.avatarUrl) : undefined,
       group_avatar_url: p.groupAvatarUrl ? String(p.groupAvatarUrl) : undefined,
@@ -1779,6 +1782,13 @@ function normalizePushPayload(p) {
       voice_url: voiceUrl,
       voice_duration_sec: p.voiceMeta && Number.isFinite(Number(p.voiceMeta.durationSec)) ? Number(p.voiceMeta.durationSec) : undefined,
       voice_meta: p.voiceMeta || undefined,
+      // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §3.3）：content 与 forward_text 同值恒为渲染全文
+      forward_text: p.forwardText || undefined,
+      forward_title: p.forwardTitle || undefined,
+      forward_count: p.forwardCount ?? (hasForward ? p.forwardItems.length : undefined),
+      forward_items: hasForward ? p.forwardItems : undefined,
+      forward_truncated: p.forwardTruncated === true ? true : undefined,
+      forward_max_items: p.forwardMaxItems ?? undefined,
       // 引用回复（QUOTE-REPLY-SELF-MAPPING-DESIGN §五）：isSelf 已在 FlowBot 侧裁决，
       // 插件端据 quoted_is_self 钉死 Reply.sender_id = self_id
       quoted_sender_id: p.quoted && p.quoted.senderId ? String(p.quoted.senderId) : undefined,

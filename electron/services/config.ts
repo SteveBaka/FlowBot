@@ -115,6 +115,13 @@ interface ConfigSchema {
   inboundVoicePushEnabled: boolean
   // 入站语音内联传输体积闸（base64 record 段超限降级为文本 [语音]；URL 模式不受限）
   voiceMaxBytes: number
+  // 入站合并转发（聊天记录）结构化推送（INBOUND-FORWARD-PUSH-PLAN；content 恒为渲染全文，
+  // 必要功能默认开——WebUI 不提供开关，仅 API 可调）
+  inboundForwardPushEnabled: boolean
+  // 合并转发条数/嵌套深度/渲染文本字符闸
+  forwardMaxItems: number
+  forwardMaxDepth: number
+  forwardMaxChars: number
   videoSendEnabled: boolean
   videoMaxBytes: number
   videoPasteCapMs: number
@@ -347,6 +354,10 @@ export class ConfigService {
       inboundVideoPushEnabled: false,
       inboundVoicePushEnabled: false,
       voiceMaxBytes: 10 * 1024 * 1024,
+      inboundForwardPushEnabled: true,
+      forwardMaxItems: 200,
+      forwardMaxDepth: 3,
+      forwardMaxChars: 8000,
       videoSendEnabled: true,
       videoMaxBytes: 100 * 1024 * 1024,
       videoPasteCapMs: 8000,

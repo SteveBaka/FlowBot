@@ -69,6 +69,13 @@ interface MessagePushPayload {
     available: boolean
     unavailableReason?: 'not_cached' | 'decode_failed'
   }
+  // 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §3.3；content 与 forwardText 同值恒为渲染全文）
+  forwardText?: string
+  forwardTitle?: string
+  forwardCount?: number
+  forwardItems?: any[]
+  forwardTruncated?: boolean
+  forwardMaxItems?: number
   quoted?: {
     senderId?: string    // 被引用者 wxid（refermsg chatusr 原样）
     senderName?: string  // 被引用者显示名（displayname）
@@ -887,6 +894,37 @@ class MessagePushService {
     }
   }
 
+  /** 入站合并转发（INBOUND-FORWARD-PUSH-PLAN §4.2 F2）：开关开 + Type49 且解析出条目才产信号，
+   * 仅标题保持现状（type=text 占位），避免假 forward；解析失败绝不抛出推送循环。 */
+  private resolveInboundForward(message: Message) {
+    if (this.configService.get('inboundForwardPushEnabled') !== true) return undefined
+    if ((Number(message.localType || 0) & 0xFF) !== 49) return undefined
+    try {
+      const parsed = chatService.getForwardChatRecordDTO(message)
+      if (!parsed || parsed.items.length === 0) return undefined
+      const maxItems = Math.floor(Number(this.configService.get('forwardMaxItems'))) || 200
+      const maxDepth = Math.floor(Number(this.configService.get('forwardMaxDepth'))) || 3
+      const maxChars = Math.floor(Number(this.configService.get('forwardMaxChars'))) || 8000
+      const { items, truncated, total } = chatService.clipForwardItems(parsed.items, maxItems, maxDepth)
+      const forwardText = chatService.renderForwardText(parsed.title, items, {
+        total,
+        truncated,
+        kept: items.length,
+        maxChars
+      })
+      return {
+        forwardText,
+        forwardTitle: parsed.title || undefined,
+        forwardCount: items.length,
+        forwardItems: items,
+        forwardTruncated: truncated === true ? true : undefined,
+        forwardMaxItems: maxItems
+      }
+    } catch {
+      return undefined
+    }
+  }
+
   private async resolveSenderAlias(senderWxid: string): Promise<string | undefined> {
     if (!senderWxid) return undefined
     try {
@@ -972,6 +1010,7 @@ class MessagePushService {
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
     const video = await this.resolveInboundVideo(message)
     const voice = await this.resolveInboundVoice(message, sessionId)
+    const forward = this.resolveInboundForward(message)
 
     if (isGroup) {
       const groupInfo = await chatService.getContactAvatar(sessionId)
@@ -1035,7 +1074,6 @@ class MessagePushService {
         senderId,
         senderName,
         senderCard,
-        content,
         timestamp: createTime,
         imagePath,
         imageBaseMd5: imageMd5 || undefined,
@@ -1044,7 +1082,10 @@ class MessagePushService {
         emojiUrl,
         quoted,
         ...(video ?? {}),
-        ...(voice ?? {})
+        ...(voice ?? {}),
+        ...(forward ?? {}),
+        // content 恒为渲染全文（§3.8-3 兼容规则：旧适配器 Plain(content) 即可分析）
+        content: forward?.forwardText ?? content
       }
     }
 
@@ -1065,7 +1106,6 @@ class MessagePushService {
       sourceName,
       senderId,
       senderName: sourceName,
-      content,
       timestamp: createTime,
       imagePath,
       imageBaseMd5: imageMd5 || undefined,
@@ -1074,7 +1114,9 @@ class MessagePushService {
       emojiUrl,
       quoted,
       ...(video ?? {}),
-      ...(voice ?? {})
+      ...(voice ?? {}),
+      ...(forward ?? {}),
+      content: forward?.forwardText ?? content
     }
   }
 
