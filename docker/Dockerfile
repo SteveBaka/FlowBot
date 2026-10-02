@@ -59,13 +59,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install WeChat for Linux
-# ⚠️ 钉版说明（2026-09-11 临时策略，待新版适配后再切换回官方源）：
-# 官方源 https://dldir1v6.qq.com/weixin/Universal/Linux/WeChatLinux_x86_64.deb 已升级到
-# 不兼容版本，故钉到 4.1.1.8 备份包（SteveBaka/something-backup release）。
-# 本 ARG 是默认值——GitHub Actions（pr-gate / docker-release）与本地构建均自动生效，
-# 无需在各工作流传 build-arg；未来新版本适配完成后，把下一行换回官方 URL 即可，
-# 临时覆盖某次构建仍可用 --build-arg WECHAT_URL=<url>。
-ARG WECHAT_URL=https://github.com/SteveBaka/something-backup/releases/download/4.1.1.8/somechat-Linux_x86_64-4.1.1.8.deb
+# 版本：4.1.13.23（SteveBaka/something-backup 备份包，GitHub Actions 可稳定拉取）。
+# 2026-10-01 在独立容器完成兼容性验证并通过：GUI 启动/登录、DB 密钥 hook
+# （com.Tencent.WCDB.Config.Cipher）、UI 自动化发送（xdotool+xclip）、
+# 图片密钥管线（kvcomm→xorKey/aesKey）、hdDat 懒下载时序。
+# 如需覆盖某次构建可用 --build-arg WECHAT_URL=<url>。
+ARG WECHAT_URL=https://github.com/SteveBaka/something-backup/releases/download/4.1.13.23/somechat-Linux_x86_64-4.1.13.23.deb
 RUN wget -q -O /tmp/wechat.deb "${WECHAT_URL}" \
     && dpkg -i /tmp/wechat.deb || apt-get install -y --no-install-recommends -f \
     && rm -f /tmp/wechat.deb \

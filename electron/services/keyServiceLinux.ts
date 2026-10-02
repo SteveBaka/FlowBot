@@ -302,7 +302,7 @@ export class KeyServiceLinux {
       const helperPath = this.getHelperPath()
       const { stdout } = await execFileAsync(helperPath, ['image_local'])
       const res = JSON.parse(stdout.trim())
-      if (!res.success) return { success: false, error: res.result }
+      if (!res.success) return this.autoGetImageKeyByCacheDerivation(accountPath, wxid, onProgress)
 
       const accounts = res.data.accounts || []
       let account = accounts.find((a: any) => a.wxid === wxid)
@@ -320,9 +320,9 @@ export class KeyServiceLinux {
         }
         return { success: true, xorKey: keyObj.xorKey, aesKey, verified: verified === true }
       }
-      return { success: false, error: '未在缓存中找到匹配的图片密钥' }
+      return this.autoGetImageKeyByCacheDerivation(accountPath, wxid, onProgress)
     } catch (err: any) {
-      return { success: false, error: err.message }
+      return this.autoGetImageKeyByCacheDerivation(accountPath, wxid, onProgress)
     }
   }
 
@@ -352,6 +352,114 @@ export class KeyServiceLinux {
       return false
     } catch {
       return false
+    }
+  }
+
+  /** wxid 截断到第二个 '_' 之前（如 wxid_abc_123 → wxid_abc），与上游 deriveImageKeys 一致 */
+  private cleanWxid(wxid: string): string {
+    const first = wxid.indexOf('_')
+    if (first === -1) return wxid
+    const second = wxid.indexOf('_', first + 1)
+    if (second === -1) return wxid
+    return wxid.substring(0, second)
+  }
+
+  /** 上游图片密钥推导公式：xorKey = code & 0xFF；aesKey = md5(String(code)+cleanWxid)[0:16] */
+  private deriveImageKeys(code: number, wxid: string): { xorKey: number; aesKey: string } {
+    const cleanedWxid = this.cleanWxid(wxid)
+    const xorKey = code & 0xFF
+    const aesKey = crypto.createHash('md5').update(code.toString() + cleanedWxid).digest('hex').substring(0, 16)
+    return { xorKey, aesKey }
+  }
+
+  /** 扫描 kvcomm 目录文件名 key_<N>_*.statistic，收集候选 code（去重） */
+  private collectImageKeyCodesLinux(): number[] {
+    const home = process.env.HOME || '/root'
+    const dirs = [
+      join(home, '.xwechat', 'net', 'kvcomm'),
+      '/root/.xwechat/net/kvcomm'
+    ]
+    const codes = new Set<number>()
+    for (const dir of dirs) {
+      try {
+        for (const name of readdirSync(dir)) {
+          const m = name.match(/^key_(\d+)_/)
+          if (m && name.endsWith('.statistic')) codes.add(parseInt(m[1], 10))
+        }
+      } catch { /* 目录不存在或不可读，跳过 */ }
+    }
+    return Array.from(codes)
+  }
+
+  /** 收集 wxid 候选：传入值 + 账号目录名 + xwechat_files 下所有 wxid_* 目录 */
+  private collectWxidCandidates(accountPath?: string, wxid?: string): string[] {
+    const candidates: string[] = []
+    const push = (value?: string) => {
+      const v = String(value || '').trim()
+      if (v.startsWith('wxid_') && !candidates.includes(v)) candidates.push(v)
+    }
+    push(wxid)
+    const normalized = String(accountPath || '').replace(/[\\/]+$/, '')
+    if (normalized) {
+      push(normalized.split(/[\\/]/).pop())
+      const marker = normalized.match(/[\\/]xwechat_files/i)
+      if (marker) {
+        const root = normalized.slice(0, marker.index! + marker[0].length)
+        try {
+          for (const entry of readdirSync(root)) {
+            if (!entry.startsWith('wxid_')) continue
+            try { if (statSync(join(root, entry)).isDirectory()) push(entry) } catch { /* 忽略 */ }
+          }
+        } catch { /* 忽略 */ }
+      }
+    }
+    return candidates
+  }
+
+  /**
+   * 图片密钥的纯文件推导管线（上游 6.3.2 路线，作为 helper image_local 失败时的回退）：
+   * kvcomm code × wxid 候选 → deriveImageKeys → 用现存 _t.dat 模板做 AES-ECB 魔数校验。
+   * 不依赖 helper，也不读进程内存。
+   */
+  private async autoGetImageKeyByCacheDerivation(
+      accountPath?: string,
+      wxid?: string,
+      onProgress?: (msg: string) => void
+  ): Promise<ImageKeyResult> {
+    try {
+      const codes = this.collectImageKeyCodesLinux()
+      if (codes.length === 0) return { success: false, error: '未找到有效的密钥码（kvcomm 缓存为空）' }
+
+      const wxidCandidates = this.collectWxidCandidates(accountPath, wxid)
+      const normalizedPath = String(accountPath || '').trim()
+
+      let ciphertext: Buffer | null = null
+      if (normalizedPath && existsSync(normalizedPath)) {
+        const template = await this._findTemplateData(normalizedPath, 32)
+        ciphertext = template.ciphertext
+      }
+
+      if (ciphertext) {
+        onProgress?.(`缓存推导中（${wxidCandidates.length} 个 wxid × ${codes.length} 个 code）...`)
+        for (const candidateWxid of wxidCandidates) {
+          for (const code of codes) {
+            const { xorKey, aesKey } = this.deriveImageKeys(code, candidateWxid)
+            if (!this.verifyDerivedAesKey(aesKey, ciphertext)) continue
+            onProgress?.(`缓存推导命中 (wxid: ${candidateWxid}, code: ${code})`)
+            return { success: true, xorKey, aesKey, verified: true }
+          }
+        }
+        return { success: false, error: '缓存 code 与当前账号 wxid 未匹配，请确认账号目录后重试，或使用内存扫描' }
+      }
+
+      // 无模板密文可验真时，退回首个候选（与上游 fallback 行为一致，标记 verified:false）
+      const fallbackWxid = wxidCandidates[0]
+      if (!fallbackWxid) return { success: false, error: '未找到账号 wxid 候选，无法推导图片密钥' }
+      const { xorKey, aesKey } = this.deriveImageKeys(codes[0], fallbackWxid)
+      onProgress?.(`缓存推导回退 (wxid: ${fallbackWxid}, code: ${codes[0]})`)
+      return { success: true, xorKey, aesKey, verified: false }
+    } catch (err: any) {
+      return { success: false, error: `缓存推导失败: ${err.message}` }
     }
   }
 
