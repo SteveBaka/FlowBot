@@ -929,7 +929,8 @@ var AboutPage = {
     var info = reactive({
       flowbotVersion: '-', version: '-', protocol: 'OneBot v11.0',
       node: '-', uptime: '-', memory: '-', disk: '-',
-      cpuModel: '-', wechatVersion: '-'
+      cpuModel: '-', wechatVersion: '-',
+      attestOk: null, attestText: '未知'
     })
 
     async function load() {
@@ -949,6 +950,35 @@ var AboutPage = {
         info.disk = (typeof sys.disk === 'object') ? (sys.disk.used + 'MB / ' + sys.disk.total + 'MB (' + sys.disk.usedPercent + '%)') : (sys.disk || '-')
         info.cpuModel = sys.cpuModel || '-'
       }
+      try {
+        var a = await api('/api/attest')
+        if (a && !a.error) {
+          var last = a.last || {}
+          info.attestOk = !!last.ok
+          var exp = last.expires_at ? new Date(last.expires_at) : null
+          var usable = !!last.ok || (exp && Date.now() < exp.getTime())
+          var reasons = {
+            ok: '正常',
+            'client-proof-failed': '校验不通过（客户端证明错误）',
+            'asar-mismatch': '程序文件指纹不一致',
+            'wcdb-not-patched': 'WCDB 期限未延展',
+            'connect-error': '认证模块不可达',
+            timeout: '认证模块超时',
+            'server-proof-failed': '校验不通过（服务端证明错误）',
+            'missing-secret-or-asar': '缺少认证材料'
+          }
+          var why = reasons[last.reason] || last.reason || '未知'
+          if (!last.checked_at) {
+            info.attestText = '尚未校验'
+          } else if (last.ok) {
+            info.attestText = '本地认证通过'
+          } else if (usable) {
+            info.attestText = '认证异常：' + why
+          } else {
+            info.attestText = '认证异常，功能已暂停：' + why
+          }
+        }
+      } catch (e) { /* ignore */ }
     }
 
     onMounted(load)
@@ -964,6 +994,7 @@ var AboutPage = {
     '<div class="about-info">' +
     '<div class="info-row"><span>WeFlow 版本</span><span>{{ info.version }}</span></div>' +
     '<div class="info-row"><span>微信版本</span><span>{{ info.wechatVersion }}</span></div>' +
+    '<div class="info-row"><span>认证情况</span><span>{{ info.attestText }}</span></div>' +
     '<div class="info-row"><span>协议</span><span>{{ info.protocol }}</span></div>' +
     '<div class="info-row"><span>Node.js</span><span>{{ info.node }}</span></div>' +
     '<div class="info-row"><span>容器运行时间</span><span>{{ info.uptime }}</span></div>' +

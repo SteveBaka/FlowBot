@@ -111,6 +111,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   }>>([])
   const [showWxidSelect, setShowWxidSelect] = useState(false)
   const wxidSelectRef = useRef<HTMLDivElement>(null)
+  const hookCancellingRef = useRef(false)
   const [error, setError] = useState('')
   const [isConnecting, setIsConnecting] = useState(false)
   const [isDetectingPath, setIsDetectingPath] = useState(false)
@@ -542,6 +543,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     setIsHookFetching(true)
     setHookNotice('')
     setError('')
+    hookCancellingRef.current = false
     try {
       const result = await window.electronAPI.key.autoGetDbKey('hook')
       if (result.success && result.key) {
@@ -565,16 +567,31 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         }
         setDecryptKey(result.key)
         setHookNotice('已获取，可下一步')
+      } else if (hookCancellingRef.current) {
+        // 用户主动取消：不弹决策窗
       } else {
-        // 超时（默认 2 分钟）或失败 → 由用户决策是否放弃/继续
+        // 30s 窗口内未捕获到登录事件 → 由用户决策继续等待 / 取消
         setShowHookTimeout(true)
       }
     } catch {
-      setShowHookTimeout(true)
+      if (!hookCancellingRef.current) setShowHookTimeout(true)
     } finally {
+      hookCancellingRef.current = false
       setIsHookFetching(false)
     }
   }
+
+  // 取消 Hook：立即结束 helper 进程，避免残留
+  const handleHookCancel = () => {
+    hookCancellingRef.current = true
+    setShowHookTimeout(false)
+    try { void window.electronAPI.key.cancelDbKeyHook() } catch { /* ignore */ }
+  }
+
+  // 离开页面（或组件卸载）时，取消仍在运行的 Hook，保证不残留 helper 进程
+  useEffect(() => () => {
+    try { void window.electronAPI.key.cancelDbKeyHook() } catch { /* ignore */ }
+  }, [])
 
   const openMacKeyFaq = () => {
     void window.electronAPI.shell.openExternal(MAC_KEY_FAQ_URL)
@@ -1007,8 +1024,8 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                 </div>
 
                 <div className="action-row">
-                  <button className="btn btn-secondary" onClick={() => setShowHookRisk(true)} disabled={isHookFetching}>
-                    <KeyRound size={16} /> {isHookFetching ? 'Hook 获取中...' : 'Hook 模式获取密钥（实验性）'}
+                  <button className="btn btn-secondary" onClick={() => { if (isHookFetching) handleHookCancel(); else setShowHookRisk(true) }}>
+                    <KeyRound size={16} /> {isHookFetching ? 'Hook 监听中…（点击取消）' : 'Hook 模式获取密钥（实验性）'}
                   </button>
                 </div>
                 {hookNotice && <div className="field-hint" style={{ color: '#16a34a' }}>{hookNotice}</div>}
@@ -1283,7 +1300,12 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         <ConfirmDialog
             open={showHookRisk}
             title="风险提示"
-            message={`使用 Hook 模式获取密钥具有极大的风险：可以做到不用登录成功后再重启微信，但是 Hook 功能可能会导致账号封禁，建议使用原有的方式进行登录。`}
+            message={`使用 Hook 模式获取密钥具有极大的风险：可以做到不用登录成功后再重启微信，但是 Hook 功能可能会导致账号封禁，建议使用原有的方式进行登录。
+
+操作提示：Hook 安装后，请在微信中完成一次登录（Hook 只能捕获「登录」瞬间的密钥）：
+· 若微信停在登录页：直接点击「登录」即可；
+· 若微信已登录：请先在微信「切换账号 / 退出登录」，再重新登录。
+等待期间请勿关闭微信（单次监听窗口约 30 秒，超时可选择继续等待）。`}
             confirmText="我已知晓风险，继续"
             cancelText="取消"
             onConfirm={handleHookGetKey}
@@ -1293,13 +1315,15 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         <ConfirmDialog
             open={showHookTimeout}
             title="Hook 模式暂未获取到密钥"
-            message={`Hook 模式在 2 分钟内未捕获到登录事件。
+            message={`Hook 模式在 30 秒内未捕获到登录事件。
 
-若尚未登录，请先在微信中点击登录按钮完成登录；也可选择继续等待，或取消后前往「解密密钥」步骤使用原有的自动获取方式。`}
+常见原因：微信当前已处于登录状态（Hook 只能捕获「登录」瞬间的密钥）。
+请先在微信「切换账号 / 退出登录」后重新登录；或点击微信登录页的「登录」按钮。
+也可选择「继续等待」，或取消后前往「解密密钥」步骤使用原有的自动获取方式。`}
             confirmText="继续等待"
             cancelText="取消"
             onConfirm={handleHookGetKey}
-            onCancel={() => setShowHookTimeout(false)}
+            onCancel={handleHookCancel}
         />
 
         <ConfirmDialog

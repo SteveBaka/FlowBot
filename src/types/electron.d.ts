@@ -474,6 +474,7 @@ export interface ElectronAPI {
   }
   key: {
     autoGetDbKey: (mode?: 'hook' | 'restart') => Promise<{ success: boolean; key?: string; error?: string; logs?: string[] }>
+    cancelDbKeyHook: () => Promise<{ success: boolean }>
     autoGetImageKey: (manualDir?: string, wxid?: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }>
     scanImageKeyFromMemory: (userDir: string) => Promise<{ success: boolean; xorKey?: number; aesKey?: string; error?: string }>
     onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => () => void

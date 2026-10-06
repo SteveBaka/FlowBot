@@ -4,6 +4,8 @@ import { existsSync, readdirSync, statSync, readFileSync, readlinkSync, chmodSyn
 import { execFile, exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import crypto from 'crypto'
+import { attestService } from './attestService'
+import { logger } from './logger'
 import { createRequire } from 'module';
 const require = createRequire(__filename);
 
@@ -13,8 +15,19 @@ const execAsync = promisify(exec)
 type DbKeyResult = { success: boolean; key?: string; error?: string; logs?: string[] }
 type ImageKeyResult = { success: boolean; xorKey?: number; aesKey?: string; verified?: boolean; error?: string }
 
+// Hook 模式的单次等待窗口：刻意保持较短，缩短微信处于「被 ptrace 追踪」状态的时间，
+// 降低账号风险；窗口结束后由前端决策「继续等待（重新监听）」或取消。
+const HOOK_WINDOW_MS = 30_000
+
+/** 密钥流程结构化日志（file-only，落 /opt/weflow/data/logs/keyflow.log，不污染 stdout） */
+function kf(msg: string): void {
+  try { logger.info('keyflow', msg) } catch { /* ignore */ }
+}
+
 export class KeyServiceLinux {
   private sudo: any
+  /** 当前运行的 Hook 子进程取消器（用于「取消」时立即结束 helper，避免残留进程） */
+  private activeHookKill: (() => void) | null = null
 
   constructor() {
     try {
@@ -61,6 +74,17 @@ export class KeyServiceLinux {
   ): Promise<DbKeyResult> {
     const mode: 'hook' | 'restart' = options?.mode === 'restart' ? 'restart' : 'hook'
     try {
+      // db_runner 强制一次性即时校验（仅在我们的容器环境生效）：当场握手，未通过则禁用，
+      // 且不做任何 kill/拉起。该校验独立于 24H 租期，属敏感操作的强约束。
+      if (process.env.WEFLOW_DOCKER === '1') {
+        const ok = await attestService.verifyNow()
+        kf(`gate mode=${mode} attest=${ok ? 'pass' : 'block'}`)
+        if (!ok) {
+          const err = '本地认证异常：密钥获取功能已暂停（请确认 WebUI 管理面板在线）'
+          onStatus?.(err, 2)
+          return { success: false, error: err }
+        }
+      }
       // 1. 构造一个包含常用系统命令路径的环境变量，防止打包后找不到命令
       const envWithPath = {
         ...process.env,
@@ -71,10 +95,12 @@ export class KeyServiceLinux {
       // 密钥只在派生（登录）瞬间存在、不驻留内存，故必须在登录前装好 Hook。
       // 已登录且无新登录事件时会超时，此时由前端决策，不再静默重启微信。
       if (mode === 'hook') {
+        // 单次窗口封顶 30s，缩短微信被追踪时长；超时由前端决定是否重新监听
+        const hookWaitMs = Math.min(timeoutMs, HOOK_WINDOW_MS)
         const runningPids = this.discoverWechatPids()
         if (runningPids.length > 0) {
           onStatus?.('检测到微信已在运行，正在安装密钥 Hook（无需退出微信）...', 0)
-          return await this.getDbKey(runningPids[0], onStatus, timeoutMs)
+          return await this.getDbKey(runningPids[0], onStatus, hookWaitMs)
         }
         onStatus?.('未检测到微信进程，正在启动微信...', 0)
         this.launchWeChat()
@@ -85,7 +111,7 @@ export class KeyServiceLinux {
           return { success: false, error: err }
         }
         await new Promise(r => setTimeout(r, 2000))
-        return await this.getDbKey(hookPid, onStatus, timeoutMs)
+        return await this.getDbKey(hookPid, onStatus, hookWaitMs)
       }
 
       // ── 原有方式：结束微信进程 → 重新拉起 → Hook ──
@@ -135,6 +161,11 @@ export class KeyServiceLinux {
       onStatus?.(errMsg, 2)
       return { success: false, error: errMsg }
     }
+  }
+
+  /** 取消正在进行的 Hook：立即结束 helper 并让本次调用返回（不残留进程） */
+  public cancelDbKeyHook(): void {
+    try { this.activeHookKill?.() } catch { /* ignore */ }
   }
 
   /** 拉起微信（fire-and-forget，遍历常见可执行名；不结束已有进程） */
@@ -199,6 +230,12 @@ export class KeyServiceLinux {
 
   public async getDbKey(pid: number, onStatus?: (message: string, level: number) => void, timeoutMs = 180_000): Promise<DbKeyResult> {
     try {
+      // 二次防线（廉价，不额外握手）：认证不可用则拒绝
+      if (process.env.WEFLOW_DOCKER === '1' && !attestService.isUsable()) {
+        const err = '本地认证异常：密钥获取功能已暂停（请确认 WebUI 管理面板在线）'
+        onStatus?.(err, 2)
+        return { success: false, error: err }
+      }
       const helperPath = this.getHelperPath()
 
       onStatus?.('正在扫描数据库基址...', 0)
@@ -212,6 +249,7 @@ export class KeyServiceLinux {
       }
 
       const targetAddr = scanRes.target_addr
+      kf(`scan ok pid=${pid} target=${targetAddr}`)
       onStatus?.('已准备就绪，现在可以登录微信了', 0)
       onStatus?.('基址扫描成功，正在执行内存 Hook...', 0)
 
@@ -221,11 +259,10 @@ export class KeyServiceLinux {
 
       if (isRoot) {
         console.log('[KeyServiceLinux] Running as root/Docker, executing hook directly')
-        const hookCmd = `${helperPath} db_hook ${pid} ${targetAddr} ${timeoutMs}`
         return await new Promise((resolve) => {
           let settled = false
           let hookChild: any = null
-          // Hook 结束（成功/失败/超时）时主动清理 helper 进程，避免其残留在后台
+          // Hook 结束（成功/失败/超时/取消）时主动清理 helper 进程，避免其残留在后台
           const cleanupHook = () => {
             try { hookChild?.kill('SIGKILL') } catch { /* ignore */ }
             try { exec(`pkill -f "${helperPath} db_hook"`, () => { /* ignore */ }) } catch { /* ignore */ }
@@ -234,19 +271,30 @@ export class KeyServiceLinux {
             if (settled) return
             settled = true
             clearTimeout(watchdog)
+            this.activeHookKill = null
             cleanupHook()
             resolve(result)
           }
+          // 「取消」时立即结束 helper 并让本次调用返回，避免残留进程
+          this.activeHookKill = () => finish({ success: false, error: '已取消' })
           const watchdog = setTimeout(() => {
             execAsync(`kill -CONT ${pid}`).catch(() => {})
             const err = `Hook 等待超时（${Math.round(timeoutMs / 1000)} 秒）`
+            kf(`hook timeout pid=${pid} timeout=${timeoutMs}`)
             onStatus?.(err, 2)
             finish({ success: false, error: err })
           }, timeoutMs + 30_000)
 
-          onStatus?.('请在微信中完成登录（点击登录按钮），正在等待密钥回调...', 0)
+          kf(`hook start pid=${pid} timeout=${timeoutMs}`)
+          onStatus?.('请在微信中完成一次登录（若已登录请先「退出登录」后重新登录），正在等待密钥回调...', 0)
 
-          hookChild = exec(hookCmd, { timeout: timeoutMs + 30_000 }, (error, stdout, stderr) => {
+          // 用 execFile 直接启动 helper（不经 shell），使 hookChild 即为 helper 本体，
+          // 这样「取消」时可精确 kill，不会留下孤儿进程。
+          hookChild = execFile(
+            helperPath,
+            ['db_hook', String(pid), String(targetAddr), String(timeoutMs)],
+            { timeout: timeoutMs + 30_000, maxBuffer: 4 * 1024 * 1024 },
+            (error, stdout, stderr) => {
             execAsync(`kill -CONT ${pid}`).catch(() => {})
             if (error) {
               const detail = String(stderr || '').trim()
@@ -260,6 +308,7 @@ export class KeyServiceLinux {
               if (!output) throw new Error('Hook 无输出')
               const hookRes = JSON.parse(output)
               if (hookRes.success) {
+                kf(`hook ok pid=${pid} keyLen=${String(hookRes.key || '').length}`)
                 onStatus?.('密钥获取成功', 1)
                 finish({ success: true, key: hookRes.key })
               } else {
@@ -290,9 +339,11 @@ export class KeyServiceLinux {
           if (settled) return
           settled = true
           clearTimeout(watchdog)
+          this.activeHookKill = null
           cleanupHook()
           resolve(result)
         }
+        this.activeHookKill = () => finish({ success: false, error: '已取消' })
         const watchdog = setTimeout(() => {
           execAsync(`kill -CONT ${pid}`).catch(() => {})
           const err = `Hook 等待超时（${Math.round(timeoutMs / 1000)} 秒）。请确认微信登录确认已完成，或重启微信后重试。`
@@ -300,7 +351,8 @@ export class KeyServiceLinux {
           finish({ success: false, error: err })
         }, timeoutMs + 30_000)
 
-        onStatus?.('授权通过后请在微信中完成登录（点击登录按钮），正在等待密钥回调...', 0)
+        kf(`hook start pid=${pid} timeout=${timeoutMs} (sudo)`)
+        onStatus?.('授权通过后请在微信中完成一次登录（若已登录请先「退出登录」后重新登录），正在等待密钥回调...', 0)
 
         this.sudo.exec(command, options, (error, stdout, stderr) => {
           execAsync(`kill -CONT ${pid}`).catch(() => {})

@@ -1,5 +1,6 @@
 import { join } from 'path'
-import { existsSync, readdirSync, statSync } from 'fs'
+import { existsSync, readdirSync, statSync, chmodSync, readFileSync, writeFileSync, mkdirSync } from 'fs'
+import { dirname } from 'path'
 import crypto from 'crypto'
 import Store from 'electron-store'
 import { expandHomePath } from '../utils/pathUtils'
@@ -28,6 +29,29 @@ const isSafeStorageAvailable = (): boolean => {
   }
 }
 const LOCK_PREFIX = 'lock:'  // 密码派生密钥加密（锁定模式）
+
+// ── 容器绑定加密（B4-1）：safeStorage 不可用时，改用容器内秘密派生的 AES-256-GCM ──
+const BOX_PREFIX = 'box:'
+const BOX_KEY_FILE = process.env.WEFLOW_BOX_KEY_FILE || '/opt/weflow/data/.box-key'
+let boxKeyCache: string | null = null
+let boxWarned = false
+function getBoxKey(): string {
+  if (boxKeyCache) return boxKeyCache
+  try {
+    const existing = readFileSync(BOX_KEY_FILE, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(existing)) { boxKeyCache = existing; return existing }
+  } catch { /* fallthrough */ }
+  try {
+    mkdirSync(dirname(BOX_KEY_FILE), { recursive: true })
+    const k = crypto.randomBytes(32).toString('hex')
+    writeFileSync(BOX_KEY_FILE, k, { mode: 0o600 })
+    try { chmodSync(BOX_KEY_FILE, 0o600) } catch { /* ignore */ }
+    boxKeyCache = k
+    return k
+  } catch {
+    return ''
+  }
+}
 
 interface ConfigSchema {
   // 数据库相关
@@ -495,6 +519,7 @@ export class ConfigService {
     this.migrateAuthFields()
     this.migrateAiConfig()
     this.migrateMediaConfigKeys()
+    this.hardenConfigPermission()
   }
 
   // === 状态查询 ===
@@ -588,20 +613,65 @@ export class ConfigService {
     }
 
     this.store.set(key, toStore)
+    this.hardenConfigPermission()
   }
 
   // === 加密/解密工具 ===
 
+  /** 容器绑定加密（B4-1）：无 keyring 时替代明文，密钥来自容器内 /opt/weflow/data/.box-key */
+  private boxEncrypt(plaintext: string): string {
+    const keyHex = getBoxKey()
+    if (!keyHex) {
+      if (!boxWarned) { boxWarned = true; console.warn('[Config] box key unavailable; sensitive fields fall back to plaintext') }
+      return plaintext
+    }
+    try {
+      const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+      const iv = crypto.randomBytes(12)
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+      const ct = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()])
+      return BOX_PREFIX + Buffer.concat([iv, cipher.getAuthTag(), ct]).toString('base64')
+    } catch {
+      return plaintext
+    }
+  }
+
+  private boxDecrypt(stored: string): string {
+    const keyHex = getBoxKey()
+    if (!keyHex) return ''
+    try {
+      const buf = Buffer.from(stored.slice(BOX_PREFIX.length), 'base64')
+      const iv = buf.subarray(0, 12)
+      const tag = buf.subarray(12, 28)
+      const ct = buf.subarray(28)
+      const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+      const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+      decipher.setAuthTag(tag)
+      return Buffer.concat([decipher.update(ct), decipher.final()]).toString('utf8')
+    } catch {
+      return ''
+    }
+  }
+
+  /** B4-2：收紧配置文件权限为 0600（防御纵深） */
+  private hardenConfigPermission(): void {
+    try {
+      const p = (this.store as any)?.path
+      if (p && existsSync(p)) chmodSync(p, 0o600)
+    } catch { /* ignore */ }
+  }
+
   private safeEncrypt(plaintext: string): string {
     if (!plaintext) return ''
-    if (plaintext.startsWith(SAFE_PREFIX)) return plaintext
-    if (!isSafeStorageAvailable()) return plaintext
+    if (plaintext.startsWith(SAFE_PREFIX) || plaintext.startsWith(BOX_PREFIX)) return plaintext
+    if (!isSafeStorageAvailable()) return this.boxEncrypt(plaintext)
     const encrypted = safeStorage.encryptString(plaintext)
     return SAFE_PREFIX + encrypted.toString('base64')
   }
 
   private safeDecrypt(stored: string): string {
     if (!stored) return ''
+    if (stored.startsWith(BOX_PREFIX)) return this.boxDecrypt(stored)
     if (!stored.startsWith(SAFE_PREFIX)) return stored
     if (!isSafeStorageAvailable()) return ''
     try {

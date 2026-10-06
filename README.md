@@ -24,6 +24,7 @@ FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础�
 > ⚠️免责声明：FlowBot 旨在提供了一个能够让用户**学习并研究**能够与AI机器人进行聊天的协议，并且所有内容均在本地和对应部署的项目进行，开发者不收集任何隐私和安全信息。<br>
 > **不允许用于不正当以及非法用途**，并且请在使用时注意平台的用户协议和服务条款。请再三斟酌之后再思考是否使用，风险自负。
 
+
 ## 核心功能
 
 | 功能 | 说明 |
@@ -273,12 +274,12 @@ start.sh 启动容器
   http://IP:5031  ──▶ WeFlow HTTP API（容器内通信，不建议外部访问）
 ```
 
+
 ## 关键技术决策
 
 | 决策 | 说明 |
 |------|------|
 | **消息发送** | 使用 xdotool + xclip 模拟键盘操作，无需 Wine/CrossOver |
-| **密钥获取** | xkey_helper_linux 通过 ptrace hook 微信进程内存，需要 `SYS_PTRACE` 权限 |
 | **OneBot 双向** | OneBotServer 实现 HTTP + 自定义 WebSocket，支持外部框架发送/接收消息 |
 | **配置存储** | electron-store JSON 文件，WebUI 通过 HTTP API 管理端点读写 |
 | **WebUI** | 本地化 vendor 文件（vue/vue-router），无需外网 CDN |

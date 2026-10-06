@@ -178,6 +178,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 密钥获取
   key: {
     autoGetDbKey: (mode?: 'hook' | 'restart') => ipcRenderer.invoke('key:autoGetDbKey', mode),
+    cancelDbKeyHook: () => ipcRenderer.invoke('key:cancelDbKeyHook'),
     autoGetImageKey: (manualDir?: string, wxid?: string) => ipcRenderer.invoke('key:autoGetImageKey', manualDir, wxid),
     scanImageKeyFromMemory: (userDir: string) => ipcRenderer.invoke('key:scanImageKeyFromMemory', userDir),
     onDbKeyStatus: (callback: (payload: { message: string; level: number }) => void) => {

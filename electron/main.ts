@@ -24,6 +24,7 @@ import { exportService, ExportOptions, ExportProgress } from './services/exportS
 import { exportTaskControlService } from './services/exportTaskControlService'
 import { KeyService } from './services/keyService'
 import { KeyServiceLinux } from './services/keyServiceLinux'
+import { attestService } from './services/attestService'
 import { KeyServiceMac } from './services/keyServiceMac'
 import { voiceTranscribeService } from './services/voiceTranscribeService'
 import { videoService } from './services/videoService'
@@ -4185,6 +4186,11 @@ function registerIpcHandlers() {
     }, { mode })
   })
 
+  ipcMain.handle('key:cancelDbKeyHook', async () => {
+    try { keyService.cancelDbKeyHook?.() } catch { /* ignore */ }
+    return { success: true }
+  })
+
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {
     return keyService.autoGetImageKey(manualDir, (message: string) => {
       event.sender.send('key:imageKeyStatus', { message })
@@ -4282,6 +4288,8 @@ app.whenReady().then(async () => {
 
   applyAutoUpdateChannel('startup')
   syncLaunchAtStartupPreference()
+  // 本地认证：每次启动发起双向校验，并周期复查（WebUI 在线即可用）
+  attestService.start()
   const onboardingDone = configService.get('onboardingDone') === true
   const startInBackground = onboardingDone && isSilentStartupEnabled()
   shouldShowMain = onboardingDone
