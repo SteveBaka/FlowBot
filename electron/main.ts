@@ -4179,10 +4179,10 @@ function registerIpcHandlers() {
   })
 
   // 密钥获取
-  ipcMain.handle('key:autoGetDbKey', async (event) => {
-    return keyService.autoGetDbKey(180_000, (message: string, level: number) => {
+  ipcMain.handle('key:autoGetDbKey', async (event, mode?: 'hook' | 'restart') => {
+    return keyService.autoGetDbKey(120_000, (message: string, level: number) => {
       event.sender.send('key:dbKeyStatus', { message, level })
-    })
+    }, { mode })
   })
 
   ipcMain.handle('key:autoGetImageKey', async (event, manualDir?: string, wxid?: string) => {

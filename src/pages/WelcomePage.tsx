@@ -116,6 +116,10 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
   const [isDetectingPath, setIsDetectingPath] = useState(false)
   const [isScanningWxid, setIsScanningWxid] = useState(false)
   const [isFetchingDbKey, setIsFetchingDbKey] = useState(false)
+  const [showHookRisk, setShowHookRisk] = useState(false)
+  const [isHookFetching, setIsHookFetching] = useState(false)
+  const [showHookTimeout, setShowHookTimeout] = useState(false)
+  const [hookNotice, setHookNotice] = useState('')
   const [isFetchingImageKey, setIsFetchingImageKey] = useState(false)
   const [showDecryptKey, setShowDecryptKey] = useState(false)
   const [isClosing, setIsClosing] = useState(false)
@@ -491,7 +495,7 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
     setIsManualStartPrompt(false)
     setDbKeyStatus('正在连接微信进程...')
     try {
-      const result = await window.electronAPI.key.autoGetDbKey()
+      const result = await window.electronAPI.key.autoGetDbKey('restart')
       if (result.success && result.key) {
         setDecryptKey(result.key)
         setHasReacquiredDbKey(true)
@@ -527,6 +531,48 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
       setLastDbKeyError(failureMessage)
     } finally {
       setIsFetchingDbKey(false)
+    }
+  }
+
+  // Hook 模式（实验性）：不重启微信，装 Hook 等待一次登录事件；成功后原地填充各字段
+  const handleHookGetKey = async () => {
+    setShowHookRisk(false)
+    setShowHookTimeout(false)
+    if (isHookFetching) return
+    setIsHookFetching(true)
+    setHookNotice('')
+    setError('')
+    try {
+      const result = await window.electronAPI.key.autoGetDbKey('hook')
+      if (result.success && result.key) {
+        // 登录完成后账号目录已生成，重新解析 dbPath / wxid
+        let path = dbPath
+        try {
+          const det = await window.electronAPI.dbPath.autoDetect()
+          if (det?.success && det.path) path = det.path
+        } catch { /* ignore */ }
+        if (!path) {
+          try { const def = await window.electronAPI.dbPath.getDefault(); if (def) path = def } catch { /* ignore */ }
+        }
+        let wxids: Array<{ wxid: string; modifiedTime: number; nickname?: string; avatarUrl?: string }> = []
+        if (path) {
+          try { wxids = await window.electronAPI.dbPath.scanWxids(path) } catch { /* ignore */ }
+        }
+        if (path) setDbPath(path)
+        if (Array.isArray(wxids) && wxids.length > 0) {
+          setWxidOptions(wxids)
+          setWxid(pickLatestWxid(wxids) || wxids[0].wxid)
+        }
+        setDecryptKey(result.key)
+        setHookNotice('已获取，可下一步')
+      } else {
+        // 超时（默认 2 分钟）或失败 → 由用户决策是否放弃/继续
+        setShowHookTimeout(true)
+      }
+    } catch {
+      setShowHookTimeout(true)
+    } finally {
+      setIsHookFetching(false)
     }
   }
 
@@ -960,6 +1006,13 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
                   </button>
                 </div>
 
+                <div className="action-row">
+                  <button className="btn btn-secondary" onClick={() => setShowHookRisk(true)} disabled={isHookFetching}>
+                    <KeyRound size={16} /> {isHookFetching ? 'Hook 获取中...' : 'Hook 模式获取密钥（实验性）'}
+                  </button>
+                </div>
+                {hookNotice && <div className="field-hint" style={{ color: '#16a34a' }}>{hookNotice}</div>}
+
                 <div className="field-hint">请选择微信-设置-存储位置对应的目录</div>
               </div>
             )}
@@ -1226,6 +1279,28 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
             )}
           </div>
         </div>
+
+        <ConfirmDialog
+            open={showHookRisk}
+            title="风险提示"
+            message={`使用 Hook 模式获取密钥具有极大的风险：可以做到不用登录成功后再重启微信，但是 Hook 功能可能会导致账号封禁，建议使用原有的方式进行登录。`}
+            confirmText="我已知晓风险，继续"
+            cancelText="取消"
+            onConfirm={handleHookGetKey}
+            onCancel={() => setShowHookRisk(false)}
+        />
+
+        <ConfirmDialog
+            open={showHookTimeout}
+            title="Hook 模式暂未获取到密钥"
+            message={`Hook 模式在 2 分钟内未捕获到登录事件。
+
+若尚未登录，请先在微信中点击登录按钮完成登录；也可选择继续等待，或取消后前往「解密密钥」步骤使用原有的自动获取方式。`}
+            confirmText="继续等待"
+            cancelText="取消"
+            onConfirm={handleHookGetKey}
+            onCancel={() => setShowHookTimeout(false)}
+        />
 
         <ConfirmDialog
             open={showDbKeyConfirm}

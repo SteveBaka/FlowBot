@@ -55,9 +55,11 @@ export class KeyServiceLinux {
   }
 
   public async autoGetDbKey(
-      timeoutMs = 60_000,
-      onStatus?: (message: string, level: number) => void
+      timeoutMs = 120_000,
+      onStatus?: (message: string, level: number) => void,
+      options?: { mode?: 'hook' | 'restart' }
   ): Promise<DbKeyResult> {
+    const mode: 'hook' | 'restart' = options?.mode === 'restart' ? 'restart' : 'hook'
     try {
       // 1. 构造一个包含常用系统命令路径的环境变量，防止打包后找不到命令
       const envWithPath = {
@@ -65,6 +67,28 @@ export class KeyServiceLinux {
         PATH: `${process.env.PATH || ''}:/bin:/usr/bin:/sbin:/usr/sbin:/usr/local/bin`
       };
 
+      // ── Hook 模式（实验性）：不结束微信进程，装 Hook 等待一次登录事件 ──
+      // 密钥只在派生（登录）瞬间存在、不驻留内存，故必须在登录前装好 Hook。
+      // 已登录且无新登录事件时会超时，此时由前端决策，不再静默重启微信。
+      if (mode === 'hook') {
+        const runningPids = this.discoverWechatPids()
+        if (runningPids.length > 0) {
+          onStatus?.('检测到微信已在运行，正在安装密钥 Hook（无需退出微信）...', 0)
+          return await this.getDbKey(runningPids[0], onStatus, timeoutMs)
+        }
+        onStatus?.('未检测到微信进程，正在启动微信...', 0)
+        this.launchWeChat()
+        const hookPid = await this.waitForWechatPid(onStatus)
+        if (!hookPid) {
+          const err = '未能自动启动微信，请手动启动微信并停留在登录界面后重试'
+          onStatus?.(err, 2)
+          return { success: false, error: err }
+        }
+        await new Promise(r => setTimeout(r, 2000))
+        return await this.getDbKey(hookPid, onStatus, timeoutMs)
+      }
+
+      // ── 原有方式：结束微信进程 → 重新拉起 → Hook ──
       onStatus?.('正在尝试结束当前微信进程...', 0)
       console.log('[Debug] 开始执行进程清理逻辑...');
 
@@ -90,61 +114,9 @@ export class KeyServiceLinux {
 
       onStatus?.('正在尝试拉起微信...', 0)
 
-      const cleanEnv = { ...process.env };
-      delete cleanEnv.ELECTRON_RUN_AS_NODE;
-      delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE;
-      delete cleanEnv.APPDIR;
-      delete cleanEnv.APPIMAGE;
+      this.launchWeChat()
 
-      const wechatBins = [
-        'wechat',
-        'wechat-bin',
-        'xwechat',
-        '/opt/wechat/wechat',
-        '/usr/bin/wechat',
-        '/usr/local/bin/wechat',
-        '/usr/bin/wechat',
-        '/opt/apps/com.tencent.wechat/files/wechat',
-        '/usr/bin/wechat-bin',
-        '/usr/local/bin/wechat-bin',
-        'com.tencent.wechat'
-      ]
-
-      for (const binName of wechatBins) {
-        try {
-          const child = spawn(binName, [], {
-            detached: true,
-            stdio: 'ignore',
-            env: cleanEnv
-          });
-
-          child.on('error', (err) => {
-            console.log(`[Debug] 拉起 ${binName} 失败:`, err.message);
-          });
-
-          child.unref();
-          console.log(`[Debug] 尝试拉起 ${binName} 完毕`);
-        } catch (e: any) {
-          console.log(`[Debug] 尝试拉起 ${binName} 发生异常:`, e.message);
-        }
-      }
-
-      onStatus?.('等待微信进程出现...', 0)
-      let pid = 0
-      for (let i = 0; i < 15; i++) { // 最多等 15 秒
-        await new Promise(r => setTimeout(r, 1000))
-
-        try {
-          const pids = this.discoverWechatPids();
-          if (pids.length > 0) {
-            pid = pids[0];
-            console.log(`[Debug] 第 ${i + 1} 秒，通过 /proc 扫描成功获取 PID: ${pid}`);
-            break;
-          }
-        } catch (err: any) {
-          console.log(`[Debug] 第 ${i + 1} 秒，/proc 扫描失败: ${err.message.split('\n')[0]}`);
-        }
-      }
+      const pid = await this.waitForWechatPid(onStatus)
 
       if (!pid) {
         const err = '未能自动启动微信，或获取PID失败，请查看控制台日志或手动启动微信，看到登录窗口后点击确认。'
@@ -165,6 +137,66 @@ export class KeyServiceLinux {
     }
   }
 
+  /** 拉起微信（fire-and-forget，遍历常见可执行名；不结束已有进程） */
+  private launchWeChat(): void {
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.ELECTRON_RUN_AS_NODE;
+    delete cleanEnv.ELECTRON_NO_ATTACH_CONSOLE;
+    delete cleanEnv.APPDIR;
+    delete cleanEnv.APPIMAGE;
+
+    const wechatBins = [
+      'wechat',
+      'wechat-bin',
+      'xwechat',
+      '/opt/wechat/wechat',
+      '/usr/bin/wechat',
+      '/usr/local/bin/wechat',
+      '/usr/bin/wechat',
+      '/opt/apps/com.tencent.wechat/files/wechat',
+      '/usr/bin/wechat-bin',
+      '/usr/local/bin/wechat-bin',
+      'com.tencent.wechat'
+    ]
+
+    for (const binName of wechatBins) {
+      try {
+        const child = spawn(binName, [], {
+          detached: true,
+          stdio: 'ignore',
+          env: cleanEnv
+        });
+
+        child.on('error', (err) => {
+          console.log(`[Debug] 拉起 ${binName} 失败:`, err.message);
+        });
+
+        child.unref();
+        console.log(`[Debug] 尝试拉起 ${binName} 完毕`);
+      } catch (e: any) {
+        console.log(`[Debug] 尝试拉起 ${binName} 发生异常:`, e.message);
+      }
+    }
+  }
+
+  /** 等待微信进程出现，最多 15 秒，返回首个 PID（0 表示未出现） */
+  private async waitForWechatPid(onStatus?: (message: string, level: number) => void): Promise<number> {
+    onStatus?.('等待微信进程出现...', 0)
+    for (let i = 0; i < 15; i++) { // 最多等 15 秒
+      await new Promise(r => setTimeout(r, 1000))
+      try {
+        const pids = this.discoverWechatPids();
+        if (pids.length > 0) {
+          console.log(`[Debug] 第 ${i + 1} 秒，通过 /proc 扫描成功获取 PID: ${pids[0]}`);
+          return pids[0];
+        }
+      } catch (err: any) {
+        console.log(`[Debug] 第 ${i + 1} 秒，/proc 扫描失败: ${err.message.split('\n')[0]}`);
+      }
+    }
+    return 0
+  }
+
   public async getDbKey(pid: number, onStatus?: (message: string, level: number) => void, timeoutMs = 180_000): Promise<DbKeyResult> {
     try {
       const helperPath = this.getHelperPath()
@@ -180,6 +212,7 @@ export class KeyServiceLinux {
       }
 
       const targetAddr = scanRes.target_addr
+      onStatus?.('已准备就绪，现在可以登录微信了', 0)
       onStatus?.('基址扫描成功，正在执行内存 Hook...', 0)
 
       const isDocker = process.env.WEFLOW_DOCKER === '1'
@@ -191,10 +224,17 @@ export class KeyServiceLinux {
         const hookCmd = `${helperPath} db_hook ${pid} ${targetAddr} ${timeoutMs}`
         return await new Promise((resolve) => {
           let settled = false
+          let hookChild: any = null
+          // Hook 结束（成功/失败/超时）时主动清理 helper 进程，避免其残留在后台
+          const cleanupHook = () => {
+            try { hookChild?.kill('SIGKILL') } catch { /* ignore */ }
+            try { exec(`pkill -f "${helperPath} db_hook"`, () => { /* ignore */ }) } catch { /* ignore */ }
+          }
           const finish = (result: DbKeyResult) => {
             if (settled) return
             settled = true
             clearTimeout(watchdog)
+            cleanupHook()
             resolve(result)
           }
           const watchdog = setTimeout(() => {
@@ -204,9 +244,9 @@ export class KeyServiceLinux {
             finish({ success: false, error: err })
           }, timeoutMs + 30_000)
 
-          onStatus?.('请在手机上确认登录微信，正在等待密钥回调...', 0)
+          onStatus?.('请在微信中完成登录（点击登录按钮），正在等待密钥回调...', 0)
 
-          exec(hookCmd, { timeout: timeoutMs + 30_000 }, (error, stdout, stderr) => {
+          hookChild = exec(hookCmd, { timeout: timeoutMs + 30_000 }, (error, stdout, stderr) => {
             execAsync(`kill -CONT ${pid}`).catch(() => {})
             if (error) {
               const detail = String(stderr || '').trim()
@@ -242,10 +282,15 @@ export class KeyServiceLinux {
 
       return await new Promise((resolve) => {
         let settled = false
+        // Hook 结束时尽力清理 helper 进程（Docker/root 下有效）
+        const cleanupHook = () => {
+          try { exec(`pkill -f "${helperPath} db_hook"`, () => { /* ignore */ }) } catch { /* ignore */ }
+        }
         const finish = (result: DbKeyResult) => {
           if (settled) return
           settled = true
           clearTimeout(watchdog)
+          cleanupHook()
           resolve(result)
         }
         const watchdog = setTimeout(() => {
@@ -255,7 +300,7 @@ export class KeyServiceLinux {
           finish({ success: false, error: err })
         }, timeoutMs + 30_000)
 
-        onStatus?.('授权通过后请在手机上确认登录微信，正在等待密钥回调...', 0)
+        onStatus?.('授权通过后请在微信中完成登录（点击登录按钮），正在等待密钥回调...', 0)
 
         this.sudo.exec(command, options, (error, stdout, stderr) => {
           execAsync(`kill -CONT ${pid}`).catch(() => {})
