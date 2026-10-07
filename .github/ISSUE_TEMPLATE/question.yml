@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        在提问之前，请确保你已经仔细阅读过我们的官方文档。
+        在提问之前，请确保你已经仔细阅读过README.md。
   - type: input
     id: confirm-unique
     attributes:
@@ -41,7 +41,7 @@ body:
     attributes:
       label: 问题描述
       description: 清晰描述你遇到的问题或疑问
-      placeholder: 例如：我在 Windows 系统上安装后无法启动应用，双击图标没有任何反应
+      placeholder: 例如：容器启动后 WebUI（7300 端口）无法访问，日志显示数据库密钥获取失败
     validations:
       required: true
   - type: textarea
@@ -49,18 +49,20 @@ body:
     attributes:
       label: 已尝试的方法
       description: 你已经尝试过哪些解决方法？
-      placeholder: 例如：我尝试过重新安装、以管理员身份运行、关闭防火墙，但问题依然存在
+      placeholder: 例如：我尝试过重新安装、关闭防火墙，但问题依然存在
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
       label: 运行环境
-      description: 提供你的系统环境信息
+      description: 提供你的镜像版本与部署设备信息，便于我们快速定位问题
       placeholder: |
-        操作系统：Windows 11
-        应用版本：v1.2.3
+        镜像版本：FlowBOT | 1.6.3（请填写webUI「关于」页面中的具体版本）
+        宿主设备：Ubuntu 24.04
         系统架构：x64
+        Docker 版本：27.1.1
+        部署方式：docker compose / docker run
     validations:
       required: true
   - type: textarea

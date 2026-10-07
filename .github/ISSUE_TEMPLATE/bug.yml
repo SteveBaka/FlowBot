@@ -49,7 +49,7 @@ body:
     id: platform
     attributes:
       label: 使用平台
-      description: 选择出现问题的平台
+      description: 选择运行 Docker 容器的宿主系统
       options:
         - Windows
         - macOS
@@ -111,26 +111,26 @@ body:
       placeholder: 请粘贴完整的错误堆栈信息
       render: shell
   - type: input
-    id: os
+    id: host-device
     attributes:
-      label: 操作系统版本
-      description: 例如：Windows 11 24H2、macOS 15.0、Ubuntu 24.04
-      placeholder: Windows 11 24H2
+      label: 宿主设备
+      description: 运行 Docker 容器的设备或系统，例如：Ubuntu 24.04 服务器、群晖 DS920+（DSM 7.2）、unRAID 6.12、Windows 11（Docker Desktop）
+      placeholder: Ubuntu 24.04
     validations:
       required: true
   - type: input
-    id: app-version
+    id: image-version
     attributes:
-      label: 应用版本
-      description: 在关于页面或设置中查看版本号
-      placeholder: v1.2.3
+      label: 镜像版本
+      description: 请填写webUI「关于」页面中的具体版本
+      placeholder: FlowBOT | 1.6.3
     validations:
       required: true
   - type: input
     id: architecture
     attributes:
       label: 系统架构
-      description: 例如：x64、arm64
+      description: 容器镜像架构，例如：x64、arm64
       placeholder: x64
   - type: textarea
     id: additional-context
