@@ -439,6 +439,34 @@ const ATTEST_ASAR = '/opt/weflow/resources/app.asar'
 const ATTEST_MODULE = 'weflow-attest'
 const ATTEST_VERSION = '1.0.0'
 
+let attestCapMsCache = undefined // undefined=未读取, null=读取失败
+function attestCorePath() {
+  const cands = [
+    '/opt/weflow/resources/resources/attest/linux/x64/attest_core',
+    '/opt/weflow/resources/attest/linux/x64/attest_core',
+    path.join(__dirname, '..', '..', 'resources', 'attest', 'linux', 'x64', 'attest_core')
+  ]
+  for (const p of cands) {
+    try { if (fs.existsSync(p)) return p } catch { /* ignore */ }
+  }
+  return null
+}
+function attestCapMs() {
+  if (attestCapMsCache !== undefined) return attestCapMsCache
+  const bin = attestCorePath()
+  if (!bin) { attestCapMsCache = null; return null }
+  try {
+    const out = execSync(`"${bin}" lease ${Date.now()}`, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    const j = JSON.parse(out)
+    attestCapMsCache = typeof j.cap_ms === 'number' ? j.cap_ms : null
+  } catch { attestCapMsCache = null }
+  return attestCapMsCache
+}
+function attestExpired() {
+  const cap = attestCapMs()
+  return cap != null && Date.now() >= cap
+}
+
 function attestSecret() {
   try {
     const s = fs.readFileSync(ATTEST_SECRET_FILE, 'utf8').trim()
@@ -458,8 +486,8 @@ function attestHmac(secret, msg) { return crypto.createHmac('sha256', secret).up
 function attestWcdbPatched() {
   try {
     const out = execSync('python3 /opt/patch-wcdb-deadline.py --check 2>&1', { timeout: 8000 }).toString()
-    return /already_patched['"]?\s*:\s*True/i.test(out)
-  } catch { return false }
+    return /'at_target': True/.test(out)
+  } catch { return false } // --check 非 0 退出（未打到目标）视为未就绪
 }
 let attestLast = { ok: false, reason: 'not-yet', checked_at: null, weflow_id: null }
 let attestLeaseExpires = null // 最近一次成功校验授予的租期（1 个月）
@@ -488,16 +516,24 @@ function attestHandleLine(sock, line) {
     const expect = attestHmac(secret, ['c', ctx.nonceS || '', ctx.nonceC || '', asar].join('|'))
     const clientOk = req.hmac_c === expect
     const asarOk = ctx.asar === asar
+    const expired = attestExpired()
     const ok = clientOk && asarOk && patched
-    if (ok) { const exp = new Date(); exp.setMonth(exp.getMonth() + 1); attestLeaseExpires = exp.toISOString() }
+    if (ok) {
+      const exp = new Date(); exp.setMonth(exp.getMonth() + 1)
+      const cap = attestCapMs()
+      attestLeaseExpires = new Date(cap != null ? Math.min(exp.getTime(), cap) : exp.getTime()).toISOString()
+    }
     attestLast = {
       ok,
-      reason: !clientOk ? 'client-proof-failed' : (!asarOk ? 'asar-mismatch' : (!patched ? 'wcdb-not-patched' : 'ok')),
+      expired,
+      reason: !clientOk ? 'client-proof-failed'
+        : (!asarOk ? 'asar-mismatch'
+          : (!patched ? 'wcdb-not-patched' : 'ok')),
       checked_at: new Date().toISOString(), weflow_id: req.weflow_id || null,
       expires_at: attestLeaseExpires
     }
     sock.write(JSON.stringify({
-      ok, module: ATTEST_MODULE, version: ATTEST_VERSION, asar_sha256: asar,
+      ok, expired, module: ATTEST_MODULE, version: ATTEST_VERSION, asar_sha256: asar,
       webui_online: true, wcdb_patched: patched, checked_at: attestLast.checked_at,
       expires_at: attestLast.expires_at, reason: attestLast.reason
     }) + '\n')
@@ -665,6 +701,8 @@ const server = http.createServer(async (req, res) => {
       version: ATTEST_VERSION,
       asar_sha256: attestAsarSha(),
       wcdb_patched: attestWcdbPatched(),
+      cap_ms: attestCapMs(),
+      expired: attestExpired(),
       last: attestLast
     })
     return

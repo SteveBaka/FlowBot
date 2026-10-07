@@ -14,14 +14,14 @@ const origFs: any = (() => {
  *
  * - 认证方：容器内 WebUI 进程（/run/weflow/attest.sock）。
  * - 每次校验执行双向 HMAC（WebUI 在线 + 秘密一致 + asar 指纹一致 + WCDB 期限 patch 已应用）。
- * - 校验通过时由原生二进制 `attest_core` 计算一段 **租期**；**不落盘**，仅存进程内存。
- * - 纯本地，不产生任何外联。
+ * - 到期时刻（cap）与租期的**唯一持有者**是原生二进制 `attest_core`；由 WebUI 权威侧读取并
+ *   通过响应分发 `expires_at`，客户端不再本地保存任何时间常量。
+ * - 校验结果与租期仅存进程内存，不落盘；纯本地，不产生任何外联。
  */
 
 const ATTEST_SOCK = '/run/weflow/attest.sock'
 const ATTEST_SECRET_FILE = '/opt/weflow/data/attest-secret'
 const DAY_MS = 24 * 60 * 60 * 1000
-const CAP_MS = 1830297599000 
 const DEBUG = process.env.WEFLOW_ATTEST_DEBUG === '1'
 
 function log(...a: any[]): void {
@@ -40,7 +40,7 @@ function resolveAttestCore(): string | null {
   return null
 }
 
-/** 通过原生二进制计算租期到期时刻；二进制缺失时用 JS 兜底（语义一致） */
+/** 兜底计算租期到期时刻：优先 WebUI 分发的值，缺失时才回落到本地 attest_core 二进制 */
 function computeLeaseMs(grantedAt: number): number {
   const bin = resolveAttestCore()
   if (bin) {
@@ -55,7 +55,7 @@ function computeLeaseMs(grantedAt: number): number {
   }
   const d = new Date(grantedAt)
   d.setMonth(d.getMonth() + 1)
-  return Math.min(d.getTime(), CAP_MS)
+  return d.getTime()
 }
 
 export type AttestState = {
@@ -89,7 +89,7 @@ class AttestService {
     return this.state.attested
   }
 
-  /** 是否可用：最近一次通过，或仍处于内存租期内 */
+  /** 是否可用：最近一次通过，或仍处于权威侧分发的租期内 */
   isUsable(): boolean {
     if (this.state.attested) return true
     return this.state.expiresAt != null && Date.now() < this.state.expiresAt
@@ -165,8 +165,8 @@ class AttestService {
           }
           if (typeof msg.ok === 'boolean' && (msg.reason !== undefined || msg.checked_at !== undefined)) {
             const ok = !!msg.ok
-            // 通过则由原生二进制授予租期（仅内存）
-            const expiresAt = ok ? computeLeaseMs(Date.now()) : this.state.expiresAt
+            const granted = typeof msg.expires_at === 'number' ? msg.expires_at : null
+            const expiresAt = ok ? (granted ?? computeLeaseMs(Date.now())) : this.state.expiresAt
             finish({
               attested: ok,
               reason: msg.reason || (ok ? 'ok' : 'failed'),

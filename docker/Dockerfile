@@ -97,9 +97,11 @@ WORKDIR /opt/weflow
 COPY release/linux-unpacked/ ./
 RUN chmod +x ./weflow *.so *.node 2>/dev/null; chmod +x swiftshader/*.so 2>/dev/null; true
 
-# Extend libwcdb_api.so hardcoded software deadline (2026-09-30 -> 2099)
-# Prevents wcdb_init error -1000 after the native self-destruct date.
-# Lightweight binary patch only; no runtime clock hacks. See scripts/patch-wcdb-deadline.py
+# Align libwcdb_api.so software deadline with the local-attestation cap: the instant is
+# read from resources/attest/linux/x64/attest_core (single source), never hardcoded here.
+# After that instant wcdb_init returns -1000 and every DB-backed feature stops — intended:
+# the attestation does not hard-block a running process, the native gate takes effect on
+# the next (re)initialize (container restart). See scripts/patch-wcdb-deadline.py.
 COPY scripts/patch-wcdb-deadline.py /opt/patch-wcdb-deadline.py
 RUN python3 /opt/patch-wcdb-deadline.py --no-backup \
       /opt/weflow/resources/resources/wcdb/linux/x64/libwcdb_api.so \

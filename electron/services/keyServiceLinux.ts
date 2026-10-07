@@ -24,6 +24,10 @@ function kf(msg: string): void {
   try { logger.info('keyflow', msg) } catch { /* ignore */ }
 }
 
+function attestBlockMessage(): string {
+  return '认证异常，请访问项目仓库检查更新'
+}
+
 export class KeyServiceLinux {
   private sudo: any
   /** 当前运行的 Hook 子进程取消器（用于「取消」时立即结束 helper，避免残留进程） */
@@ -78,9 +82,9 @@ export class KeyServiceLinux {
       // 且不做任何 kill/拉起。该校验独立于 24H 租期，属敏感操作的强约束。
       if (process.env.WEFLOW_DOCKER === '1') {
         const ok = await attestService.verifyNow()
-        kf(`gate mode=${mode} attest=${ok ? 'pass' : 'block'}`)
+        kf(`gate mode=${mode} attest=${ok ? 'pass' : 'block'} reason=${attestService.getState().reason}`)
         if (!ok) {
-          const err = '本地认证异常：密钥获取功能已暂停（请确认 WebUI 管理面板在线）'
+          const err = attestBlockMessage()
           onStatus?.(err, 2)
           return { success: false, error: err }
         }
@@ -232,7 +236,7 @@ export class KeyServiceLinux {
     try {
       // 二次防线（廉价，不额外握手）：认证不可用则拒绝
       if (process.env.WEFLOW_DOCKER === '1' && !attestService.isUsable()) {
-        const err = '本地认证异常：密钥获取功能已暂停（请确认 WebUI 管理面板在线）'
+        const err = attestBlockMessage()
         onStatus?.(err, 2)
         return { success: false, error: err }
       }

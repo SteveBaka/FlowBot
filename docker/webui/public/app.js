@@ -955,6 +955,7 @@ var AboutPage = {
         if (a && !a.error) {
           var last = a.last || {}
           info.attestOk = !!last.ok
+          var expired = !!a.expired || !!last.expired
           var exp = last.expires_at ? new Date(last.expires_at) : null
           var usable = !!last.ok || (exp && Date.now() < exp.getTime())
           var reasons = {
@@ -965,10 +966,14 @@ var AboutPage = {
             'connect-error': '认证模块不可达',
             timeout: '认证模块超时',
             'server-proof-failed': '校验不通过（服务端证明错误）',
-            'missing-secret-or-asar': '缺少认证材料'
+            'missing-secret-or-asar': '缺少认证材料',
+            expired: '已到期'
           }
           var why = reasons[last.reason] || last.reason || '未知'
-          if (!last.checked_at) {
+          // 到期状态只在本页如实展示，不显示具体时刻
+          if (expired) {
+            info.attestText = '本地认证已到期'
+          } else if (!last.checked_at) {
             info.attestText = '尚未校验'
           } else if (last.ok) {
             info.attestText = '本地认证通过'
