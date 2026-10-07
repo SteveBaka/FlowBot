@@ -5,11 +5,13 @@ interface ConfirmDialogProps {
   open: boolean
   title?: string
   message: string
+  confirmText?: string
+  cancelText?: string
   onConfirm: () => void
   onCancel: () => void
 }
 
-export default function ConfirmDialog({ open, title, message, onConfirm, onCancel }: ConfirmDialogProps) {
+export default function ConfirmDialog({ open, title, message, confirmText = '开始获取', cancelText = '取消', onConfirm, onCancel }: ConfirmDialogProps) {
   if (!open) return null
 
   return (
@@ -23,8 +25,8 @@ export default function ConfirmDialog({ open, title, message, onConfirm, onCance
           <p style={{ whiteSpace: 'pre-line' }}>{message}</p>
         </div>
         <div className="dialog-actions">
-          <button className="btn-cancel" onClick={onCancel}>取消</button>
-          <button className="btn-confirm" onClick={onConfirm}>开始获取</button>
+          <button className="btn-cancel" onClick={onCancel}>{cancelText}</button>
+          <button className="btn-confirm" onClick={onConfirm}>{confirmText}</button>
         </div>
       </div>
     </div>

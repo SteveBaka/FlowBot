@@ -260,16 +260,26 @@ export function parseImageCdnFetchParams(content: string): { fileKey?: string; a
 
 /* ── 入站图片编排（自 messagePushService.resolveAndDecryptImage 迁入，逻辑逐行等价）── */
 
-const IMAGE_DECRYPT_MAX_RETRIES = 3
 const IMAGE_DECRYPT_RETRY_DELAY_MS = 1000
+const IMAGE_LOCAL_ATTEMPTS_MIN = 1
+const IMAGE_LOCAL_ATTEMPTS_MAX = 10
+const IMAGE_LOCAL_ATTEMPTS_DEFAULT = 4
 
-/** 入站图片解析：重试 + preferHd 分层 + HD dat 升级 + CDN 直取兜底 + 缩略图降级，
- * 全路径不抛出；失败返回 undefined（调用方据 lt===3 判定 imageDecryptFailed） */
+/** 入站图片解析：重试 + preferHd 分层 + HD dat 升级 + CDN 直取（优先/兜底双入口）+ 缩略图降级，
+ * 全路径不抛出；失败返回 undefined（调用方据 lt===3 判定 imageDecryptFailed）。
+ * 本地尝试次数 = imageLocalDecryptAttempts（含首次，钳 1–10，默认 4 = 原硬编码行为）；
+ * imageCdnDirectFetchPrefer=true 时 CDN 直取前置，失败/限流回退本地流程 */
 export async function resolveInboundImage(message: InboundMediaMessage, sessionId: string): Promise<string | undefined> {
   if (Number(message.localType || 0) !== 3) return undefined
   const imageMd5 = String(message.imageMd5 || '').trim()
   const imageDatName = String(message.imageDatName || '').trim()
   if (!imageMd5 && !imageDatName) return undefined
+  const cfg = ConfigService.getInstance()
+  const rawAttempts = Number(cfg.get('imageLocalDecryptAttempts'))
+  const totalAttempts = Number.isFinite(rawAttempts) && rawAttempts >= IMAGE_LOCAL_ATTEMPTS_MIN
+    ? Math.min(IMAGE_LOCAL_ATTEMPTS_MAX, Math.floor(rawAttempts))
+    : IMAGE_LOCAL_ATTEMPTS_DEFAULT
+  const cdnEnabled = cfg.get('imageCdnDirectFetchEnabled') === true
   const basePayload = {
     sessionId,
     imageMd5,
@@ -280,11 +290,49 @@ export async function resolveInboundImage(message: InboundMediaMessage, sessionI
   }
   let lastError: unknown = undefined
   let thumbPath: string | undefined = undefined
-  for (let attempt = 0; attempt <= IMAGE_DECRYPT_MAX_RETRIES; attempt++) {
+
+  /** CDN 直取（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）：产物为解密后明文；任何失败仅记日志
+   * 返回 undefined，由调用方决定回退（优先模式→本地流程；兜底模式→缩略图） */
+  const tryCdnDirect = async (): Promise<string | undefined> => {
+    try {
+      const cdnParams = parseImageCdnFetchParams(String(message.rawContent || message.content || ''))
+      if (!(cdnParams.fileKey && cdnParams.aesKey && cdnParams.fileLen && cdnParams.fileLen > 0)) {
+        console.log(`[DIAG][MsgPush] cdn fetch skip: params incomplete fileKey=${!!cdnParams.fileKey} aesKey=${!!cdnParams.aesKey} fileLen=${cdnParams.fileLen ?? 'null'}`)
+        return undefined
+      }
+      const fullPath = cdnFetchService.buildSavePath(imageMd5 || `img_${Date.now()}`)
+      const cdnResult = await cdnFetchService.fetch({
+        fileKey: cdnParams.fileKey,
+        aesKey: cdnParams.aesKey,
+        fileLen: cdnParams.fileLen,
+        fullPath,
+        md5: imageMd5 || cdnParams.md5, // 仅诊断：XML md5 与 CDN 实存对象无关（PoC 实证），不参与产物判定
+        // createTime 秒 → 毫秒（cdnFetchService 门禁按 ms 与 Date.now() 比较）
+        messageCreateTime: Number(message.createTime || 0) * 1000
+      })
+      if (cdnResult.success && cdnResult.localPath) {
+        console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
+        return cdnResult.localPath
+      }
+      console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
+      return undefined
+    } catch (e) {
+      console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)
+      return undefined
+    }
+  }
+
+  // 优先模式（WebUI 高风险开关）：先直取原图；失败/限流 → 落回本地流程，不阻断
+  if (cdnEnabled && cfg.get('imageCdnDirectFetchPrefer') === true) {
+    const preferred = await tryCdnDirect()
+    if (preferred) return preferred
+  }
+
+  for (let attempt = 0; attempt < totalAttempts; attempt++) {
     if (attempt > 0) {
       await new Promise((resolve) => setTimeout(resolve, IMAGE_DECRYPT_RETRY_DELAY_MS))
     }
-    const isLastAttempt = attempt >= IMAGE_DECRYPT_MAX_RETRIES
+    const isLastAttempt = attempt >= totalAttempts - 1
     const preferHd = attempt >= 1
     const payload = { ...basePayload, preferHd }
     try {
@@ -323,38 +371,16 @@ export async function resolveInboundImage(message: InboundMediaMessage, sessionI
       console.log(`[DIAG][MsgPush] attempt=${attempt} exception: ${e}`)
     }
   }
-  // CDN 直取兜底（IMAGE-HD-DOWNLOAD-ANALYSIS §8.6）：仅剩缩略图且开关开启时触发；
-  // 产物为解密后明文，任何失败都降级回缩略图，不阻断推送
-  if (thumbPath && ConfigService.getInstance().get('imageCdnDirectFetchEnabled') === true) {
-    try {
-      const cdnParams = parseImageCdnFetchParams(String(message.rawContent || message.content || ''))
-      if (cdnParams.fileKey && cdnParams.aesKey && cdnParams.fileLen && cdnParams.fileLen > 0) {
-        const fullPath = cdnFetchService.buildSavePath(imageMd5 || `img_${Date.now()}`)
-        const cdnResult = await cdnFetchService.fetch({
-          fileKey: cdnParams.fileKey,
-          aesKey: cdnParams.aesKey,
-          fileLen: cdnParams.fileLen,
-          fullPath,
-          md5: imageMd5 || cdnParams.md5, // 仅诊断：XML md5 与 CDN 实存对象无关（PoC 实证），不参与产物判定
-          // createTime 秒 → 毫秒（cdnFetchService 门禁按 ms 与 Date.now() 比较）
-          messageCreateTime: Number(message.createTime || 0) * 1000
-        })
-        if (cdnResult.success && cdnResult.localPath) {
-          console.log(`[DIAG][MsgPush] cdn fetch success path=${cdnResult.localPath}`)
-          return cdnResult.localPath
-        }
-        console.log(`[DIAG][MsgPush] cdn fetch degraded: error=${cdnResult.error} code=${cdnResult.code} disposition=${cdnResult.disposition}`)
-      } else {
-        console.log(`[DIAG][MsgPush] cdn fetch skip: params incomplete fileKey=${!!cdnParams.fileKey} aesKey=${!!cdnParams.aesKey} fileLen=${cdnParams.fileLen ?? 'null'}`)
-      }
-    } catch (e) {
-      console.log(`[DIAG][MsgPush] cdn fetch exception: ${e}`)
-    }
+  // CDN 直取兜底：仅剩缩略图且开关开启时触发；优先模式下前置直取若已真正发出，
+  // 此处由 cdnFetchService 台账/限流自行裁决（限流/未发出的请求在本地等待后允许再试）
+  if (thumbPath && cdnEnabled) {
+    const viaCdn = await tryCdnDirect()
+    if (viaCdn) return viaCdn
   }
   if (thumbPath) {
     return thumbPath
   }
-  console.warn(`[MessagePushService] Image decrypt failed after ${IMAGE_DECRYPT_MAX_RETRIES + 1} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
+  console.warn(`[MessagePushService] Image decrypt failed after ${totalAttempts} attempts: ${String(lastError)} (imageMd5=${imageMd5}, sessionId=${sessionId})`)
   return undefined
 }
 

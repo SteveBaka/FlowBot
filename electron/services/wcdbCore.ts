@@ -360,7 +360,7 @@ export class WcdbCore {
       '-2302': 'WCDB 初始化异常，请重试',
       '-2303': 'WCDB 未能成功初始化',
       '-101': '原生库授权截止校验失败（InitProtection 时间闸），Docker 请使用已补丁的 libwcdb_api.so',
-      '-1000': '原生库已过内置软件截止日（wcdb_init self-destruct），Docker 请使用已补丁的 libwcdb_api.so',
+      '-1000': '认证异常，请访问项目仓库检查更新',
       '-1006': '进程名未通过安全校验（需 weflow / electron 等允许名称）',
     }
     const msg = messages[String(code) as unknown as keyof typeof messages]

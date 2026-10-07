@@ -428,6 +428,152 @@ async function proxyRequest(targetUrl, options = {}) {
 
 // ─── HTTP server ──────────────────────────────────────────────────────────────
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// 本地认证权威（Unix socket）：WebUI 进程即认证方，在线即可用。
+// WeFlow 每次启动/周期向此发起双向 HMAC 校验；失败则 WeFlow 侧 gate 敏感功能。
+// ═══════════════════════════════════════════════════════════════════════════════
+const net = require('net')
+const ATTEST_SOCK = '/run/weflow/attest.sock'
+const ATTEST_SECRET_FILE = '/opt/weflow/data/attest-secret'
+const ATTEST_ASAR = '/opt/weflow/resources/app.asar'
+const ATTEST_MODULE = 'weflow-attest'
+const ATTEST_VERSION = '1.0.0'
+
+let attestCapMsCache = undefined // undefined=未读取, null=读取失败
+function attestCorePath() {
+  const cands = [
+    '/opt/weflow/resources/resources/attest/linux/x64/attest_core',
+    '/opt/weflow/resources/attest/linux/x64/attest_core',
+    path.join(__dirname, '..', '..', 'resources', 'attest', 'linux', 'x64', 'attest_core')
+  ]
+  for (const p of cands) {
+    try { if (fs.existsSync(p)) return p } catch { /* ignore */ }
+  }
+  return null
+}
+function attestCapMs() {
+  if (attestCapMsCache !== undefined) return attestCapMsCache
+  const bin = attestCorePath()
+  if (!bin) { attestCapMsCache = null; return null }
+  try {
+    const out = execSync(`"${bin}" lease ${Date.now()}`, { timeout: 3000, stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    const j = JSON.parse(out)
+    attestCapMsCache = typeof j.cap_ms === 'number' ? j.cap_ms : null
+  } catch { attestCapMsCache = null }
+  return attestCapMsCache
+}
+function attestExpired() {
+  const cap = attestCapMs()
+  return cap != null && Date.now() >= cap
+}
+
+function attestSecret() {
+  try {
+    const s = fs.readFileSync(ATTEST_SECRET_FILE, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(s)) return s
+  } catch { /* fallthrough */ }
+  try {
+    fs.mkdirSync(path.dirname(ATTEST_SECRET_FILE), { recursive: true })
+    const s = crypto.randomBytes(32).toString('hex')
+    fs.writeFileSync(ATTEST_SECRET_FILE, s, { mode: 0o600 })
+    return s
+  } catch { return '' }
+}
+function attestAsarSha() {
+  try { return crypto.createHash('sha256').update(fs.readFileSync(ATTEST_ASAR)).digest('hex') } catch { return '' }
+}
+function attestHmac(secret, msg) { return crypto.createHmac('sha256', secret).update(msg).digest('hex') }
+function attestWcdbPatched() {
+  try {
+    const out = execSync('python3 /opt/patch-wcdb-deadline.py --check 2>&1', { timeout: 8000 }).toString()
+    return /'at_target': True/.test(out)
+  } catch { return false } // --check 非 0 退出（未打到目标）视为未就绪
+}
+let attestLast = { ok: false, reason: 'not-yet', checked_at: null, weflow_id: null }
+let attestLeaseExpires = null // 最近一次成功校验授予的租期（1 个月）
+
+function attestHandleLine(sock, line) {
+  let req
+  try { req = JSON.parse(line) } catch { sock.write(JSON.stringify({ ok: false, error: 'bad json' }) + '\n'); return }
+  const secret = attestSecret()
+  const asar = attestAsarSha()
+  const patched = attestWcdbPatched()
+  if (!secret || !asar) { sock.write(JSON.stringify({ ok: false, error: 'attest-unavailable' }) + '\n'); return }
+
+  if (req.op === 'hello') {
+    const nonceS = crypto.randomBytes(16).toString('hex')
+    sock._attestCtx = { nonceC: String(req.nonce_c || ''), nonceS, asar, patched }
+    const hmacS = attestHmac(secret, ['s', String(req.nonce_c || ''), nonceS, asar].join('|'))
+    sock.write(JSON.stringify({
+      ok: true, module: ATTEST_MODULE, version: ATTEST_VERSION, nonce_s: nonceS,
+      asar_expected: asar, asar_ok: req.asar_sha256 === asar, webui_online: true,
+      wcdb_patched: patched, hmac_s: hmacS
+    }) + '\n')
+    return
+  }
+  if (req.op === 'proof') {
+    const ctx = sock._attestCtx || {}
+    const expect = attestHmac(secret, ['c', ctx.nonceS || '', ctx.nonceC || '', asar].join('|'))
+    const clientOk = req.hmac_c === expect
+    const asarOk = ctx.asar === asar
+    const expired = attestExpired()
+    const ok = clientOk && asarOk && patched
+    if (ok) {
+      const exp = new Date(); exp.setMonth(exp.getMonth() + 1)
+      const cap = attestCapMs()
+      attestLeaseExpires = new Date(cap != null ? Math.min(exp.getTime(), cap) : exp.getTime()).toISOString()
+    }
+    attestLast = {
+      ok,
+      expired,
+      reason: !clientOk ? 'client-proof-failed'
+        : (!asarOk ? 'asar-mismatch'
+          : (!patched ? 'wcdb-not-patched' : 'ok')),
+      checked_at: new Date().toISOString(), weflow_id: req.weflow_id || null,
+      expires_at: attestLeaseExpires
+    }
+    sock.write(JSON.stringify({
+      ok, expired, module: ATTEST_MODULE, version: ATTEST_VERSION, asar_sha256: asar,
+      webui_online: true, wcdb_patched: patched, checked_at: attestLast.checked_at,
+      expires_at: attestLast.expires_at, reason: attestLast.reason
+    }) + '\n')
+    return
+  }
+  if (req.op === 'status') {
+    sock.write(JSON.stringify({
+      ok: true, module: ATTEST_MODULE, version: ATTEST_VERSION, asar_sha256: asar,
+      webui_online: true, wcdb_patched: patched, last: attestLast
+    }) + '\n')
+    return
+  }
+  sock.write(JSON.stringify({ ok: false, error: 'unknown op' }) + '\n')
+}
+
+function startAttestServer() {
+  try {
+    attestSecret() // 启动即生成/确保 secret 文件存在，避免与 WeFlow 首次握手竞态
+    fs.mkdirSync('/run/weflow', { recursive: true })
+    try { fs.unlinkSync(ATTEST_SOCK) } catch { /* ignore */ }
+    const srv = net.createServer((sock) => {
+      sock.setEncoding('utf8')
+      let buf = ''
+      sock.on('data', (d) => {
+        buf += d
+        let i
+        while ((i = buf.indexOf('\n')) >= 0) {
+          const line = buf.slice(0, i); buf = buf.slice(i + 1)
+          try { attestHandleLine(sock, line) } catch { /* ignore */ }
+        }
+      })
+      sock.on('error', () => { /* ignore */ })
+    })
+    srv.listen(ATTEST_SOCK, () => {
+      try { fs.chmodSync(ATTEST_SOCK, 0o600) } catch { /* ignore */ }
+    })
+    srv.on('error', (e) => console.warn('[attest] server error:', e.message))
+  } catch (e) { console.warn('[attest] start failed:', e && e.message) }
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
   res.setHeader('Access-Control-Allow-Origin', '*')
@@ -544,6 +690,20 @@ const server = http.createServer(async (req, res) => {
     json(res, {
       app: 'FlowBOT', version: CONTAINER_VERSION, protocol: 'v11.0',
       onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT), flow_port: Number(FLOW_PORT)
+    })
+    return
+  }
+
+  if (p === '/api/attest') {
+    json(res, {
+      ok: true,
+      module: ATTEST_MODULE,
+      version: ATTEST_VERSION,
+      asar_sha256: attestAsarSha(),
+      wcdb_patched: attestWcdbPatched(),
+      cap_ms: attestCapMs(),
+      expired: attestExpired(),
+      last: attestLast
     })
     return
   }
@@ -2017,6 +2177,7 @@ setInterval(refreshPluginApiBots, 5000)
 server.listen(PORT, '0.0.0.0', () => {
   ensureApiToken()
   loadPushState()
+  startAttestServer()
   console.log(`[WebUI] FlowBOT management panel running on http://0.0.0.0:${PORT}`)
   console.log(`[WebUI] WeFlow config path: ${discoverWeFlowConfigPath()}`)
   console.log(`[WebUI] Disclaimer accepted: ${isDisclaimerAccepted()}`)

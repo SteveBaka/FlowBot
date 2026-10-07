@@ -274,12 +274,12 @@ start.sh 启动容器
   http://IP:5031  ──▶ WeFlow HTTP API（容器内通信，不建议外部访问）
 ```
 
+
 ## 关键技术决策
 
 | 决策 | 说明 |
 |------|------|
 | **消息发送** | 使用 xdotool + xclip 模拟键盘操作，无需 Wine/CrossOver |
-| **密钥获取** | xkey_helper_linux 通过 ptrace hook 微信进程内存，需要 `SYS_PTRACE` 权限 |
 | **OneBot 双向** | OneBotServer 实现 HTTP + 自定义 WebSocket，支持外部框架发送/接收消息 |
 | **配置存储** | electron-store JSON 文件，WebUI 通过 HTTP API 管理端点读写 |
 | **WebUI** | 本地化 vendor 文件（vue/vue-router），无需外网 CDN |

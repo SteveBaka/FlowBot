@@ -22,6 +22,25 @@ done | tee -a "$LOGDIR/container.log") 2>&1
 log INFO "Starting FlowBOT + OneBot container..."
 log INFO "Logs: $LOGDIR/container.log"
 
+# container.log 轮转：超过上限时保留末尾 KEEP 字节。
+# tee 以 append 模式持有该文件，重写（truncate）后其行为 O_APPEND 会从新 EOF 续写，安全。
+(
+  while true; do
+    sleep "${WEFLOW_CONTAINER_LOG_INTERVAL:-300}"
+    _max="${WEFLOW_CONTAINER_LOG_MAX:-20971520}"   # 20MB
+    _keep="${WEFLOW_CONTAINER_LOG_KEEP:-2097152}"  # 2MB
+    if [ -f "$LOGDIR/container.log" ]; then
+      _sz=$(stat -c %s "$LOGDIR/container.log" 2>/dev/null || echo 0)
+      if [ "$_sz" -gt "$_max" ]; then
+        if tail -c "$_keep" "$LOGDIR/container.log" > "$LOGDIR/container.log.tmp" 2>/dev/null; then
+          cat "$LOGDIR/container.log.tmp" > "$LOGDIR/container.log" 2>/dev/null || true
+        fi
+        rm -f "$LOGDIR/container.log.tmp" 2>/dev/null || true
+      fi
+    fi
+  done
+) >/dev/null 2>&1 &
+
 # Start DBus
 log INFO "Starting DBus..."
 mkdir -p /run/dbus

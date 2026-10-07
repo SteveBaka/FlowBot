@@ -1382,7 +1382,7 @@ function SettingsPage({ onClose }: SettingsPageProps = {}) {
     setDbKeyError('')
     setDbKeyStatus('正在连接微信进程...')
     try {
-      const result = await window.electronAPI.key.autoGetDbKey()
+      const result = await window.electronAPI.key.autoGetDbKey('restart')
       if (result.success && result.key) {
         setDecryptKey(result.key)
         setDbKeyStatus('密钥获取成功')

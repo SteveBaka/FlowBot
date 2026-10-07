@@ -3687,6 +3687,8 @@ class HttpService {
                 'imageCdnDirectFetchHourlyLimit',
                 'imageCdnDirectFetchMaxAgeMs',
                 'imageCdnDirectFetchDiagMd5Log',
+                'imageCdnDirectFetchPrefer',
+                'imageLocalDecryptAttempts',
                 'videoCalibrationLogEnabled',
                 'inboundVideoPushEnabled',
                 // 入站语音推送（INBOUND-VOICE-PUSH-PLAN；与 config schema 同步加键，防"开关失忆"）
