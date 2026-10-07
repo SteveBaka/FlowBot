@@ -131,6 +131,10 @@ interface ConfigSchema {
   imageCdnDirectFetchMaxAgeMs: number
   // 产物 md5 与 XML 声称值比对诊断日志（仅记录不判定；用户反馈问题时开关复现）
   imageCdnDirectFetchDiagMd5Log: boolean
+  // 优先 CDN 直取（高风险，WebUI 逐次弹窗确认后开启）：收图先直取原图，失败/限流回退本地流程
+  imageCdnDirectFetchPrefer: boolean
+  // 本地读取/解密原图最大尝试次数（含首次，间隔 1s；WebUI 钳 1–10，默认 4 = 原硬编码行为）
+  imageLocalDecryptAttempts: number
   // 视频链路标定日志（源规格 + T0；默认关，实验时开启）——后续入站视频开关同区
   videoCalibrationLogEnabled: boolean
   // 入站视频推送（默认关：多数模型不支持视频模态，仅向适配器提供文件 URL 与元数据，INBOUND-VIDEO-PUSH-PLAN §三）
@@ -382,6 +386,8 @@ export class ConfigService {
       imageCdnDirectFetchHourlyLimit: 30,
       imageCdnDirectFetchMaxAgeMs: 600000,
       imageCdnDirectFetchDiagMd5Log: true,
+      imageCdnDirectFetchPrefer: false,
+      imageLocalDecryptAttempts: 4,
       videoCalibrationLogEnabled: false,
       inboundVideoPushEnabled: false,
       inboundVoicePushEnabled: false,
@@ -540,13 +546,19 @@ export class ConfigService {
 
     if (ENCRYPTED_BOOL_KEYS.has(key)) {
       const str = typeof raw === 'string' ? raw : ''
-      if (!str || !str.startsWith(SAFE_PREFIX)) return raw
+      if (!str) return raw
+      if (str.startsWith(BOX_PREFIX)) return (this.boxDecrypt(str) === 'true') as ConfigSchema[K]
+      if (!str.startsWith(SAFE_PREFIX)) return raw
       return (this.safeDecrypt(str) === 'true') as ConfigSchema[K]
     }
 
     if (ENCRYPTED_NUMBER_KEYS.has(key)) {
       const str = typeof raw === 'string' ? raw : ''
       if (!str) return raw
+      if (str.startsWith(BOX_PREFIX)) {
+        const num = Number(this.boxDecrypt(str))
+        return (Number.isFinite(num) ? num : 0) as ConfigSchema[K]
+      }
       if (str.startsWith(LOCK_PREFIX)) {
         const cached = this.unlockedKeys.get(key as string)
         return (cached !== undefined ? cached : 0) as ConfigSchema[K]
@@ -785,6 +797,9 @@ export class ConfigService {
       if (typeof cfg.imageXorKey === 'string') {
         if (cfg.imageXorKey.startsWith(LOCK_PREFIX)) {
           result[wxid].imageXorKey = this.unlockedKeys.get(`wxid:${wxid}:imageXorKey`) ?? 0
+        } else if (cfg.imageXorKey.startsWith(BOX_PREFIX)) {
+          const num = Number(this.boxDecrypt(cfg.imageXorKey))
+          result[wxid].imageXorKey = Number.isFinite(num) ? num : 0
         } else if (cfg.imageXorKey.startsWith(SAFE_PREFIX)) {
           const num = Number(this.safeDecrypt(cfg.imageXorKey))
           result[wxid].imageXorKey = Number.isFinite(num) ? num : 0

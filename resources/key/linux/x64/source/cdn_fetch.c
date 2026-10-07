@@ -10,7 +10,8 @@
  *   1. base 必须取模块最低地址映射段（ELF load base），取 r-x 段会偏移数十 MB；
  *   2. param 页不可在调用后回收——任务异步寿命远长于调用（v2.1 munmap 致 UAF 闪退）；
  *      每次调用泄漏 64KB，由调用方限流兜底，微信进程重启自然清零；
- *   3. wechat md5 硬守卫：RVA 绑定 4.1.1.8（ddf942dd...），版本不符拒绝执行；
+ *   3. wechat md5 白名单表：md5 → StartC2CDownload RVA（按版本并存），
+ *      未知 md5 拒绝执行——RVA 绑定具体版本，防调错地址；镜像侧换版构建即可回切；
  *   4. ret=-32767 表示 CDN 子系统懒初始化未完成，调用方等首个媒体事件后重试。
  *
  * 用法：cdn_fetch <fileKey_hex> <aesKey> <fileLen> <savePath> [taskname] [--probe]
@@ -29,8 +30,15 @@
 #include <sys/wait.h>
 #include <sys/user.h>
 
-#define RVA_START_C2C 0x6A6F4A0ULL
-#define WECHAT_MD5    "ddf942dd09f806161b5d40b0084a55e3"
+/* ── 版本白名单表：md5 → cdn_logic::StartC2CDownload RVA ──
+ * param 布局两版已逐偏移核对一致（cb@0/0x40/0x58/0x70/0x88/0xa0/0xa4/0x148），
+ * 仅入口地址不同，param 构造代码无版本分支。
+ * 4.1.1.8    ddf942dd… → 0x6A6F4A0（PoC 端到端验证）
+ * 4.1.13.23  6c4b6bdc… → 0x8B2F790（IDA 9.4 行为特征定位，cdn_logic.cc:445） */
+static const struct { const char *md5; unsigned long long rva; const char *ver; } WECHAT_VERS[] = {
+    { "ddf942dd09f806161b5d40b0084a55e3", 0x6A6F4A0ULL, "4.1.1.8"   },
+    { "6c4b6bdc0560ce34803de7c302b3754a", 0x8B2F790ULL, "4.1.13.23" },
+};
 #define WECHAT_PATH   "/opt/wechat/wechat"
 
 /* ── 紧凑 MD5（RFC 1321，仅用于 wechat 版本守卫） ── */
@@ -237,13 +245,23 @@ int main(int argc, char **argv) {
     for (int i = 5; i < argc; i++) if (strcmp(argv[i], "--probe") == 0) probe_only = 1;
     alarm(60);
 
-    /* 守卫 1：wechat 版本（RVA 有效性前提） */
+    /* 守卫 1：wechat 版本（白名单 md5 → RVA；未知版本拒绝执行） */
     char hex[33];
     if (md5_file(WECHAT_PATH, hex) < 0) { print_json(0, 0, "wechat_md5_unreadable"); return 3; }
-    if (strcmp(hex, WECHAT_MD5) != 0) {
-        fprintf(stderr, "[cdn_fetch] wechat md5 %s != expected %s\n", hex, WECHAT_MD5);
+    unsigned long long start_c2c_rva = 0;
+    const char *start_c2c_ver = NULL;
+    for (size_t i = 0; i < sizeof(WECHAT_VERS) / sizeof(WECHAT_VERS[0]); i++) {
+        if (strcmp(hex, WECHAT_VERS[i].md5) == 0) {
+            start_c2c_rva = WECHAT_VERS[i].rva;
+            start_c2c_ver = WECHAT_VERS[i].ver;
+            break;
+        }
+    }
+    if (!start_c2c_rva) {
+        fprintf(stderr, "[cdn_fetch] wechat md5 %s not in whitelist\n", hex);
         print_json(0, 0, "wechat_md5_mismatch"); return 3;
     }
+    fprintf(stderr, "[cdn_fetch] wechat %s md5 ok rva=0x%llx\n", start_c2c_ver, start_c2c_rva);
     /* 守卫 2：目标进程 */
     pid_t pid = discover_wechat_pid();
     if (!pid) { print_json(0, 0, "wechat_not_running"); return 3; }
@@ -351,7 +369,7 @@ int main(int argc, char **argv) {
     r.rsp -= 8;
     if (write_mem(pid, r.rsp, &RETTRAP, 8) < 0) { print_json(0, 0, "write_retaddr"); return 1; }
     r.rdi = PARAM;
-    r.rip = wbase + RVA_START_C2C;
+    r.rip = wbase + start_c2c_rva;
     r.rax = 0;
     if (ptrace(PTRACE_SETREGS, victim, NULL, &r) < 0) { print_json(0, 0, "setregs_call"); return 1; }
     if (ptrace(PTRACE_CONT, victim, NULL, NULL) < 0) { print_json(0, 0, "cont_call"); return 1; }

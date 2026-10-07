@@ -52,7 +52,8 @@ export interface CdnFetchResult {
 /** §8.5 错误码 → 处置映射（PoC 补充：-32767 = CDN 子系统懒初始化未完成） */
 export function mapCdnErrorCode(code?: number | null): CdnFetchDisposition {
   if (code === -21009) return 'retry_once'            // 同 filekey 会话内重复请求
-  if (code === -32767) return 'retry_once'            // CDN 未初始化（新登录进程无媒体事件），首个媒体事件后自愈
+  if (code === -32767) return 'retry_once'            // 4.1.1.8：CDN 未初始化（新登录进程无媒体事件），首个媒体事件后自愈
+  if (code === -20001) return 'retry_once'            // 4.1.13.23：cdn not initialized / cdn_manager empty（同上，新码）
   if (code === -5103166 || code === 30001) return 'permanent_thumb' // CDN 对象过期/删除
   if (code === -21038 || code === -20003) return 'impl_bug'         // savepath 冲突 / 参数缺失
   return 'unknown'

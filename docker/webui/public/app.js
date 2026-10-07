@@ -1051,7 +1051,7 @@ var SendManagerPage = {
     var priorityEnabled = ref(false)
     var backpressureEnabled = ref(false)
     var dynamicIntervalEnabled = ref(false)
-    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false, forwardImageMediaEnabled: true, forwardMediaTimeoutMs: 3000 })
+    var bpParams = reactive({ threshold: 3, cooldownMs: 10000, backoffBaseMs: 1500, imagePasteCapMs: 1500, imageMaxBytes: 5, imageCompressEnabled: true, imageCompressKeepResolution: true, imageCompressFormat: 'png', imageCompressPaletteMax: 256, imageUrlTimeoutMs: 15000, imageCdnDirectFetchEnabled: false, imageCdnDirectFetchTimeoutMs: 30000, imageCdnDirectFetchMinIntervalMs: 3000, imageCdnDirectFetchHourlyLimit: 30, imageCdnDirectFetchDiagMd5Log: true, imageCdnDirectFetchPrefer: false, imageLocalDecryptAttempts: 4, videoCalibrationLogEnabled: false, inboundVideoPushEnabled: false, inboundVoicePushEnabled: false, forwardImageMediaEnabled: true, forwardMediaTimeoutMs: 3000 })
     var ackParams = reactive({ enabled: true, probeEnabled: false, timeoutImageMs: 3000, timeoutVideoMs: 10000, extendWaitMs: 10000, timeoutPerMbMs: 800, timeoutMaxMs: 5000, videoTimeoutMaxMs: 20000, probeDiffThreshold: 15, maxRetriesImage: 1, maxRetriesVideo: 1, failOnTimeoutImage: true, failOnTimeoutVideo: true, retryAction: "re-enter" })
     var status = reactive({
       mode: 'standard',
@@ -1240,6 +1240,10 @@ var SendManagerPage = {
     var secBp = ref(false)
     var secAck = ref(false)
     var secCdn = ref(false)
+    var showCdnRiskModal = ref(false)
+    watch(function () { return bpParams.imageCdnDirectFetchPrefer }, function (val) { if (val) showCdnRiskModal.value = true })
+    function cancelCdnRisk() { showCdnRiskModal.value = false; bpParams.imageCdnDirectFetchPrefer = false }
+    function confirmCdnRisk() { showCdnRiskModal.value = false }
     var secVid = ref(false)
     var strategySummary = computed(function () {
       var n = (mergeEnabled.value ? 1 : 0) + (dedupEnabled.value ? 1 : 0) + (priorityEnabled.value ? 1 : 0) + (dynamicIntervalEnabled.value ? 1 : 0)
@@ -1299,6 +1303,8 @@ var SendManagerPage = {
         bpParams.imageCdnDirectFetchMinIntervalMs = (d.imageCdnDirectFetchMinIntervalMs !== undefined) ? d.imageCdnDirectFetchMinIntervalMs : 3000
         bpParams.imageCdnDirectFetchHourlyLimit = d.imageCdnDirectFetchHourlyLimit || 30
         bpParams.imageCdnDirectFetchDiagMd5Log = d.imageCdnDirectFetchDiagMd5Log !== false
+        bpParams.imageCdnDirectFetchPrefer = d.imageCdnDirectFetchPrefer === true
+        bpParams.imageLocalDecryptAttempts = (d.imageLocalDecryptAttempts !== undefined) ? d.imageLocalDecryptAttempts : 4
         bpParams.videoCalibrationLogEnabled = d.videoCalibrationLogEnabled === true
         bpParams.inboundVideoPushEnabled = d.inboundVideoPushEnabled === true
         bpParams.inboundVoicePushEnabled = d.inboundVoicePushEnabled === true
@@ -1400,6 +1406,8 @@ var SendManagerPage = {
         imageCdnDirectFetchMinIntervalMs: isFinite(Number(bpParams.imageCdnDirectFetchMinIntervalMs)) ? Math.max(0, Math.min(60000, Number(bpParams.imageCdnDirectFetchMinIntervalMs))) : 3000,
         imageCdnDirectFetchHourlyLimit: Math.max(1, Math.min(600, Number(bpParams.imageCdnDirectFetchHourlyLimit) || 30)),
         imageCdnDirectFetchDiagMd5Log: bpParams.imageCdnDirectFetchDiagMd5Log !== false,
+        imageCdnDirectFetchPrefer: !!bpParams.imageCdnDirectFetchPrefer,
+        imageLocalDecryptAttempts: Math.max(1, Math.min(10, Number(bpParams.imageLocalDecryptAttempts) || 4)),
         videoCalibrationLogEnabled: bpParams.videoCalibrationLogEnabled === true,
         inboundVideoPushEnabled: bpParams.inboundVideoPushEnabled === true,
         inboundVoicePushEnabled: bpParams.inboundVoicePushEnabled === true,
@@ -1515,6 +1523,7 @@ var SendManagerPage = {
       nowElapsed: nowElapsed, typeLabel: typeLabel, urgencyClass: urgencyClass,
       tiers: tiers, tierName: tierName, setTier: setTier, customEditing: customEditing, overriddenKeys: overriddenKeys,
       secRhythm: secRhythm, secStrategy: secStrategy, secBp: secBp, secAck: secAck, secCdn: secCdn, secVid: secVid,
+      showCdnRiskModal: showCdnRiskModal, cancelCdnRisk: cancelCdnRisk, confirmCdnRisk: confirmCdnRisk,
       strategySummary: strategySummary, bpSummary: bpSummary, ackSummary: ackSummary, cdnSummary: cdnSummary, vidSummary: vidSummary,
       dirty: dirty, discardChanges: discardChanges
     }
@@ -1800,8 +1809,16 @@ var SendManagerPage = {
     '<div class="strategy-top"><span class="strategy-name">CDN 直取原图（实验）</span><toggle-switch v-model="bpParams.imageCdnDirectFetchEnabled" /></div>' +
     '<div class="strategy-desc">仅缩略图消息的原图兜底：本地读取（_h.dat > .dat > _t.dat）与 HD 升级全失败、只剩缩略图时，调用内置 ptrace 注入器毫秒级驱动微信自身 CDN 库直取并解密原图（零 hook、零 frida、进程不驻留；需微信在线登录态，默认关）。任何失败都自动降级回缩略图，绝不阻断推送。防护：仅近 10 分钟内的新消息（禁历史回填）、同一图 6 小时内仅尝试一次、最小间隔与每小时上限限流、超时/错误码不重试直接降级</div>' +
     '</div>' +
+    '<div class="strategy-card" :class="{ on: bpParams.imageCdnDirectFetchPrefer }">' +
+    '<div class="strategy-top"><span class="strategy-name">优先使用CDN直取获取原图（高风险）</span><toggle-switch v-model="bpParams.imageCdnDirectFetchPrefer" /></div>' +
+    '<div class="strategy-desc">收到图片后优先直接向微信 CDN 请求原图，而不是等本地读取全部失败后才兜底。可显著缩短原图到达时间和增加非聊天对话的图片清晰度，但请求模式更激进。原有的时间窗口、单图去重、最小间隔与每小时上限限流仍然生效；任何失败自动回退本地读取/缩略图，不阻断推送。</div>' +
+    '</div>' +
     '</div>' +
     '<div class="config-opt-grid">' +
+    '<div class="strategy-card">' +
+    '<div class="strategy-top"><span class="strategy-name">本地解密次数</span><span class="opt-input"><input type="number" min="1" max="10" step="1" v-model.number="bpParams.imageLocalDecryptAttempts">次</span></div>' +
+    '<div class="strategy-desc">收到图片后，先在本地尝试读取/解密原图的最大次数（含首次，每次间隔 1 秒，默认 4）。调低更快进入 CDN 直取兜底或缩略图、推送延迟更低，但对「原图稍后才落盘」的兼容变差；调高给微信延迟落盘的原图更多机会、原图命中率更高，但推送最多多等相应秒数。若同时开启「优先使用 CDN 直取」，本项在直取失败后的回退路径中继续生效</div>' +
+    '</div>' +
     '<div class="strategy-card">' +
     '<div class="strategy-top"><span class="strategy-name">直取超时</span><span class="opt-input"><input type="number" min="5000" step="1000" v-model.number="bpParams.imageCdnDirectFetchTimeoutMs">ms</span></div>' +
     '<div class="strategy-desc">直取请求发起到产物落盘的等待上限，期间每 500ms 轮询、尺寸稳定即判定完成（默认 30000，钳制 5000–120000）。超时即放弃该图并降级缩略图——不重试，避免对同一 CDN 对象反复请求</div>' +
@@ -1892,6 +1909,21 @@ var SendManagerPage = {
     '</div>' +
     '</div>' +
     '</div>' +
+
+    '<transition name="modal-zoom">' +
+    '<div v-if="showCdnRiskModal" class="modal-overlay" @click.self="cancelCdnRisk">' +
+    '<div class="modal">' +
+    '<h3>⚠️ 开启「优先使用 CDN 直取」风险确认</h3>' +
+    '<p style="margin:0 0 10px;font-size:13px;line-height:1.7">开启后，收到图片将<b>跳过本地读取流程</b>，第一时间直接向微信 CDN 服务器请求原图文件（全程无需打开聊天窗口）。</p>' +
+    '<p style="margin:0 0 6px;font-size:13px"><b>请了解以下风险：</b></p>' +
+    '<p style="margin:0 0 8px;font-size:13px;line-height:1.7"><b>1. 账号风控风险（高风险主因）</b><br>该模式下客户端会以「非浏览」方式持续向服务端请求原图。在活跃群聊、短时间内大量收图的场景下，请求行为与正常使用差异明显，<b>可能触发微信服务端风控，导致账号下载功能受限甚至临时封控</b>。</p>' +
+    '<p style="margin:0 0 8px;font-size:13px;line-height:1.7"><b>2. 稳定性</b><br>直取依赖在线登录态与文件时效，可能被拒绝或超时；此时自动回退为本地读取/缩略图，<b>消息接收不受影响</b>。</p>' +
+    '<p style="margin:0 0 8px;font-size:13px;line-height:1.7"><b>3. 定位说明</b><br>此功能仅作为可选项提供，<b>我们不鼓励日常开启</b>。仅在确需即时原图且收图量可控时使用；日常使用请保持关闭（默认「本地优先、直取兜底」）。</p>' +
+    '<p class="text-muted" style="margin:0;font-size:12px">限流防护（10 分钟时间窗、同图 6 小时去重、最小间隔、每小时上限）在开启后依然生效，可在下方参数中调整。</p>' +
+    '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
+    '<button class="btn btn-secondary btn-sm" @click="cancelCdnRisk">取消</button>' +
+    '<button class="btn btn-primary btn-sm" style="background:var(--danger)" @click="confirmCdnRisk">我已了解风险，仍要开启</button>' +
+    '</div></div></div></transition>' +
 
     '<teleport to="body">' +
     '<transition name="fade-up">' +
