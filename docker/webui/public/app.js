@@ -24,17 +24,29 @@ function generateToken() {
   return t
 }
 
+function getNoVncPort() {
+  var webPort = String(window.location.port || '7300')
+  return /^73\d\d$/.test(webPort) ? '76' + webPort.slice(2) : '7600'
+}
+
+function getNoVncUrl() {
+  var host = window.location.hostname || '127.0.0.1'
+  return 'http://' + host + ':' + getNoVncPort() + '/vnc.html'
+}
+
 async function api(path, opts) {
   try {
     var token = localStorage.getItem('weflow-auth-token')
     opts = opts || {}
+    opts.headers = Object.assign({ 'X-WeFlow-Page': 'webui' }, opts.headers || {})
     if (token) {
-      opts.headers = Object.assign({}, opts.headers || {}, { Authorization: 'Bearer ' + token })
+      opts.headers = Object.assign(opts.headers, { Authorization: 'Bearer ' + token })
     }
     var res = await fetch(path, opts)
     var text = await res.text()
     try { var d = JSON.parse(text) } catch (_) { return { error: 'Non-JSON response (status ' + res.status + ')' } }
     if (res.status === 401 && path !== '/api/auth/login') {
+      if (path === '/api/auth/change-password' && d.code === 'AUTH_INVALID') return d
       localStorage.removeItem('weflow-auth-token')
       window.location.hash = '#/login'
       return { error: 'Unauthorized' }
@@ -66,6 +78,9 @@ var themeMode = ref(loadSavedTheme())
 var effectiveTheme = ref('dark')
 var themeMedia = null
 var handleThemeChange = null
+var loginOverlayVisible = ref(false)
+var appShellReveal = ref(false)
+var authTransitionAuthorized = false
 
 function resolveTheme() {
   if (themeMode.value === 'system') {
@@ -110,12 +125,13 @@ var HomePage = {
 
     /* 链路节点：wechat / api / bot / db */
     var chain = reactive([
-      { key: 'wechat', name: '微信进程', sub: '', state: 'loading', route: '/accounts' },
+      { key: 'wechat', name: '微信进程', sub: '', state: 'loading', route: '/settings' },
       { key: 'api', name: 'FlowBOT API', sub: '', state: 'loading', route: '' },
       { key: 'bot', name: 'Bot 连接', sub: '', state: 'loading', route: '/bot' },
       { key: 'db', name: '数据库', sub: '', state: 'loading', route: '/settings' }
     ])
     var wechatRunning = ref(null) /* null=未知 */
+    var profile = reactive({ wxid: '', displayName: '未登录', avatar: 'icon.png' })
 
     /* 发送概况（15s 轻量轮询，瞬时值） */
     var sendStats = reactive({ sent: 0, failed: 0, pending: 0, processing: false, samples: [], rate: null, lastMs: null })
@@ -128,16 +144,22 @@ var HomePage = {
     }
     function chainStateClass(n) { return 'chain-' + n.state }
     function goRoute(r) { if (r) window.location.hash = '#' + r }
+    function openNoVnc() {
+      window.open(getNoVncUrl(), '_blank')
+    }
+    function profileAvatarError() {
+      profile.avatar = 'icon.png'
+    }
 
     /* ── 总健康判定（优先级从高到低）────────────────────────────────── */
     var overall = computed(function () {
       var st = function (k) { return chain.find(function (n) { return n.key === k }).state }
-      if (st('wechat') === 'down') return { level: 'danger', text: '微信进程未运行', route: '/accounts', action: '去账号管理' }
+      if (st('wechat') === 'down') return { level: 'danger', text: '微信进程未运行', route: '/settings', action: '去设置' }
       if (st('api') === 'down') return { level: 'danger', text: 'FlowBOT API 失联', route: '', action: '查看日志', log: true }
       if (st('db') === 'down') return { level: 'danger', text: '数据库未连接', route: '/settings', action: '去设置' }
       if (st('bot') === 'down') return { level: 'danger', text: 'Bot 全部未连接', route: '/bot', action: '去 Bot 配置' }
       if (st('bot') === 'warn') return { level: 'warn', text: '部分 Bot 未连接', route: '/bot', action: '去 Bot 配置' }
-      if (st('wechat') === 'warn') return { level: 'warn', text: '微信状态未知', route: '/accounts', action: '去账号管理' }
+      if (st('wechat') === 'warn') return { level: 'warn', text: '微信状态未知', route: '/settings', action: '去设置' }
       return { level: 'ok', text: '全部正常', text2: ' · 微信运行中 · ' + botConnectedCount.value + '/' + botTotalCount.value + ' 个 Bot 已连接', route: '', action: '' }
     })
     var botConnectedCount = ref(0)
@@ -157,6 +179,15 @@ var HomePage = {
 
         cards.account.status = c.myWxid || '未设置'
         cards.account.loading = false
+        profile.wxid = c.myWxid || ''
+        profile.displayName = c.myWxid || '未登录'
+
+        var accountProfile = await api('/api/account/profile')
+        if (!accountProfile.error && accountProfile.profile) {
+          profile.wxid = accountProfile.profile.wxid || profile.wxid
+          profile.displayName = accountProfile.profile.displayName || profile.displayName
+          profile.avatar = accountProfile.profile.avatarUrl || 'icon.png'
+        }
 
         var dbUp = !!c.dbPath
         chain[3].state = dbUp ? 'up' : 'down'
@@ -315,25 +346,26 @@ var HomePage = {
       chain: chain, chainStateClass: chainStateClass, goRoute: goRoute,
       overall: overall, botConnectedCount: botConnectedCount, botTotalCount: botTotalCount,
       sendStats: sendStats, sendBars: sendBars,
+      profile: profile, openNoVnc: openNoVnc, profileAvatarError: profileAvatarError,
       flowbotVersion: flowbotVersion, weflowVersion: weflowVersion, wechatVersion: wechatVersion,
       resColor: resColor,
       botChipClass: botChipClass, botModeLabel: botModeLabel, botStatusLabel: botStatusLabel
     }
   },
-  template: '<div>' +
+  template: '<div class="home-page-inner">' +
     '<div class="page-header">' +
     '<div><h1 class="page-title" style="margin:0">首页</h1><p class="subtitle">系统状态总览</p></div>' +
     '<div class="header-actions"><button class="btn btn-secondary" @click="load">刷新</button></div></div>' +
 
     '<transition name="fade-slide">' +
-    '<div v-if="overall.level !== \'ok\' || overall.text === \'全部正常\'" class="health-banner" :class="\'hb-\' + overall.level">' +
+    '<div v-if="overall.level !== \'ok\' || overall.text === \'全部正常\'" class="health-banner home-reveal-card home-reveal-health" :class="\'hb-\' + overall.level">' +
     '<span class="hb-dot"></span>' +
     '<span class="hb-text"><b>{{ overall.text }}</b>{{ overall.text2 || \'\' }}</span>' +
     '<button v-if="overall.route || overall.action" class="btn btn-sm hb-action" @click="goRoute(overall.route)">{{ overall.action }} →</button>' +
     '</div>' +
     '</transition>' +
 
-    '<div class="chain-bar">' +
+    '<div class="chain-bar home-reveal-card home-reveal-chain">' +
     '<template v-for="(n, i) in chain" :key="n.key">' +
     '<div class="chain-node" :class="chainStateClass(n)" @click="goRoute(n.route)">' +
     '<span class="chain-dot"></span>' +
@@ -343,9 +375,16 @@ var HomePage = {
     '</template>' +
     '</div>' +
 
-    '<div class="stats-grid home-grid">' +
+    '<div class="stats-grid home-grid home-grid-enhanced">' +
 
-    '<div class="stat-card clickable" @click="goRoute(\'/send\')">' +
+    '<div class="card account-profile-card home-account-card">' +
+    '<div class="account-card-title">当前账号</div>' +
+    '<div class="account-avatar-wrap"><div class="account-avatar"><img :src="profile.avatar" alt="账号头像" @error="profileAvatarError"></div><span class="account-avatar-status" title="账号在线" aria-label="账号在线"></span></div>' +
+    '<div class="account-identity"><div class="account-display-name">{{ profile.displayName }}</div><div class="account-wxid">{{ profile.wxid || "未登录" }}</div></div>' +
+    '<div class="account-card-action-row"><button type="button" class="btn btn-primary account-manage-btn" @click="openNoVnc"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg><span>在noVNC中进行管理</span></button></div>' +
+    '</div>' +
+
+    '<div class="stat-card clickable home-reveal-card home-reveal-send" @click="goRoute(\'/send\')">' +
     '<div class="stat-header"><span class="stat-dot" :style="{background: sendStats.failed > sendStats.sent * 0.2 && (sendStats.sent + sendStats.failed) > 0 ? \'#ef4444\' : \'#10b981\'}"></span><span class="stat-label">发送概况</span><span class="stat-go">→</span></div>' +
     '<div class="home-send-row">' +
     '<div class="home-send-nums">' +
@@ -362,7 +401,7 @@ var HomePage = {
     '</div>' +
     '</div>' +
 
-    '<div class="stat-card clickable" @click="goRoute(\'/bot\')">' +
+    '<div class="stat-card clickable home-reveal-card home-reveal-bot" @click="goRoute(\'/bot\')">' +
     '<div class="stat-header"><span class="stat-dot" :style="{background:dotColor(cards.onebot.color)}"></span><span class="stat-label">Bot 状态</span><span class="stat-go">→</span></div>' +
     '<div class="stat-value">{{ cards.onebot.status || "检测中…" }}</div>' +
     '<div v-if="typeof cards.onebot.sub === \'object\' && cards.onebot.sub.length" class="bot-chip-flow">' +
@@ -375,7 +414,7 @@ var HomePage = {
     '<div v-else-if="typeof cards.onebot.sub === \'string\' && cards.onebot.sub" class="stat-sub">{{ cards.onebot.sub }}</div>' +
     '</div>' +
 
-    '<div class="stat-card">' +
+    '<div class="stat-card home-reveal-card home-reveal-resources">' +
     '<div class="stat-header"><span class="stat-dot" :style="{background: resColor(cards.system.cpu) === \'var(--danger)\' || resColor(cards.system.ram) === \'var(--danger)\' || resColor(cards.system.disk) === \'var(--danger)\' ? \'#ef4444\' : (resColor(cards.system.cpu) === \'var(--warn)\' || resColor(cards.system.ram) === \'var(--warn)\' || resColor(cards.system.disk) === \'var(--warn)\' ? \'#fbbf24\' : \'#10b981\')}"></span><span class="stat-label">资源水位</span></div>' +
     '<div class="home-res-row">' +
     '<div class="home-res-item"><span class="home-res-name">CPU</span><span class="home-res-val" :style="{color: resColor(cards.system.cpu)}">{{ cards.system.cpu }}%</span></div>' +
@@ -386,7 +425,7 @@ var HomePage = {
     '<div class="home-res-bar"><span class="home-res-bar-label">运行</span><span class="home-res-bar-value">{{ cards.system.uptime }}</span></div>' +
     '</div>' +
 
-    '<div class="stat-card">' +
+    '<div class="stat-card home-reveal-card home-reveal-versions">' +
     '<div class="stat-header"><span class="stat-dot" style="background:#3498db"></span><span class="stat-label">版本与账号</span></div>' +
     '<div class="version-row"><span class="version-label">账号</span><span class="version-val">{{ cards.account.status || "检测中…" }}</span></div>' +
     '<div class="version-row"><span class="version-label">FlowBot</span><span class="version-val">{{ flowbotVersion }}</span></div>' +
@@ -643,53 +682,9 @@ var BotPage = {
     '</div></div></transition></div>'
 }
 
-var AccountsPage = {
-  setup: function () {
-    var currentWxid = ref('')
-    var showHint = ref(false)
-
-    async function load() {
-      var d = await api('/api/v1/mgmt/config')
-      if (!d.error) currentWxid.value = d.myWxid || ''
-    }
-
-    function handleAddAccount() { showHint.value = true }
-
-    function openNoVnc() {
-      window.open('http://' + window.location.hostname + ':7600/vnc.html', '_blank')
-    }
-
-    onMounted(load)
-    return { currentWxid: currentWxid, showHint: showHint, handleAddAccount: handleAddAccount, openNoVnc: openNoVnc, load: load }
-  },
-  template: '<div>' +
-    '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">账号管理</h1><p class="subtitle">管理微信账号登录状态</p></div>' +
-    '<div class="header-actions">' +
-    '<button class="btn btn-secondary" @click="load">刷新</button>' +
-    '<button class="btn btn-primary" @click="handleAddAccount">添加账号</button>' +
-    '</div></div>' +
-
-    '<div class="card"><h2>当前账号</h2>' +
-    '<div class="form-row"><label>微信 ID</label>' +
-    '<span style="font-size:14px;font-weight:500;color:var(--accent);font-family:monospace">{{ currentWxid || "未登录" }}</span></div></div>' +
-
-    '<div v-if="showHint" class="hint-card">' +
-    '<p>请在 noVNC 虚拟桌面中操作 FlowBOT 和 WeChat 以进行登录，然后回到本页面刷新。<br>请先扫描二维码登录微信后再根据 FlowBOT 的流程配置数据库，才可以激活本套件。</p>' +
-    '<div style="display:flex;gap:8px;margin-top:12px">' +
-    '<button class="btn btn-primary" @click="openNoVnc">打开 noVNC</button>' +
-    '<button class="btn btn-secondary" @click="load">刷新状态</button>' +
-    '</div>' +
-    '</div></div>'
-}
-
 var SettingsPage = {
   components: { ToggleSwitch: ToggleSwitch },
   setup: function () {
-    var wf = reactive({
-      httpEnabled: false, httpPort: 5031, httpToken: ''
-    })
-    var showHttpToken = ref(false)
     var imgTransfer = reactive({
       mode: 'base64',
       baseUrl: ''
@@ -703,16 +698,78 @@ var SettingsPage = {
       allowPrivate: true
     })
     var showTplModal = ref(false)
+    var tplExpanded = ref(false)
+    var tplState = ref('closed')
+    var tplOrigin = reactive({ x: '100%', y: '100%' })
     var tplText = ref('')
     var tplRestoreConfirm = ref(false)
     var liveVars = reactive({ version: '-', platform: '-', uptime: '-', weflowVersion: '-' })
+    var securityModal = ref(false)
+    var securityExpanded = ref(false)
+    var securityState = ref('closed')
+    var securityOrigin = reactive({ x: '100%', y: '100%' })
+    var securityRedirectMessage = ref('')
+    var securitySaving = ref(false)
+    var securityError = ref('')
+    var passwordForm = reactive({ oldPassword: '', newPassword: '', confirmPassword: '' })
+    var tplShellHeight = ref(null)
+    var tplClosedHeight = ref(0)
+    var securityShellHeight = ref(null)
+    var securityClosedHeight = ref(0)
+    var tplOriginStyle = computed(function () {
+      return {
+        '--tpl-origin-x': tplOrigin.x,
+        '--tpl-origin-y': tplOrigin.y
+      }
+    })
+    var securityOriginStyle = computed(function () {
+      return {
+        '--tpl-origin-x': securityOrigin.x,
+        '--tpl-origin-y': securityOrigin.y
+      }
+    })
+    var tplShellStyle = computed(function () {
+      return tplShellHeight.value == null ? {} : { height: tplShellHeight.value + 'px' }
+    })
+    var securityShellStyle = computed(function () {
+      return securityShellHeight.value == null ? {} : { height: securityShellHeight.value + 'px' }
+    })
+
+    function measureShellHeight(shell) {
+      return shell ? Math.round(shell.getBoundingClientRect().height) : 0
+    }
+
+    function expandedShellHeight(shell) {
+      var raw = shell ? getComputedStyle(shell).getPropertyValue('--settings-editor-height') : ''
+      var parsed = parseFloat(raw)
+      return parsed > 0 ? parsed : 430
+    }
+
+    function expandShell(shell, heightRef, closedHeightRef) {
+      if (!shell) {
+        heightRef.value = 430
+        closedHeightRef.value = 430
+        return
+      }
+      var closedHeight = measureShellHeight(shell)
+      closedHeightRef.value = closedHeight
+      heightRef.value = closedHeight
+      nextTick(function () {
+        heightRef.value = Math.max(closedHeight, expandedShellHeight(shell))
+      })
+    }
+
+    function collapseShell(shell, heightRef, closedHeightRef) {
+      if (!shell) return
+      heightRef.value = measureShellHeight(shell)
+      nextTick(function () {
+        heightRef.value = closedHeightRef.value > 0 ? closedHeightRef.value : 0
+      })
+    }
 
     async function loadConfig() {
       var d = await api('/api/v1/mgmt/config')
       if (!d.error) {
-        wf.httpEnabled = d.httpApiEnabled || false
-        wf.httpPort = d.httpApiPort || 5031
-        wf.httpToken = (d.httpApiToken && d.httpApiToken !== '[encrypted]') ? d.httpApiToken : ''
         imgTransfer.mode = d.mediaTransferMode || d.imageTransferMode || 'base64'
         imgTransfer.baseUrl = d.mediaServerBaseUrl || d.imageServerBaseUrl || ''
         if (d.flowbotCommand) {
@@ -753,9 +810,6 @@ var SettingsPage = {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          httpApiEnabled: wf.httpEnabled,
-          httpApiPort: Number(wf.httpPort),
-          httpApiToken: wf.httpToken || undefined,
           mediaTransferMode: imgTransfer.mode,
           mediaServerBaseUrl: trimmedUrl,
           flowbotCommand: {
@@ -778,6 +832,108 @@ var SettingsPage = {
       else toast('重启失败: ' + (d.error || ''), 'error')
     }
 
+    function openNoVnc() {
+      window.open(getNoVncUrl(), '_blank')
+    }
+
+    function openPasswordModal(event) {
+      if (securityState.value === 'opening' || securityState.value === 'closing') return
+      passwordForm.oldPassword = ''
+      passwordForm.newPassword = ''
+      passwordForm.confirmPassword = ''
+      securityError.value = ''
+      securityRedirectMessage.value = ''
+      var button = event && event.currentTarget
+      var shell = button && button.closest ? button.closest('.settings-security-shell') : null
+      if (button && shell) {
+        var buttonRect = button.getBoundingClientRect()
+        var shellRect = shell.getBoundingClientRect()
+        securityOrigin.x = Math.round(buttonRect.left + buttonRect.width / 2 - shellRect.left) + 'px'
+        securityOrigin.y = Math.round(buttonRect.top + buttonRect.height / 2 - shellRect.top) + 'px'
+      } else {
+        securityOrigin.x = '100%'
+        securityOrigin.y = '100%'
+      }
+      expandShell(shell, securityShellHeight, securityClosedHeight)
+      securityExpanded.value = true
+      securityModal.value = true
+      securityState.value = 'opening'
+    }
+
+    function beginSecurityClose() {
+      if (securityState.value === 'closed' || securityState.value === 'closing') return
+      var shell = document.querySelector('.settings-security-shell')
+      collapseShell(shell, securityShellHeight, securityClosedHeight)
+      securityState.value = 'closing'
+      securityModal.value = false
+    }
+
+    function closePasswordModal() {
+      if (securitySaving.value) return
+      beginSecurityClose()
+    }
+
+    async function changePassword() {
+      if (securitySaving.value) return
+      securityError.value = ''
+      if (!passwordForm.oldPassword) {
+        securityError.value = '请输入当前密码'
+        return
+      }
+      if (passwordForm.newPassword !== passwordForm.confirmPassword) {
+        securityError.value = '两次输入的新密码不一致'
+        return
+      }
+      if (!/^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{10,20}$/.test(passwordForm.newPassword)) {
+        securityError.value = '密码需为 10–20 位，且同时包含大写字母、小写字母、数字和特殊字符'
+        return
+      }
+      if (passwordForm.oldPassword === passwordForm.newPassword) {
+        securityError.value = '新密码不能与旧密码相同'
+        return
+      }
+      securitySaving.value = true
+      var d = await api('/api/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          oldPassword: passwordForm.oldPassword,
+          newPassword: passwordForm.newPassword,
+          confirmPassword: passwordForm.confirmPassword
+        })
+      })
+      securitySaving.value = false
+      if (d.ok && d.relogin) {
+        var message = d.message || '密码已修改，请使用新密码重新登录'
+        securityRedirectMessage.value = message
+        try { localStorage.setItem('weflow-login-notice', message) } catch (_) {}
+        localStorage.removeItem('weflow-auth-token')
+        beginSecurityClose()
+      } else {
+        securityError.value = d.error || '密码修改失败'
+      }
+    }
+
+    function finishSecurityOpen() {
+      securityState.value = 'open'
+      var el = document.getElementById('security-old-password')
+      if (el) el.focus()
+    }
+
+    function finishSecurityClose() {
+      securityState.value = 'closed'
+      securityExpanded.value = false
+      nextTick(function () {
+        securityShellHeight.value = null
+      })
+      if (securityRedirectMessage.value) {
+        var message = securityRedirectMessage.value
+        securityRedirectMessage.value = ''
+        toast(message)
+        window.location.hash = '#/login'
+      }
+    }
+
     async function refreshLiveVars() {
       try {
         var sv = await api('/api/system')
@@ -790,10 +946,25 @@ var SettingsPage = {
       } catch {}
     }
 
-    async function openTplEditor() {
+    async function openTplEditor(event) {
+      if (tplState.value === 'opening' || tplState.value === 'closing') return
       tplText.value = flowbot.template
       tplRestoreConfirm.value = false
+      var button = event && event.currentTarget
+      var shell = button && button.closest ? button.closest('.settings-command-shell') : null
+      if (button && shell) {
+        var buttonRect = button.getBoundingClientRect()
+        var shellRect = shell.getBoundingClientRect()
+        tplOrigin.x = Math.round(buttonRect.left + buttonRect.width / 2 - shellRect.left) + 'px'
+        tplOrigin.y = Math.round(buttonRect.top + buttonRect.height / 2 - shellRect.top) + 'px'
+      } else {
+        tplOrigin.x = '100%'
+        tplOrigin.y = '100%'
+      }
+      expandShell(shell, tplShellHeight, tplClosedHeight)
+      tplExpanded.value = true
       showTplModal.value = true
+      tplState.value = 'opening'
       await refreshLiveVars()
     }
 
@@ -820,35 +991,121 @@ var SettingsPage = {
       tplRestoreConfirm.value = false
     }
 
-    function cancelTplEditor() {
+    function beginTplClose() {
+      if (tplState.value === 'closed' || tplState.value === 'closing') return
+      var shell = document.querySelector('.settings-command-shell')
+      collapseShell(shell, tplShellHeight, tplClosedHeight)
+      tplState.value = 'closing'
       showTplModal.value = false
+    }
+
+    function cancelTplEditor() {
+      beginTplClose()
     }
 
     function saveTpl() {
       flowbot.template = tplText.value
-      showTplModal.value = false
+      if (tplState.value === 'open' || tplState.value === 'opening') {
+        beginTplClose()
+      }
       toast('模板已编辑，请点击「保存配置」持久化', 'info')
     }
 
+    function finishTplOpen() {
+      tplState.value = 'open'
+      var el = document.getElementById('flowbot-tpl-textarea')
+      if (el) el.focus()
+    }
+
+    function finishTplClose() {
+      tplState.value = 'closed'
+      tplExpanded.value = false
+      nextTick(function () {
+        tplShellHeight.value = null
+      })
+    }
+
     onMounted(loadConfig)
-    return { wf: wf, showHttpToken: showHttpToken, imgTransfer: imgTransfer, baseUrlError: baseUrlError, saveConfig: saveConfig, restart: restart, flowbot: flowbot, showTplModal: showTplModal, tplText: tplText, tplRestoreConfirm: tplRestoreConfirm, liveVars: liveVars, openTplEditor: openTplEditor, refreshLiveVars: refreshLiveVars, insertVar: insertVar, confirmResetTpl: confirmResetTpl, resetTpl: resetTpl, cancelTplEditor: cancelTplEditor, saveTpl: saveTpl }
+    return {
+      imgTransfer: imgTransfer,
+      baseUrlError: baseUrlError,
+      saveConfig: saveConfig,
+      restart: restart,
+      flowbot: flowbot,
+      showTplModal: showTplModal,
+      tplExpanded: tplExpanded,
+      tplState: tplState,
+      tplOriginStyle: tplOriginStyle,
+      tplShellStyle: tplShellStyle,
+      tplText: tplText,
+      tplRestoreConfirm: tplRestoreConfirm,
+      liveVars: liveVars,
+      openTplEditor: openTplEditor,
+      refreshLiveVars: refreshLiveVars,
+      insertVar: insertVar,
+      confirmResetTpl: confirmResetTpl,
+      resetTpl: resetTpl,
+      cancelTplEditor: cancelTplEditor,
+      saveTpl: saveTpl,
+      finishTplOpen: finishTplOpen,
+      finishTplClose: finishTplClose,
+      openNoVnc: openNoVnc,
+      novncPort: getNoVncPort(),
+      securityModal: securityModal,
+      securityExpanded: securityExpanded,
+      securityState: securityState,
+      securityOriginStyle: securityOriginStyle,
+      securityShellStyle: securityShellStyle,
+      securitySaving: securitySaving,
+      securityError: securityError,
+      passwordForm: passwordForm,
+      openPasswordModal: openPasswordModal,
+      closePasswordModal: closePasswordModal,
+      changePassword: changePassword,
+      finishSecurityOpen: finishSecurityOpen,
+      finishSecurityClose: finishSecurityClose
+    }
   },
-  template: '<div>' +
+  template: '<div class="settings-page-inner">' +
     '<div class="page-header">' +
-    '<div><h1 class="page-title" style="margin:0">设置</h1><p class="subtitle">系统与 API 配置</p></div>' +
+    '<div><h1 class="page-title" style="margin:0">设置</h1><p class="subtitle">系统与服务配置</p></div>' +
     '<div class="header-actions"><button class="btn btn-primary" @click="saveConfig">保存配置</button></div></div>' +
 
-    '<div class="card"><h2>WeFlow HTTP API 配置</h2>' +
-    '<div class="form-row"><label>启用 HTTP API</label><toggle-switch v-model="wf.httpEnabled" /></div>' +
-    '<div class="form-row"><label>HTTP API 端口</label><input type="number" v-model.number="wf.httpPort"></div>' +
-    '<div class="form-row"><label>HTTP API Token</label>' +
-    '<div class="input-with-toggle">' +
-    '<input :type="showHttpToken ? \'text\' : \'password\'" v-model="wf.httpToken" placeholder="自动生成">' +
-    '<button class="btn btn-secondary btn-sm" @click="showHttpToken=!showHttpToken">{{ showHttpToken?\'隐藏\':\'显示\' }}</button>' +
-    '</div></transition>' +
-    '</div></div></div>' +
+    '<div class="settings-security-shell" :class="{ \'is-editing\': securityExpanded, \'is-closing\': securityState === \'closing\' }" :style="securityShellStyle">' +
+    '<div class="card settings-security-card">' +
+    '<h2>安全性</h2>' +
+    '<p class="security-settings-copy">WebUI 密码采用容器绑定加密存储，并使用单会话登录保护。修改密码后需要重新登录。</p>' +
+    '<div class="security-settings-actions">' +
+    '<span class="security-settings-status"><i></i>密码保护已启用</span>' +
+    '<button class="btn btn-secondary btn-sm" @click="openPasswordModal($event)">修改密码</button>' +
+    '</div></div>' +
+    '<transition name="tpl-expand" @after-enter="finishSecurityOpen" @after-leave="finishSecurityClose">' +
+    '<div v-if="securityModal" class="tpl-editor-overlay security-editor-overlay" :style="securityOriginStyle" @click.self="closePasswordModal">' +
+    '<div class="tpl-editor-panel security-editor-panel" @click.stop>' +
+    '<div class="tpl-editor-head"><div><h3>修改 WebUI 密码</h3><p>新密码需为 10–20 位，并同时包含大写字母、小写字母、数字和特殊字符。</p></div></div>' +
+    '<label for="security-old-password">当前密码</label>' +
+    '<input id="security-old-password" type="password" v-model="passwordForm.oldPassword" autocomplete="current-password" @input="securityError=\'\'">' +
+    '<label for="security-new-password">新密码</label>' +
+    '<input id="security-new-password" type="password" v-model="passwordForm.newPassword" autocomplete="new-password" placeholder="输入新密码" @input="securityError=\'\'">' +
+    '<label for="security-confirm-password">确认新密码</label>' +
+    '<input id="security-confirm-password" type="password" v-model="passwordForm.confirmPassword" autocomplete="new-password" placeholder="再次输入新密码" @input="securityError=\'\'" @keyup.enter="changePassword">' +
+    '<div v-if="securityError" class="security-modal-error">{{ securityError }}</div>' +
+    '<div class="tpl-editor-actions">' +
+    '<span class="tpl-actions-spacer"></span>' +
+    '<button class="btn btn-secondary" @click="closePasswordModal" :disabled="securitySaving">取消</button>' +
+    '<button class="btn btn-primary" @click="changePassword" :disabled="securitySaving">{{ securitySaving ? \'修改中...\' : \'确认修改\' }}</button>' +
+    '</div>' +
+    '</div></div></transition>' +
+    '</div>' +
 
-    '<div class="card"><h2>媒体传输模式</h2>' +
+    '<div class="card novnc-settings-card settings-novnc-inline">' +
+    '<div class="novnc-settings-hero"><span class="novnc-settings-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg></span><div class="novnc-settings-copy"><h2>虚拟桌面</h2><p>通过浏览器完成微信登录与账号切换</p></div><span class="novnc-status-pill"><i></i>服务可用</span></div>' +
+    '<div class="novnc-meta-grid"><div class="novnc-meta-item"><span>访问端口</span><strong>{{ novncPort }}</strong></div><div class="novnc-meta-item"><span>连接方式</span><strong>HTML5</strong></div><div class="novnc-meta-item"><span>账号读取</span><strong>自动同步</strong></div></div>' +
+    '<button type="button" class="btn btn-primary account-manage-btn novnc-settings-btn" @click="openNoVnc"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg><span>在noVNC中进行管理</span></button>' +
+    '<p class="novnc-settings-footnote">登录或切换账号后返回首页，当前账号会自动读取。</p>' +
+    '</div>' +
+
+    '<div class="card settings-media-card"><h2>媒体传输模式</h2>' +
     '<div class="form-row" style="align-items:flex-start">' +
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
     '<label style="margin-bottom:0">传输模式</label>' +
@@ -875,7 +1132,8 @@ var SettingsPage = {
     '</div>' +
     '</div>' +
 
-    '<div class="card"><h2>状态信息命令</h2>' +
+    '<div class="settings-command-shell" :class="{ \'is-editing\': tplExpanded, \'is-closing\': tplState === \'closing\' }" :style="tplShellStyle">' +
+    '<div class="card settings-command-card"><h2>状态信息命令</h2>' +
     '<div class="form-row"><label>启用命令</label><toggle-switch v-model="flowbot.enabled" /></div>' +
     '<div class="form-row" style="align-items:flex-start">' +
     '<div style="display:flex;flex-direction:column;gap:4px;min-width:100px;margin-right:12px">' +
@@ -886,40 +1144,38 @@ var SettingsPage = {
     '</div>' +
     '<div class="form-row"><label>允许群聊</label><toggle-switch v-model="flowbot.allowGroups" /></div>' +
     '<div class="form-row"><label>允许私聊</label><toggle-switch v-model="flowbot.allowPrivate" /></div>' +
-    '<div class="form-row"><label>响应模板</label><button class="btn btn-secondary btn-sm" @click="openTplEditor">编辑模板</button></div>' +
+    '<div class="form-row"><label>响应模板</label><button class="btn btn-secondary btn-sm" @click="openTplEditor($event)">编辑模板</button></div>' +
+    '</div>' +
+    '<transition name="tpl-expand" @after-enter="finishTplOpen" @after-leave="finishTplClose">' +
+    '<div v-if="showTplModal" class="tpl-editor-overlay" :style="tplOriginStyle" @click.self="cancelTplEditor">' +
+    '<div class="tpl-editor-panel" @click.stop>' +
+    '<div class="tpl-editor-head"><div><h3>编辑响应模板</h3><p>点击变量按钮插入到文本框光标位置。</p></div></div>' +
+    '<div class="tpl-editor-vars">' +
+    '<button class="tpl-var-chip" @click="insertVar(\'{version}\')">FlowBot版本：{version}</button>' +
+    '<button class="tpl-var-chip" @click="insertVar(\'{platform}\')">系统平台：{platform}</button>' +
+    '<button class="tpl-var-chip" @click="insertVar(\'{uptime}\')">运行时长：{uptime}</button>' +
+    '<button class="tpl-var-chip" @click="insertVar(\'{weflowVersion}\')">WeFlow版本：{weflowVersion}</button>' +
+    '</div>' +
+    '<textarea id="flowbot-tpl-textarea" v-model="tplText" class="tpl-editor-textarea"></textarea>' +
+    '<div v-if="tplRestoreConfirm" class="tpl-restore-confirm">' +
+    '<span>确认恢复为默认模板？当前编辑内容将丢失。</span>' +
+    '<div><button class="btn btn-danger-secondary btn-sm" @click="tplRestoreConfirm=false">取消</button>' +
+    '<button class="btn btn-primary btn-sm tpl-confirm-reset" @click="resetTpl">确认恢复</button></div>' +
+    '</div>' +
+    '<div class="tpl-editor-actions">' +
+    '<button v-if="!tplRestoreConfirm" class="btn btn-danger-secondary btn-sm tpl-restore-btn" @click="confirmResetTpl">恢复默认</button>' +
+    '<span class="tpl-actions-spacer"></span>' +
+    '<button class="btn btn-secondary" @click="cancelTplEditor">取消</button>' +
+    '<button class="btn btn-primary" @click="saveTpl">保存模板</button>' +
+    '</div>' +
+    '</div></div></transition>' +
     '</div>' +
 
-    '<div class="card"><h2>重启服务</h2>' +
+    '<div class="card settings-restart-card"><h2>重启服务</h2>' +
     '<div class="restart-module">' +
     '<button class="btn btn-restart-weflow" @click="restart(\'weflow\')">重启 WeFlow</button>' +
     '<button class="btn btn-restart-wechat" @click="restart(\'wechat\')">重启 微信</button>' +
     '</div></div>' +
-
-    '<transition name="modal-zoom">' +
-    '<div v-if="showTplModal" class="modal-overlay" @click.self="cancelTplEditor">' +
-    '<div class="modal">' +
-    '<h3>编辑响应模板</h3>' +
-    '<p class="text-muted" style="margin:0 0 12px;font-size:13px">点击变量按钮插入到文本框光标位置：</p>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px">' +
-    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{version}\')">FlowBot版本：{version}</button>' +
-    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{platform}\')">系统平台：{platform}</button>' +
-    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{uptime}\')">运行时长：{uptime}</button>' +
-    '<button class="btn btn-secondary btn-sm" @click="insertVar(\'{weflowVersion}\')">WeFlow版本：{weflowVersion}</button>' +
-    '</div>' +
-    '<textarea id="flowbot-tpl-textarea" v-model="tplText" style="width:100%;min-height:160px;font-family:monospace;font-size:13px"></textarea>' +
-    '<div v-if="tplRestoreConfirm" style="margin-top:8px;padding:10px;background:var(--accent-glow);border-radius:8px;display:flex;align-items:center;justify-content:space-between">' +
-    '<span style="font-size:13px;color:var(--text)">确认恢复为默认模板？当前编辑内容将丢失。</span>' +
-    '<div style="display:flex;gap:6px">' +
-    '<button class="btn btn-danger-secondary btn-sm" @click="tplRestoreConfirm=false">取消</button>' +
-    '<button class="btn btn-primary btn-sm" style="background:var(--danger)" @click="resetTpl">确认恢复</button>' +
-    '</div></div>' +
-    '<div style="display:flex;gap:8px;margin-top:16px;justify-content:flex-end">' +
-    '<button v-if="!tplRestoreConfirm" class="btn btn-danger-secondary btn-sm" @click="confirmResetTpl">恢复默认</button>' +
-    '<div style="flex:1"></div>' +
-    '<button class="btn btn-danger-secondary" @click="cancelTplEditor">取消</button>' +
-    '<button class="btn btn-primary" @click="saveTpl">保存模板</button>' +
-    '</div>' +
-    '</div></div></transition>' +
 
     '</div>'
 }
@@ -930,7 +1186,8 @@ var AboutPage = {
       flowbotVersion: '-', version: '-', protocol: 'OneBot v11.0',
       node: '-', uptime: '-', memory: '-', disk: '-',
       cpuModel: '-', wechatVersion: '-',
-      attestOk: null, attestText: '未知'
+      attestOk: null, attestText: '未知',
+      oneBotPort: '7100', flowPort: '5031', webUiPort: '7300', noVncPort: '7600'
     })
 
     async function load() {
@@ -949,6 +1206,13 @@ var AboutPage = {
         }
         info.disk = (typeof sys.disk === 'object') ? (sys.disk.used + 'MB / ' + sys.disk.total + 'MB (' + sys.disk.usedPercent + '%)') : (sys.disk || '-')
         info.cpuModel = sys.cpuModel || '-'
+      }
+      var v = await api('/api/version')
+      if (!v.error) {
+        info.oneBotPort = v.onebot_port || info.oneBotPort
+        info.flowPort = v.flow_port || info.flowPort
+        info.webUiPort = v.webui_port || info.webUiPort
+        info.noVncPort = v.novnc_port || info.noVncPort
       }
       try {
         var a = await api('/api/attest')
@@ -1030,10 +1294,10 @@ var AboutPage = {
 
     '<div class="card"><h2>端口映射</h2>' +
     '<div class="port-grid">' +
-    '<div class="port-item"><span>OneBot</span><span class="port">7100</span></div>' +
-    '<div class="port-item"><span>WeFlow API</span><span class="port">5031</span></div>' +
-    '<div class="port-item"><span>WebUI</span><span class="port">7300</span></div>' +
-    '<div class="port-item"><span>noVNC</span><span class="port">7600</span></div>' +
+    '<div class="port-item"><span>OneBot</span><span class="port">{{ info.oneBotPort }}</span></div>' +
+    '<div class="port-item"><span>WeFlow API</span><span class="port">{{ info.flowPort }}</span></div>' +
+    '<div class="port-item"><span>WebUI</span><span class="port">{{ info.webUiPort }}</span></div>' +
+    '<div class="port-item"><span>noVNC</span><span class="port">{{ info.noVncPort }}</span></div>' +
     '</div></div>' +
     '</div>'
 }
@@ -2053,46 +2317,271 @@ var LogsPage = {
 var LoginPage = {
   setup: function () {
     var password = ref('')
+    var newPassword = ref('')
+    var confirmPassword = ref('')
+    var agreementAccepted = ref(false)
+    var agreementVisible = ref(false)
+    var mode = ref('login')
     var loading = ref(false)
+    var checked = ref(false)
+    var failed = ref(false)
+    var hasError = ref(false)
+    var success = ref(false)
     var error = ref('')
+    var loginNotice = ref('')
+
+    var policyValid = computed(function () {
+      return /^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{10,20}$/.test(newPassword.value)
+    })
+    var passwordsMatch = computed(function () {
+      return Boolean(newPassword.value) && newPassword.value === confirmPassword.value
+    })
+    var firstChangeReady = computed(function () {
+      return policyValid.value && passwordsMatch.value && agreementAccepted.value && !loading.value
+    })
+    var orbDisabled = computed(function () {
+      if (loading.value || success.value) return true
+      if (mode.value === 'first-change' && !firstChangeReady.value) return true
+      return false
+    })
+
+    var pageClass = computed(function () {
+      return (loading.value ? ' is-loading' : '') +
+        (checked.value ? ' is-checked' : '') +
+        (failed.value ? ' is-failed' : '') +
+        (hasError.value ? ' has-error' : '') +
+        (success.value ? ' is-success' : '') +
+        (mode.value === 'first-change' ? ' is-first-change' : '')
+    })
+
+    function enterFirstChange() {
+      mode.value = 'first-change'
+      password.value = ''
+      newPassword.value = ''
+      confirmPassword.value = ''
+      agreementAccepted.value = false
+      agreementVisible.value = false
+      error.value = ''
+      checked.value = false
+      failed.value = false
+      hasError.value = false
+      success.value = false
+      setTimeout(function () {
+        if (mode.value === 'first-change' && !agreementAccepted.value) agreementVisible.value = true
+      }, 650)
+    }
 
     async function doLogin() {
+      if (loading.value || checked.value || failed.value || success.value) return
       if (!password.value) { error.value = '请输入密码'; return }
       loading.value = true
       error.value = ''
+      loginNotice.value = ''
+      var started = Date.now()
       var d = await api('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password: password.value })
       })
-      loading.value = false
+      var elapsed = Date.now() - started
+      if (elapsed < 450) await new Promise(function (done) { setTimeout(done, 450 - elapsed) })
       if (d.ok && d.token) {
         localStorage.setItem('weflow-auth-token', d.token)
-        window.location.hash = '#/'
+        loading.value = false
+        checked.value = true
+        if (d.mustChange) {
+          setTimeout(function () { enterFirstChange() }, 650)
+          return
+        }
+        loginOverlayVisible.value = true
+        setTimeout(async function () {
+          authTransitionAuthorized = true
+          window.location.hash = '#/'
+          await nextTick()
+          await new Promise(function (resolve) {
+            requestAnimationFrame(function () {
+              requestAnimationFrame(resolve)
+            })
+          })
+          appShellReveal.value = true
+          success.value = true
+          setTimeout(function () {
+            loginOverlayVisible.value = false
+            appShellReveal.value = false
+          }, 760)
+        }, 360)
       } else {
+        loading.value = false
+        failed.value = true
+        hasError.value = true
         error.value = d.error || '密码错误'
         password.value = ''
+        setTimeout(function () { failed.value = false }, 1200)
       }
     }
 
-    function onKeyup(e) { if (e.key === 'Enter') doLogin() }
+    async function submitFirstChange() {
+      if (loading.value || !firstChangeReady.value) {
+        if (!agreementAccepted.value) agreementVisible.value = true
+        return
+      }
+      loading.value = true
+      error.value = ''
+      var d = await api('/api/auth/first-change', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          newPassword: newPassword.value,
+          confirmPassword: confirmPassword.value,
+          agreementAccepted: true
+        })
+      })
+      loading.value = false
+      if (d.ok && d.relogin) {
+        localStorage.removeItem('weflow-auth-token')
+        mode.value = 'login'
+        password.value = ''
+        newPassword.value = ''
+        confirmPassword.value = ''
+        agreementAccepted.value = false
+        error.value = ''
+        loginNotice.value = d.message || '密码已修改，请使用新密码重新登录'
+        toast(loginNotice.value)
+      } else {
+        error.value = d.error || '密码修改失败'
+      }
+    }
 
-    return { password: password, loading: loading, error: error, doLogin: doLogin, onKeyup: onKeyup }
+    function acceptAgreement() {
+      agreementAccepted.value = true
+      agreementVisible.value = false
+      if (error.value) error.value = ''
+    }
+
+    function rejectAgreement() {
+      agreementVisible.value = false
+    }
+
+    function handleOrb() {
+      if (mode.value === 'first-change') submitFirstChange()
+      else doLogin()
+    }
+
+    function clearError() {
+      if (error.value) error.value = ''
+      if (hasError.value) hasError.value = false
+    }
+
+    onMounted(async function () {
+      try {
+        var pendingNotice = localStorage.getItem('weflow-login-notice')
+        if (pendingNotice) {
+          loginNotice.value = pendingNotice
+          localStorage.removeItem('weflow-login-notice')
+        }
+      } catch (_) {}
+      if (!localStorage.getItem('weflow-auth-token')) return
+      var state = await api('/api/auth/state')
+      if (!state.error && state.mustChange) enterFirstChange()
+    })
+
+    return {
+      password: password,
+      newPassword: newPassword,
+      confirmPassword: confirmPassword,
+      agreementAccepted: agreementAccepted,
+      agreementVisible: agreementVisible,
+      mode: mode,
+      loading: loading,
+      checked: checked,
+      failed: failed,
+      hasError: hasError,
+      success: success,
+      error: error,
+      loginNotice: loginNotice,
+      pageClass: pageClass,
+      policyValid: policyValid,
+      passwordsMatch: passwordsMatch,
+      firstChangeReady: firstChangeReady,
+      orbDisabled: orbDisabled,
+      doLogin: doLogin,
+      submitFirstChange: submitFirstChange,
+      handleOrb: handleOrb,
+      acceptAgreement: acceptAgreement,
+      rejectAgreement: rejectAgreement,
+      clearError: clearError
+    }
   },
-  template: '<div class="login-page">' +
-    '<div class="login-card">' +
-    '<div class="login-logo"><img src="icon.png" alt="FlowBOT"></div>' +
-    '<h2 style="border:none;padding:0;margin:0 0 6px;font-size:22px;color:var(--accent)">FlowBOT</h2>' +
-    '<p style="font-size:13px;color:var(--text-muted);margin:0 0 28px">请输入密码以访问管理面板</p>' +
-    '<div v-if="error" class="login-error">{{ error }}</div>' +
-    '<div style="margin-bottom:18px">' +
-    '<input type="password" v-model="password" @keyup="onKeyup" placeholder="输入密码" autofocus autocomplete="current-password" ' +
-    'style="width:100%;padding:12px 16px;border-radius:10px;font-size:15px;text-align:center;letter-spacing:4px">' +
-    '</div>' +
-    '<button class="btn btn-primary" @click="doLogin" :disabled="loading" ' +
-    'style="width:100%;padding:12px;font-size:15px;border-radius:10px">{{ loading ? \'验证中...\' : \'登录\' }}</button>' +
-    '<p style="font-size:11px;color:var(--text-muted);margin:16px 0 0;opacity:0.6">密码在容器启动时生成于 docker logs</p>' +
-    '</div></div>'
+  template: `
+    <div class="login-page" :class="pageClass">
+      <section class="login-card">
+        <img class="login-mascot" src="icon.png" alt="">
+
+        <div class="login-card-content-clip">
+          <transition name="login-mode">
+            <div v-if="mode === 'login'" key="login" class="login-card-content">
+              <div class="login-brand">FlowBOT</div>
+              <input id="login-password" class="login-input" type="password" v-model="password"
+                @input="clearError" @keyup.enter="doLogin" placeholder="输入密码" autofocus autocomplete="current-password">
+              <div class="login-error" :class="{ show: error }">{{ error }}</div>
+              <p class="login-hint">首次登录的密码生成于 docker logs</p>
+              <p v-if="loginNotice" class="login-notice">{{ loginNotice }}</p>
+            </div>
+
+            <div v-else key="first-change" class="login-card-content">
+              <div class="login-brand">FlowBOT</div>
+              <div class="login-first-title">首次登录</div>
+              <p class="login-first-subtitle">检测到当前密码仍为初始密码，请先设置新的 WebUI 登录密码。</p>
+              <label class="login-first-label" for="first-new-password">新密码</label>
+              <input id="first-new-password" class="login-input first-change-input" type="password"
+                v-model="newPassword" @input="clearError" autocomplete="new-password"
+                placeholder="10–20 位，包含大小写、数字和特殊字符">
+              <label class="login-first-label" for="first-confirm-password">确认新密码</label>
+              <input id="first-confirm-password" class="login-input first-change-input" type="password"
+                v-model="confirmPassword" @input="clearError" autocomplete="new-password"
+                placeholder="再次输入新密码" @keyup.enter="submitFirstChange">
+              <label class="security-agreement first-change-agreement">
+                <input type="checkbox" v-model="agreementAccepted">
+                <span>我已阅读并同意
+                  <button type="button" class="agreement-link" @click.stop.prevent="agreementVisible = true">用户协议和免责声明</button>
+                </span>
+              </label>
+              <div v-if="error" class="login-error show">{{ error }}</div>
+            </div>
+          </transition>
+        </div>
+
+        <button class="login-orb" type="button" :class="{ 'is-ready': mode === 'first-change' && firstChangeReady }"
+          @click="handleOrb" :disabled="orbDisabled" aria-label="登录或设置新密码">
+          <span class="login-orb-arrow" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M5 12h13"></path><path d="m12 6 6 6-6 6"></path></svg>
+          </span>
+          <span class="login-spin" aria-hidden="true"></span>
+          <span class="login-orb-check" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 13l4 4L19 7"></path></svg></span>
+          <span class="login-orb-cross" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6l12 12"></path><path d="M18 6L6 18"></path></svg></span>
+        </button>
+      </section>
+
+      <transition name="modal-zoom">
+        <div v-if="agreementVisible" class="modal-overlay login-agreement-overlay" @click.self="rejectAgreement">
+          <div class="modal login-agreement-modal">
+            <h3>用户协议和免责声明</h3>
+            <div class="login-agreement-content">
+              <p><strong>一、本地处理与零外部依赖</strong> 本项目仅在本地环境处理运行，不包含遥测、统计或行为上报组件。除微信客户端自身网络行为及你主动配置的 AI 适配器外，不会向第三方传输数据。</p>
+              <p><strong>二、用途限制与平台合规</strong> 本项目仅供个人学习、研究和 AI 交流使用，不得用于商业用途、批量营销、骚扰、欺诈、侵犯隐私或其他违法违规用途。请遵守微信《软件许可及服务协议》及所在地法律法规。</p>
+              <p><strong>三、网络边界与端口安全</strong> 为保证账号安全，请勿将 WebUI、noVNC/VNC、OneBot 或任何 API 端口暴露到公网。因端口暴露、转发或凭据保管不当导致的风险由用户自行承担。</p>
+              <p><strong>四、数据、担保与责任豁免</strong> 本工具不收集、存储或向第三方传输个人数据。聊天数据、密钥和配置仅保存在你自己的设备与数据卷中。开发者不对使用本工具造成的损失负责，本工具按“现状”提供。</p>
+              <p>继续使用即表示已阅读、理解并同意以上条款；若不同意，请立即停止使用并移除本项目。</p>
+            </div>
+            <div class="login-agreement-actions">
+              <button class="btn btn-secondary" type="button" @click="rejectAgreement">暂不同意</button>
+              <button class="btn btn-primary" type="button" @click="acceptAgreement">同意并继续</button>
+            </div>
+          </div>
+        </div>
+      </transition>
+    </div>
+  `
 }
 
 var FilterPage = {
@@ -2259,7 +2748,7 @@ var FilterPage = {
 var routes = [
   { path: '/', component: HomePage, meta: { title: '首页' } },
   { path: '/bot', component: BotPage, meta: { title: 'Bot 配置' } },
-  { path: '/accounts', component: AccountsPage, meta: { title: '账号管理' } },
+  { path: '/accounts', redirect: '/settings' },
   { path: '/filter', component: FilterPage, meta: { title: '推送过滤' } },
   { path: '/settings', component: SettingsPage, meta: { title: '设置' } },
   { path: '/send', component: SendManagerPage, meta: { title: '消息管理' } },
@@ -2272,9 +2761,18 @@ var router = createRouter({ history: createWebHashHistory(), routes: routes })
 
 router.beforeEach(function (to, from, next) {
   if (to.path === '/login') { next(); return }
+  if (authTransitionAuthorized) {
+    authTransitionAuthorized = false
+    next()
+    return
+  }
   var token = localStorage.getItem('weflow-auth-token')
   if (!token) { next('/login'); return }
-  next()
+  api('/api/auth/state').then(function (state) {
+    if (!state.error && state.mustChange) next('/login')
+    else if (state.error) next('/login')
+    else next()
+  }).catch(function () { next() })
 })
 
 var App = {
@@ -2283,13 +2781,13 @@ var App = {
     var route = useRoute()
     var serviceOnline = ref(false)
     var sidebarOpen = ref(false)
+    var securityIncident = ref(null)
 
     var navItems = [
       { path: '/', label: '首页', icon: '<svg viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>' },
       { path: '/bot', label: 'Bot 配置', icon: '<svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><line x1="12" y1="7" x2="12" y2="11"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>' },
       { path: '/filter', label: '推送过滤', icon: '<svg viewBox="0 0 24 24"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/></svg>' },
       { path: '/send', label: '消息管理', icon: '<svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>' },
-      { path: '/accounts', label: '账号管理', icon: '<svg viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>' },
       { path: '/settings', label: '设置', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 1.51 1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.5 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>' },
       { path: '/logs', label: '日志', icon: '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>' },
       { path: '/about', label: '关于', icon: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>' }
@@ -2323,6 +2821,23 @@ var App = {
       }
     }
 
+    async function loadSecurityContext() {
+      if (!localStorage.getItem('weflow-auth-token')) return
+      var state = await api('/api/auth/state')
+      if (state.error) return
+      if (state.incident) securityIncident.value = state.incident
+      if (state.mustChange && route.path !== '/login') {
+        window.location.hash = '#/login'
+      }
+    }
+
+    async function acknowledgeIncident() {
+      var d = await api('/api/auth/incident/ack', { method: 'POST' })
+      if (!d.error) securityIncident.value = null
+    }
+
+    watch(function () { return route.path }, function () { loadSecurityContext() })
+
     function toggleSidebar() { sidebarOpen.value = !sidebarOpen.value }
     function closeSidebar() { sidebarOpen.value = false }
     function onNavClick() { if (window.innerWidth <= 768) sidebarOpen.value = false }
@@ -2336,6 +2851,7 @@ var App = {
       themeMedia.addEventListener('change', handleThemeChange)
       applyTheme()
       checkHealth()
+      loadSecurityContext()
       statusTimer = setInterval(checkHealth, 15000)
     })
     onUnmounted(function () {
@@ -2346,6 +2862,8 @@ var App = {
     })
 
     function logout() {
+      loginOverlayVisible.value = false
+      appShellReveal.value = false
       localStorage.removeItem('weflow-auth-token')
       window.location.hash = '#/login'
     }
@@ -2355,13 +2873,21 @@ var App = {
       navItems: navItems, sidebarOpen: sidebarOpen,
       cycleThemeMode: cycleThemeMode, setTheme: setTheme, effectiveTheme: effectiveTheme,
       toggleSidebar: toggleSidebar, closeSidebar: closeSidebar, onNavClick: onNavClick,
-      logout: logout
+      logout: logout, securityIncident: securityIncident, acknowledgeIncident: acknowledgeIncident,
+      LoginPage: LoginPage, loginOverlayVisible: loginOverlayVisible, appShellReveal: appShellReveal
     }
   },
   template: '<div>' +
     '<toast-container />' +
-    '<router-view v-if="route.path === \'/login\'" />' +
-    '<div v-else class="app-shell">' +
+    '<component v-if="route.path === \'/login\' || loginOverlayVisible" :is="LoginPage" />' +
+    '<div v-if="securityIncident" class="modal-overlay security-incident-overlay">' +
+    '<div class="modal security-incident-modal">' +
+    '<h3>服务曾被自动停止</h3>' +
+    '<p>本容器因连续密码输入错误触发账号安全保护，WeFlow 主服务已停止。失败计数已随本次重启清零，服务已恢复。</p>' +
+    '<p>请确认是否为本人操作；若不是，请检查局域网访问设备并及时修改密码。</p>' +
+    '<div class="security-modal-actions"><button class="btn btn-primary" @click="acknowledgeIncident">我知道了</button></div>' +
+    '</div></div>' +
+    '<div v-if="route.path !== \'/login\'" class="app-shell" :class="{ \'is-login-overlay\': loginOverlayVisible && !appShellReveal }">' +
 
     '<div :class="[\'sidebar-backdrop\', sidebarOpen?\'visible\':\'\']" @click="closeSidebar"></div>' +
 

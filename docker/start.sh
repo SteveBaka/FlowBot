@@ -9,6 +9,55 @@ log() {
   echo "[$(date '+%m-%d %H:%M:%S')] [$level] [FlowBOT] $*"
 }
 
+# Initialize WebUI authentication before log redirection. On a fresh data volume the
+# initial password is printed once to docker logs only; it must not enter container.log.
+DATA_DIR=/opt/weflow/data
+AUTH_FILE="$DATA_DIR/webui-auth.json"
+PASS_FILE="$DATA_DIR/webui-password.txt"
+BOX_KEY_FILE="$DATA_DIR/.box-key"
+
+if [ ! -s "$AUTH_FILE" ] || ! grep -qE '"ver"[[:space:]]*:[[:space:]]*2' "$AUTH_FILE" 2>/dev/null; then
+  if [ -s "$PASS_FILE" ]; then
+    WEBUI_INITIAL_PASS=$(cat "$PASS_FILE")
+    WEBUI_PASSWORD_LABEL="WebUI migration password"
+  else
+    WEBUI_INITIAL_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    WEBUI_PASSWORD_LABEL="WebUI initial password (legacy plaintext missing; reset)"
+  fi
+  node - "$WEBUI_INITIAL_PASS" "$AUTH_FILE" "$BOX_KEY_FILE" <<'NODE'
+const crypto = require('crypto')
+const fs = require('fs')
+const [password, authPath, keyPath] = process.argv.slice(2)
+let key = ''
+try { key = fs.readFileSync(keyPath, 'utf8').trim() } catch {}
+if (!/^[0-9a-f]{64}$/.test(key)) {
+  key = crypto.randomBytes(32).toString('hex')
+  fs.writeFileSync(keyPath, key, { mode: 0o600 })
+}
+const derived = crypto.pbkdf2Sync(key, 'weflow-box-v1', 100000, 32, 'sha256')
+const iv = crypto.randomBytes(12)
+const cipher = crypto.createCipheriv('aes-256-gcm', derived, iv)
+const ciphertext = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()])
+const passEnc = 'box:' + Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64')
+fs.writeFileSync(authPath, JSON.stringify({
+  ver: 2,
+  passEnc,
+  salt: crypto.randomBytes(16).toString('hex'),
+  mustChange: true,
+  createdAt: new Date().toISOString()
+}), { mode: 0o600 })
+NODE
+  echo "$WEBUI_PASSWORD_LABEL: $WEBUI_INITIAL_PASS"
+fi
+
+rm -f "$PASS_FILE" 2>/dev/null || true
+
+# Remove old plaintext password lines left by pre-v2 images. New passwords are
+# printed before log redirection and therefore never enter container.log.
+if [ -f "$LOGDIR/container.log" ]; then
+  sed -i -E 's/(WebUI ([Ii]nitial|[Mm]igration|[Ll]ogin) Password:).*/\1 [REDACTED]/g' "$LOGDIR/container.log" 2>/dev/null || true
+fi
+
 # Redirect all output to log files for WebUI access
 # Add timestamp to lines without one, normalize Logger ISO timestamps
 exec > >(while IFS= read -r line; do
@@ -47,26 +96,6 @@ mkdir -p /run/dbus
 rm -f /run/dbus/pid 2>/dev/null || true
 dbus-daemon --system --fork 2>/dev/null || true
 eval $(dbus-launch --sh-syntax) 2>/dev/null || true
-
-# Generate WebUI login password (scrypt hashed)
-# 明文持久化到 webui-password.txt（权限 600，仅容器内 root 可读）；每次启动
-# 若已存在则沿用（重启密码不丢失），否则生成新密码。明文密码打印到 docker logs 供用户查看。
-WEBUI_PASS_FILE=/opt/weflow/data/webui-password.txt
-if [ -f "$WEBUI_PASS_FILE" ]; then
-  WEBUI_PASS=$(cat "$WEBUI_PASS_FILE")
-else
-  WEBUI_PASS=$(head -c 24 /dev/urandom | base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-  echo -n "$WEBUI_PASS" > "$WEBUI_PASS_FILE"
-  chmod 600 "$WEBUI_PASS_FILE"
-fi
-node -e "
-const crypto = require('crypto');
-const fs = require('fs');
-const password = process.argv[1];
-const salt = crypto.randomBytes(16).toString('hex');
-const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-fs.writeFileSync('/opt/weflow/data/webui-auth.json', JSON.stringify({hash, salt, createdAt: new Date().toISOString()}));
-" "$WEBUI_PASS"
 
 # Configure fluxbox
 cat > /root/.fluxbox/init << 'EOF'
@@ -138,6 +167,7 @@ log INFO "Starting FlowBOT Electron app (API port ${FLOW_API_PORT:-5031})..."
   done
 ) &
 WEFLOW_PID=$!
+echo "$WEFLOW_PID" > "$DATA_DIR/weflow-watchdog.pid"
 
 # Start WebUI server (port 7300, proxies to FlowBOT API on 5031)
 log INFO "Starting WebUI management panel (port ${WEBUI_PORT:-7300})..."
@@ -178,7 +208,6 @@ if [ -n "$VNC_PASSWORD" ]; then
 else
   log INFO "  noVNC      : disabled (set VNC_PASSWORD to enable)"
 fi
-log INFO "  WebUI Login Password: $WEBUI_PASS"
 log INFO "============================================"
 
 wait $WEBUI_PID

@@ -5,28 +5,43 @@
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   Apple Liquid Glass (液态流光玻璃) Design Tokens - Deep Radiant Glass & Crystal Frost
+   FlowBOT Glass Design Tokens - 毛玻璃层级与边沿光辉
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 :root,
 :root[data-theme="dark"] {
-  /* 背景与表面层级 — Liquid Glass: 暗色半透明基底 + backdrop-filter 模糊 */
+  /* 背景与表面层级 — 暗色半透明基底 + backdrop-filter 模糊 */
   --bg: #070a12;
   --bg-app: #070a12;
-  --bg-card: rgba(16, 20, 36, 0.45);
-  --bg-card-elevated: rgba(18, 23, 44, 0.72);
+  --glass-surface: rgba(16, 20, 36, 0.54);
+  --glass-surface-elevated: rgba(18, 23, 44, 0.62);
+  --glass-surface-subtle: rgba(16, 20, 36, 0.36);
+  --glass-card: rgba(16, 20, 36, 0.32);
+  --glass-card-hover: rgba(16, 20, 36, 0.40);
+  --bg-card: var(--glass-surface);
+  --bg-card-elevated: var(--glass-surface-elevated);
   --bg-input: rgba(10, 14, 26, 0.60);
   --bg-hover: rgba(40, 50, 80, 0.55);
 
-  /* Liquid Glass 核心滤镜 — 模糊度对齐原版 blur(12px)，保留 saturate */
-  --glass-blur: blur(12px) saturate(160%);
-  --glass-blur-heavy: blur(20px) saturate(180%);
-  --glass-blur-light: blur(8px) saturate(130%);
+  /* 核心滤镜 — 模糊度与 saturate 统一控制 */
+  --glass-blur: blur(13px) saturate(155%);
+  --glass-blur-heavy: blur(20px) saturate(175%);
+  --glass-blur-light: blur(9px) saturate(135%);
 
   /* 边沿折射描边 — 双层 mix-blend-mode 渐变 */
   --glass-border: rgba(255, 255, 255, 0.10);
   --glass-border-light: rgba(255, 255, 255, 0.20);
   --glass-border-accent: rgba(255, 107, 157, 0.45);
+  --glass-edge: rgba(255, 255, 255, 0.16);
+  --glass-inner-highlight: rgba(255, 255, 255, 0.24);
+  --glass-inner-highlight-strong: rgba(255, 255, 255, 0.34);
+  --glass-inner-glow: inset 0 1px 0 rgba(255, 255, 255, 0.12), inset 0 -1px 0 rgba(0, 0, 0, 0.16);
+  --glass-edge-glow: rgba(255, 107, 157, 0.10);
+  --glass-edge-glow-strong: rgba(255, 107, 157, 0.20);
+  --tpl-editor-surface: rgba(8, 11, 22, 0.88);
+  --tpl-editor-panel-surface: rgba(18, 23, 44, 0.72);
+  --motion-emphasized-decelerate: cubic-bezier(0.05, 0.7, 0.1, 1);
+  --motion-emphasized-accelerate: cubic-bezier(0.3, 0, 0.8, 0.15);
 
   /* 主题主色 (FlowBot 经典霓虹粉 #FF6B9D) */
   --accent: #ff6b9d;
@@ -53,7 +68,7 @@
   --warn: #fbbf24;
   --warn-glow: rgba(251, 191, 36, 0.22);
 
-  /* 投影与半径 — liquid-glass-react: 0px 12px 40px rgba(0,0,0,0.25) */
+  /* 投影与半径 */
   --radius: 14px;
   --radius-sm: 8px;
   --radius-lg: 18px;
@@ -63,16 +78,21 @@
 }
 
 :root[data-theme="light"] {
-  /* 背景与表面层级 — 浅色 Liquid Glass (overLight 等效) */
+  /* 背景与表面层级 — 浅色半透明基底 */
   --bg: #ebf2fc;
   --bg-app: #ebf2fc;
-  --bg-card: rgba(255, 255, 255, 0.48);
-  --bg-card-elevated: rgba(255, 255, 255, 0.72);
+  --glass-surface: rgba(255, 255, 255, 0.49);
+  --glass-surface-elevated: rgba(255, 255, 255, 0.62);
+  --glass-surface-subtle: rgba(255, 255, 255, 0.36);
+  --glass-card: rgba(255, 255, 255, 0.26);
+  --glass-card-hover: rgba(255, 255, 255, 0.34);
+  --bg-card: var(--glass-surface);
+  --bg-card-elevated: var(--glass-surface-elevated);
   --bg-input: rgba(243, 247, 254, 0.70);
   --bg-hover: rgba(255, 255, 255, 0.85);
 
-  /* 浅色 Liquid Glass 核心滤镜 — overLight: blur(28px) saturate(140%) */
-  --glass-blur: blur(12px) saturate(150%);
+  /* 浅色核心滤镜 */
+  --glass-blur: blur(13px) saturate(150%);
   --glass-blur-heavy: blur(20px) saturate(160%);
   --glass-blur-light: blur(12px) saturate(120%);
 
@@ -80,6 +100,14 @@
   --glass-border: rgba(255, 255, 255, 0.88);
   --glass-border-light: rgba(255, 255, 255, 0.98);
   --glass-border-accent: rgba(233, 29, 140, 0.42);
+  --glass-edge: rgba(255, 255, 255, 0.78);
+  --glass-inner-highlight: rgba(255, 255, 255, 0.92);
+  --glass-inner-highlight-strong: #ffffff;
+  --glass-inner-glow: inset 0 1px 0 rgba(255, 255, 255, 0.9), inset 0 -1px 0 rgba(15, 23, 42, 0.04);
+  --glass-edge-glow: rgba(233, 29, 140, 0.12);
+  --glass-edge-glow-strong: rgba(233, 29, 140, 0.20);
+  --tpl-editor-surface: rgba(247, 250, 255, 0.90);
+  --tpl-editor-panel-surface: rgba(255, 255, 255, 0.74);
 
   /* 主题主色 (浅色亮粉 #E91D8C) */
   --accent: #e91d8c;
@@ -150,22 +178,27 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   Liquid Glass Core — 双层渐变描边 + backdrop-filter (参照 liquid-glass-react)
+   Content Glass — 页面内容卡片的轻量毛玻璃 + 边沿光辉
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-/* 卡片类 — 暗色半透明基底 + backdrop-filter + 双层渐变描边伪元素 */
+/* 内容卡片比登录卡片和侧栏更透明，但保留相同的模糊与边沿高光。 */
 .card,
 .stat-card,
 .bot-card,
 .log-box,
 .hint-card,
 .disclaimer-banner,
-.port-item {
-  background: var(--bg-card) !important;
+.port-item,
+.health-banner,
+.chain-bar {
+  background: var(--glass-card) !important;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  border: none !important;
-  box-shadow: var(--shadow) !important;
+  border: 1px solid var(--glass-edge) !important;
+  box-shadow:
+    var(--shadow),
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 18px var(--glass-edge-glow) !important;
   border-radius: var(--radius);
   position: relative;
   overflow: hidden;
@@ -173,113 +206,37 @@ body {
               box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Layer 1: screen 混合 — 模拟 liquid-glass-react Border Layer 1 */
-.card::before,
-.stat-card::before,
-.bot-card::before,
-.log-box::before,
-.hint-card::before,
-.disclaimer-banner::before,
-.port-item::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.0) 0%,
-    rgba(255, 255, 255, 0.12) 33%,
-    rgba(255, 255, 255, 0.4) 66%,
-    rgba(255, 255, 255, 0.0) 100%);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  mix-blend-mode: screen;
-  opacity: 0.25;
-  pointer-events: none;
-  transition: opacity 0.3s ease;
-}
-
-/* Layer 2: overlay 混合 — 模拟 liquid-glass-react Border Layer 2 */
-.card::after,
-.stat-card::after,
-.bot-card::after,
-.log-box::after,
-.hint-card::after,
-.disclaimer-banner::after,
-.port-item::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1.5px;
-  background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.0) 0%,
-    rgba(255, 255, 255, 0.28) 33%,
-    rgba(255, 255, 255, 0.55) 66%,
-    rgba(255, 255, 255, 0.0) 100%);
-  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  mix-blend-mode: overlay;
-  pointer-events: none;
-  transition: opacity 0.3s ease;
-}
-
 /* Hover: 增强描边亮度 + 微浮升 */
 .card:hover,
 .stat-card:hover,
 .bot-card:hover,
 .port-item:hover {
-  box-shadow: var(--shadow-hover) !important;
+  box-shadow:
+    var(--shadow-hover),
+    inset 0 1px 0 var(--glass-inner-highlight-strong),
+    0 0 26px var(--glass-edge-glow-strong) !important;
   transform: translateY(-2px);
 }
-.card:hover::before,
-.stat-card:hover::before,
-.bot-card:hover::before,
-.port-item:hover::before { opacity: 0.45; }
-.card:hover::after,
-.stat-card:hover::after,
-.bot-card:hover::after,
-.port-item:hover::after { opacity: 0.9; }
 
-/* 浅色模式描边适配 — overLight 等效 */
-:root[data-theme="light"] .card::before,
-:root[data-theme="light"] .stat-card::before,
-:root[data-theme="light"] .bot-card::before,
-:root[data-theme="light"] .port-item::before {
-  background: linear-gradient(135deg,
-    rgba(0, 0, 0, 0.0) 0%,
-    rgba(0, 0, 0, 0.06) 33%,
-    rgba(0, 0, 0, 0.12) 66%,
-    rgba(0, 0, 0, 0.0) 100%);
-  mix-blend-mode: multiply;
-  opacity: 0.5;
-}
-:root[data-theme="light"] .card::after,
-:root[data-theme="light"] .stat-card::after,
-:root[data-theme="light"] .bot-card::after,
-:root[data-theme="light"] .port-item::after {
-  background: linear-gradient(135deg,
-    rgba(0, 0, 0, 0.0) 0%,
-    rgba(0, 0, 0, 0.04) 33%,
-    rgba(0, 0, 0, 0.08) 66%,
-    rgba(0, 0, 0, 0.0) 100%);
-  mix-blend-mode: multiply;
-}
 :root[data-theme="light"] .card,
 :root[data-theme="light"] .stat-card,
 :root[data-theme="light"] .bot-card,
 :root[data-theme="light"] .port-item {
-  background: rgba(255, 255, 255, 0.48) !important;
-  box-shadow: 0 16px 70px rgba(0, 0, 0, 0.12) !important;
+  background: var(--glass-card) !important;
+  box-shadow:
+    0 16px 70px rgba(0, 0, 0, 0.12),
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 18px var(--glass-edge-glow) !important;
   text-shadow: none;
 }
 :root[data-theme="light"] .card:hover,
 :root[data-theme="light"] .stat-card:hover,
 :root[data-theme="light"] .bot-card:hover {
-  box-shadow: 0 20px 80px rgba(0, 0, 0, 0.16) !important;
-  background: rgba(255, 255, 255, 0.72) !important;
+  box-shadow:
+    0 20px 80px rgba(0, 0, 0, 0.16),
+    inset 0 1px 0 var(--glass-inner-highlight-strong),
+    0 0 26px var(--glass-edge-glow-strong) !important;
+  background: var(--glass-card-hover) !important;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -305,9 +262,9 @@ body {
 .sidebar {
   width: var(--sidebar-width);
   min-width: var(--sidebar-width);
-  background: rgba(8, 12, 24, 0.72) !important;
-  backdrop-filter: blur(32px) saturate(200%);
-  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  background: var(--bg-card-elevated) !important;
+  backdrop-filter: var(--glass-blur-heavy);
+  -webkit-backdrop-filter: var(--glass-blur-heavy);
   border-right: 1px solid rgba(255, 255, 255, 0.10);
   padding: 0;
   display: flex;
@@ -326,7 +283,7 @@ body {
 }
 
 :root[data-theme="light"] .sidebar {
-  background: rgba(240, 245, 255, 0.65) !important;
+  background: var(--bg-card-elevated) !important;
   border-right: 1px solid rgba(255, 255, 255, 0.7);
   box-shadow: 10px 0 40px rgba(0, 0, 0, 0.08);
 }
@@ -338,15 +295,15 @@ body {
   border-radius: 16px;
   padding: 16px 14px;
   border: 1px solid var(--glass-border);
-  background: rgba(255, 255, 255, 0.03);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  background: var(--glass-surface-subtle);
+  backdrop-filter: var(--glass-blur-light);
+  -webkit-backdrop-filter: var(--glass-blur-light);
   box-shadow: var(--glass-inner-glow);
   transition: box-shadow 0.35s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 :root[data-theme="light"] .sidebar-module {
-  background: rgba(255, 255, 255, 0.5);
+  background: var(--glass-surface-subtle);
   border: 1px solid rgba(255, 255, 255, 0.8);
 }
 
@@ -395,6 +352,11 @@ body {
   .sidebar .module-nav .nav-btn:nth-child(6) { animation-delay: 0.37s; }
   .sidebar .module-nav .nav-btn:nth-child(7) { animation-delay: 0.42s; }
   .sidebar .module-nav .nav-btn:nth-child(8) { animation-delay: 0.47s; }
+}
+
+.app-shell.is-login-overlay .sidebar .sidebar-module,
+.app-shell.is-login-overlay .sidebar .nav-btn {
+  animation-play-state: paused;
 }
 
 @keyframes sidebar-slide-in {
@@ -619,7 +581,7 @@ body {
 
 /* 卡片级联自然入场非线性微动效 */
 .card {
-  animation: card-appear 0.42s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: card-appear 0.42s cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 .card:nth-child(1) { animation-delay: 0.03s; }
 .card:nth-child(2) { animation-delay: 0.08s; }
@@ -1324,9 +1286,9 @@ input[type="checkbox"]:not(.toggle input):checked::before {
 }
 
 .bot-config-panel {
-  background: var(--bg-card) !important;
-  backdrop-filter: blur(20px) saturate(160%);
-  -webkit-backdrop-filter: blur(20px) saturate(160%);
+  background: var(--glass-card) !important;
+  backdrop-filter: var(--glass-blur-heavy);
+  -webkit-backdrop-filter: var(--glass-blur-heavy);
   border: none !important;
   border-top: 2px solid var(--accent) !important;
   box-shadow: 0 12px 36px -4px rgba(0, 0, 0, 0.4), 0 0 24px var(--accent-glow) !important;
@@ -1873,7 +1835,7 @@ select.panel-input {
   padding: 10px 12px;
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-sm);
-  background: var(--bg-card);
+  background: var(--glass-card);
   transition: all 0.24s cubic-bezier(0.22, 1, 0.36, 1);
 }
 .delay-item:hover {
@@ -2015,9 +1977,9 @@ select.panel-input {
 }
 
 .login-card {
-  background: rgba(12, 16, 30, 0.7) !important;
-  backdrop-filter: blur(24px) saturate(150%);
-  -webkit-backdrop-filter: blur(24px) saturate(150%);
+  background: var(--bg-card) !important;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
   border: none !important;
   border-radius: 32px;
   padding: 42px 38px;
@@ -2032,7 +1994,7 @@ select.panel-input {
 
 /* 浅色模式：卡片由写死深色改为亮玻璃，文字/输入框随主题变量自然适配 */
 :root[data-theme="light"] .login-card {
-  background: rgba(255, 255, 255, 0.55) !important;
+  background: var(--bg-card) !important;
   box-shadow: 0 24px 60px -8px rgba(40, 30, 70, 0.25) !important;
 }
 
@@ -2121,95 +2083,6 @@ select.panel-input {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   SVG 边沿折射 (Chromium only) — html.lg-svg 类由 glass.js 在滤镜注入后添加。
-   置换滤镜挂在 backdrop-filter 链尾：只扭曲模糊后的壁纸背景，内容/文字保持锐利。
-   Firefox / Safari 无此类，自动回退纯 blur+saturate。
-   ═══════════════════════════════════════════════════════════════════════════════ */
-
-/* warp 层架构（对齐 liquid-glass-react）：
-   基础规则的 backdrop-filter 仅作为非 Chromium 降级；lg-svg 启用时必须
-   关闭容器自身模糊（warp 层唯一负责），否则双重模糊雾成一片 */
-html.lg-svg .card,
-html.lg-svg .stat-card,
-html.lg-svg .bot-card,
-html.lg-svg .log-box,
-html.lg-svg .hint-card,
-html.lg-svg .disclaimer-banner,
-html.lg-svg .port-item,
-html.lg-svg .login-card,
-html.lg-svg .modal,
-html.lg-svg .bot-config-panel,
-html.lg-svg .chain-bar,
-html.lg-svg .health-banner,
-html.lg-svg .bp-alert-banner {
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
-}
-
-/* warp 层架构（对齐 liquid-glass-react）：
-   容器本体不再声明 backdrop-filter；glass.js 注入的 .glass-warp 空层
-   承担 backdrop-filter（纯 blur 列表）+ filter: url()（置换扭曲） */
-.glass-warp {
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
-  z-index: 0;
-  backdrop-filter: var(--glass-blur);
-  -webkit-backdrop-filter: var(--glass-blur);
-}
-html.lg-svg .glass-warp {
-  filter: url(#lg-liquid-glass);
-  -webkit-filter: url(#lg-liquid-glass);
-}
-/* 容器内容提升到 warp 之上 */
-.card > *:not(.glass-warp),
-.stat-card > *:not(.glass-warp),
-.bot-card > *:not(.glass-warp),
-.log-box > *:not(.glass-warp),
-.hint-card > *:not(.glass-warp),
-.disclaimer-banner > *:not(.glass-warp),
-.port-item > *:not(.glass-warp),
-.login-card > *:not(.glass-warp),
-.modal > *:not(.glass-warp),
-.bot-config-panel > *:not(.glass-warp),
-.chain-bar > *:not(.glass-warp),
-.health-banner > *:not(.glass-warp),
-.bp-alert-banner > *:not(.glass-warp) {
-  position: relative;
-  z-index: 1;
-}
-
-html.lg-svg .sidebar {
-  backdrop-filter: blur(32px) saturate(200%);
-  -webkit-backdrop-filter: blur(32px) saturate(200%);
-}
-
-html.lg-svg .session-row {
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-}
-
-html.lg-svg .lg-capsule-btn {
-  backdrop-filter: var(--glass-blur-light);
-  -webkit-backdrop-filter: var(--glass-blur-light);
-}
-
-/* 色散边沿的 accent 主题微光 — 深色 #FF6B9D / 浅色 #E91D8C（沿用 --accent 系列令牌） */
-html.lg-svg .card::after,
-html.lg-svg .stat-card::after,
-html.lg-svg .bot-card::after {
-  box-shadow: inset 0 0 24px -6px var(--accent-glow);
-}
-
-.lg-filter-defs {
-  position: absolute;
-  width: 0;
-  height: 0;
-  pointer-events: none;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════════
    UI 精修四项：胶囊选择按钮 / hint 卡片 / Token 行 / 重启按钮间距
    ═══════════════════════════════════════════════════════════════════════════════ */
 
@@ -2261,13 +2134,13 @@ html.lg-svg .bot-card::after {
   box-shadow: none !important;
 }
 
-/* 2) hint-card（账号管理引导卡）— 居中 + 内边距 + accent 玻璃 + 弹性入场 */
+/* 2) hint-card（引导卡）— 居中 + 内边距 + accent 玻璃 + 弹性入场 */
 .hint-card {
   padding: 24px 32px !important;
   margin: 4px 0 18px;
   text-align: center;
   border: 1px solid var(--glass-border-accent) !important;
-  background: linear-gradient(135deg, var(--accent-glow), transparent 55%), var(--bg-card) !important;
+  background: linear-gradient(135deg, var(--accent-glow), transparent 55%), var(--glass-card) !important;
   animation: hint-card-pop 0.52s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 .hint-card p {
@@ -2284,7 +2157,7 @@ html.lg-svg .bot-card::after {
   to { opacity: 1; transform: translateY(0) scale(1); }
 }
 :root[data-theme="light"] .hint-card {
-  background: linear-gradient(135deg, rgba(233, 29, 140, 0.08), rgba(255, 255, 255, 0.55) 55%) !important;
+  background: linear-gradient(135deg, rgba(233, 29, 140, 0.08), var(--glass-card) 55%) !important;
 }
 
 /* 3) input-with-toggle — 输入框与显示按钮同行不换行 */
@@ -2326,7 +2199,7 @@ html.lg-svg .bot-card::after {
   padding: 12px 18px;
   margin: 0 0 16px;
   border-radius: var(--radius);
-  background: linear-gradient(135deg, var(--danger-glow), transparent 60%), var(--bg-card) !important;
+  background: linear-gradient(135deg, var(--danger-glow), transparent 60%), var(--glass-card) !important;
   border: 1px solid rgba(255, 77, 109, 0.45) !important;
   color: var(--text);
   font-size: 13.5px;
@@ -2919,15 +2792,14 @@ html.lg-svg .bot-card::after {
   border-radius: var(--radius);
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  animation: hint-card-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) both;
 }
 .health-banner.hb-ok {
-  background: linear-gradient(135deg, var(--accent-glow), transparent 60%), var(--bg-card) !important;
+  background: linear-gradient(135deg, var(--accent-glow), transparent 60%), var(--glass-card) !important;
   border: 1px solid var(--glass-border-accent) !important;
 }
 .health-banner.hb-danger,
 .health-banner.hb-warn {
-  background: linear-gradient(135deg, var(--danger-glow), transparent 60%), var(--bg-card) !important;
+  background: linear-gradient(135deg, var(--danger-glow), transparent 60%), var(--glass-card) !important;
   border: 1px solid rgba(255, 77, 109, 0.45) !important;
 }
 .health-banner.hb-warn { border-color: rgba(251, 191, 36, 0.5) !important; }
@@ -2957,11 +2829,14 @@ html.lg-svg .bot-card::after {
   padding: 16px 20px;
   margin: 0 0 16px;
   border-radius: var(--radius);
-  background: var(--bg-card) !important;
+  background: var(--glass-card) !important;
   backdrop-filter: var(--glass-blur);
   -webkit-backdrop-filter: var(--glass-blur);
-  border: none !important;
-  box-shadow: var(--shadow) !important;
+  border: 1px solid var(--glass-edge) !important;
+  box-shadow:
+    var(--shadow),
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 18px var(--glass-edge-glow) !important;
   overflow-x: auto;
 }
 .chain-node {
@@ -3098,16 +2973,16 @@ html.lg-svg .bot-card::after {
     bottom: 0;
     width: 56px;
     padding: 10px 6px;
-    background: rgba(8, 12, 24, 0.82) !important;
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    background: var(--bg-card-elevated) !important;
+    backdrop-filter: var(--glass-blur-heavy);
+    -webkit-backdrop-filter: var(--glass-blur-heavy);
     border-right: 1px solid rgba(255, 255, 255, 0.08);
     z-index: 130;
     overflow-y: auto;
     scrollbar-width: none;
   }
   :root[data-theme="light"] .mini-rail {
-    background: rgba(240, 245, 255, 0.85) !important;
+    background: var(--bg-card-elevated) !important;
     border-right: 1px solid rgba(255, 255, 255, 0.7);
   }
   .mini-rail::-webkit-scrollbar { display: none; }
@@ -3300,8 +3175,7 @@ html.lg-svg .bot-card::after {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   macOS 26 风格玻璃 — 唇口边沿（上亮唇/下暗唇）+ 描边增强
-   三层内阴影叠出有厚度的折射唇口，替代单线描边观感
+   内容卡片边沿光辉 — 保留亮边与外沿光晕，移除旧液态玻璃混合层
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 .card,
@@ -3313,7 +3187,8 @@ html.lg-svg .bot-card::after {
 .log-box {
   box-shadow:
     var(--shadow),
-    inset 0 1px 0 rgba(255, 255, 255, 0.14) !important;
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 18px var(--glass-edge-glow) !important;
 }
 .card:hover,
 .stat-card:hover,
@@ -3321,36 +3196,27 @@ html.lg-svg .bot-card::after {
 .port-item:hover {
   box-shadow:
     var(--shadow-hover),
-    inset 0 1px 0 rgba(255, 255, 255, 0.2) !important;
+    inset 0 1px 0 var(--glass-inner-highlight-strong),
+    0 0 26px var(--glass-edge-glow-strong) !important;
 }
 
-html.lg-svg .card::before,
-html.lg-svg .stat-card::before,
-html.lg-svg .bot-card::before,
-html.lg-svg .port-item::before { opacity: 0.4; }
-html.lg-svg .card:hover::before,
-html.lg-svg .stat-card:hover::before,
-html.lg-svg .bot-card:hover::before,
-html.lg-svg .port-item:hover::before { opacity: 0.6; }
-
-/* 大面板（modal/login/横幅/链路条/保存条）— 更厚的唇口 */
+/* 大面板（modal/login/保存条）— 更厚但不改变内容卡片透明度 */
 .modal,
 .login-card,
-.health-banner,
-.bp-alert-banner,
-.chain-bar,
 .save-bar {
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.3),
-    inset 0 1.5px 0 rgba(255, 255, 255, 0.16) !important;
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 22px var(--glass-edge-glow) !important;
 }
 
-/* 浅色模式唇口适配（亮唇改白、暗唇改淡灰） */
+/* 浅色模式边沿适配 */
 :root[data-theme="light"] .card,
 :root[data-theme="light"] .stat-card,
 :root[data-theme="light"] .bot-card,
 :root[data-theme="light"] .port-item {
   box-shadow:
     0 16px 70px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.85) !important;
+    inset 0 1px 0 var(--glass-inner-highlight),
+    0 0 18px var(--glass-edge-glow) !important;
 }

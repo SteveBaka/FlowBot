@@ -9,6 +9,7 @@ const PORT = process.env.WEBUI_PORT || 7300
 // 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
 const serverStartTime = Date.now()
 const ONEBOT_PORT = process.env.ONEBOT_PORT || 7100
+const NOVNC_PORT = process.env.NOVNC_PORT || 7600
 const FLOW_PORT = process.env.FLOW_API_PORT || 5031
 const CONFIG_DIR = process.env.WEFLOW_CONFIG_DIR || '/opt/weflow/data'
 
@@ -101,14 +102,196 @@ function ensureDirSync(dir) {
 // ─── Auth (scrypt-hashed password, in-memory tokens) ─────────────────────────
 
 const AUTH_FILE = path.join(CONFIG_DIR, 'webui-auth.json')
+const BOX_KEY_FILE = process.env.WEFLOW_BOX_KEY_FILE || path.join(CONFIG_DIR, '.box-key')
+const AUTH_INCIDENT_FILE = path.join(CONFIG_DIR, 'auth-incident.json')
+const AUTH_PASSWORD_POLICY = /^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{10,20}$/
+const AUTH_FAIL_WINDOW_MS = 3 * 60 * 1000
+const AUTH_COOLDOWN_MS = 3 * 60 * 1000
+const AUTH_MAX_TOTAL_FAILURES = 15
+const AUTH_MAX_WINDOW_FAILURES = 5
 const activeTokens = new Set()
+let authFailureTimes = []
+let authFailureTotal = 0
+let authCooldownUntil = 0
+let authLockdown = false
+
+function getBoxKey() {
+  try {
+    const existing = fs.readFileSync(BOX_KEY_FILE, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(existing)) return existing
+  } catch {}
+  try {
+    ensureDirSync(CONFIG_DIR)
+    const key = crypto.randomBytes(32).toString('hex')
+    fs.writeFileSync(BOX_KEY_FILE, key, { mode: 0o600 })
+    return key
+  } catch {
+    return ''
+  }
+}
+
+function boxEncrypt(plaintext) {
+  const keyHex = getBoxKey()
+  if (!keyHex) return ''
+  const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  const ciphertext = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()])
+  return 'box:' + Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64')
+}
+
+function boxDecrypt(stored) {
+  const keyHex = getBoxKey()
+  if (!keyHex || !stored || !stored.startsWith('box:')) return ''
+  try {
+    const buf = Buffer.from(stored.slice(4), 'base64')
+    const iv = buf.subarray(0, 12)
+    const tag = buf.subarray(12, 28)
+    const ciphertext = buf.subarray(28)
+    const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+    decipher.setAuthTag(tag)
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
+function readAuthFile() {
+  try {
+    return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+function writeAuthFile(auth) {
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(auth), { mode: 0o600 })
+  try { fs.chmodSync(AUTH_FILE, 0o600) } catch {}
+}
+
+function writePassword(newPassword, agreementAccepted) {
+  const passEnc = boxEncrypt(newPassword)
+  if (!passEnc) throw new Error('密码加密初始化失败')
+  writeAuthFile({
+    ver: 2,
+    passEnc,
+    salt: crypto.randomBytes(16).toString('hex'),
+    mustChange: false,
+    createdAt: new Date().toISOString(),
+    agreement: agreementAccepted ? { acceptedAt: new Date().toISOString(), version: 'v3' } : undefined
+  })
+}
+
+function safeEqualText(left, right) {
+  const a = crypto.createHash('sha256').update(String(left || '')).digest()
+  const b = crypto.createHash('sha256').update(String(right || '')).digest()
+  return crypto.timingSafeEqual(a, b)
+}
 
 function verifyPassword(password) {
+  const auth = readAuthFile()
+  if (!auth) return { ok: false, auth: null, mustChange: false }
+  if (auth.passEnc) {
+    const expected = boxDecrypt(auth.passEnc)
+    return {
+      ok: Boolean(expected) && safeEqualText(password, expected),
+      auth,
+      mustChange: auth.mustChange !== false
+    }
+  }
+  if (auth.hash && auth.salt) {
+    const hash = crypto.scryptSync(String(password || ''), auth.salt, 64).toString('hex')
+    return { ok: safeEqualText(hash, auth.hash), auth, mustChange: auth.mustChange !== false }
+  }
+  return { ok: false, auth, mustChange: true }
+}
+
+function readAuthIncident() {
   try {
-    const auth = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'))
-    const hash = crypto.scryptSync(password, auth.salt, 64).toString('hex')
-    return hash === auth.hash
-  } catch { return false }
+    const incident = JSON.parse(fs.readFileSync(AUTH_INCIDENT_FILE, 'utf-8'))
+    return incident && typeof incident === 'object' ? incident : null
+  } catch {
+    return null
+  }
+}
+
+function writeAuthIncident() {
+  try {
+    fs.writeFileSync(AUTH_INCIDENT_FILE, JSON.stringify({
+      time: new Date().toISOString(),
+      failures: AUTH_MAX_TOTAL_FAILURES,
+      reason: '连续密码输入错误'
+    }), { mode: 0o600 })
+  } catch {}
+}
+
+function stopWeFlowForLockdown() {
+  try {
+    const pidFile = path.join(CONFIG_DIR, 'weflow-watchdog.pid')
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+    if (Number.isFinite(pid) && pid > 1) process.kill(pid, 'SIGTERM')
+  } catch {}
+  try {
+    execSync("pkill -TERM -f 'weflow --no-sandbox --disable-gpu' 2>/dev/null || true", { timeout: 5000 })
+  } catch {}
+}
+
+function authGuard() {
+  if (authLockdown) {
+    return { blocked: true, status: 503, message: '密码输入错误次数已达上限，本次已停止服务' }
+  }
+  const remaining = authCooldownUntil - Date.now()
+  if (remaining > 0) {
+    return {
+      blocked: true,
+      status: 429,
+      message: '密码尝试过于频繁，请稍后再试',
+      retryAfterMs: remaining
+    }
+  }
+  return null
+}
+
+function noteAuthFailure() {
+  const now = Date.now()
+  authFailureTimes.push(now)
+  authFailureTimes = authFailureTimes.filter(function (stamp) { return now - stamp < AUTH_FAIL_WINDOW_MS })
+  authFailureTotal += 1
+  if (authFailureTimes.length >= AUTH_MAX_WINDOW_FAILURES) {
+    authCooldownUntil = now + AUTH_COOLDOWN_MS
+  }
+  if (authFailureTotal >= AUTH_MAX_TOTAL_FAILURES) {
+    authLockdown = true
+    writeAuthIncident()
+    stopWeFlowForLockdown()
+    return { blocked: true, status: 503, message: '密码输入错误次数已达上限，本次已停止服务' }
+  }
+  return authGuard()
+}
+
+function resetAuthFailures() {
+  authFailureTimes = []
+  authFailureTotal = 0
+  authCooldownUntil = 0
+}
+
+function isWebUiSecurityRequest(req) {
+  if (String(req.headers['x-weflow-page'] || '').toLowerCase() !== 'webui') return false
+  const origin = String(req.headers.origin || '').trim()
+  if (!origin) return false
+  try {
+    return new URL(origin).host === String(req.headers.host || '')
+  } catch {
+    return false
+  }
+}
+
+function passwordPolicyError(password) {
+  if (!AUTH_PASSWORD_POLICY.test(String(password || ''))) {
+    return '密码需为 10–20 位，且同时包含大写字母、小写字母、数字和特殊字符'
+  }
+  return ''
 }
 
 function generateToken() {
@@ -588,13 +771,34 @@ const server = http.createServer(async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════════
 
   if (p === '/api/auth/login' && req.method === 'POST') {
+    let blocked = authGuard()
+    if (blocked && blocked.status === 429) blocked = noteAuthFailure() || blocked
+    if (blocked) {
+      json(res, { ok: false, error: blocked.message, code: authLockdown ? 'AUTH_LOCKDOWN' : 'AUTH_COOLDOWN', retryAfterMs: blocked.retryAfterMs }, blocked.status)
+      return
+    }
     const bodyData = await body(req)
-    if (verifyPassword(bodyData.password || '')) {
+    const verified = verifyPassword(bodyData.password || '')
+    if (verified.ok) {
+      resetAuthFailures()
       const token = generateToken()
+      activeTokens.clear()
       activeTokens.add(token)
-      json(res, { ok: true, token })
+      json(res, {
+        ok: true,
+        token,
+        mustChange: verified.mustChange,
+        agreementAccepted: Boolean(verified.auth && verified.auth.agreement && verified.auth.agreement.acceptedAt),
+        incident: readAuthIncident()
+      })
     } else {
-      json(res, { ok: false, error: '密码错误' }, 401)
+      const failure = noteAuthFailure()
+      json(res, {
+        ok: false,
+        error: failure && failure.message ? failure.message : '密码错误',
+        code: authLockdown ? 'AUTH_LOCKDOWN' : (failure && failure.status === 429 ? 'AUTH_COOLDOWN' : 'AUTH_INVALID'),
+        retryAfterMs: failure && failure.retryAfterMs
+      }, failure && failure.status ? failure.status : 401)
     }
     return
   }
@@ -602,6 +806,132 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/auth/verify' && req.method === 'GET') {
     if (isAuthenticated(req)) json(res, { ok: true })
     else json(res, { ok: false }, 401)
+    return
+  }
+
+  if (p === '/api/auth/state' && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    const auth = readAuthFile()
+    json(res, {
+      ok: true,
+      mustChange: !auth || auth.mustChange !== false,
+      agreementAccepted: Boolean(auth && auth.agreement && auth.agreement.acceptedAt),
+      incident: readAuthIncident()
+    })
+    return
+  }
+
+  if (p === '/api/auth/first-change' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    if (!isWebUiSecurityRequest(req)) {
+      json(res, { ok: false, error: 'Security context rejected' }, 403)
+      return
+    }
+    const auth = readAuthFile()
+    if (!auth || auth.mustChange === false) {
+      json(res, { ok: false, error: '当前会话无需首次改密' }, 409)
+      return
+    }
+    const bodyData = await body(req)
+    const newPassword = String(bodyData.newPassword || '')
+    const confirmPassword = String(bodyData.confirmPassword || '')
+    if (!bodyData.agreementAccepted) {
+      json(res, { ok: false, error: '请先阅读并同意用户协议与免责声明' }, 400)
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      json(res, { ok: false, error: '两次输入的新密码不一致' }, 400)
+      return
+    }
+    const policyError = passwordPolicyError(newPassword)
+    if (policyError) {
+      json(res, { ok: false, error: policyError }, 400)
+      return
+    }
+    if (verifyPassword(newPassword).ok) {
+      json(res, { ok: false, error: '新密码不能与旧密码相同' }, 400)
+      return
+    }
+    try {
+      writePassword(newPassword, true)
+      activeTokens.clear()
+      json(res, { ok: true, relogin: true, message: '密码已修改，请使用新密码重新登录' })
+    } catch (err) {
+      json(res, { ok: false, error: err.message || String(err) }, 500)
+    }
+    return
+  }
+
+  if (p === '/api/auth/change-password' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    if (!isWebUiSecurityRequest(req)) {
+      json(res, { ok: false, error: 'Security context rejected' }, 403)
+      return
+    }
+    let blocked = authGuard()
+    if (blocked && blocked.status === 429) blocked = noteAuthFailure() || blocked
+    if (blocked) {
+      json(res, { ok: false, error: blocked.message, code: authLockdown ? 'AUTH_LOCKDOWN' : 'AUTH_COOLDOWN', retryAfterMs: blocked.retryAfterMs }, blocked.status)
+      return
+    }
+    const bodyData = await body(req)
+    const oldPassword = String(bodyData.oldPassword || '')
+    const newPassword = String(bodyData.newPassword || '')
+    const confirmPassword = String(bodyData.confirmPassword || '')
+    const verified = verifyPassword(oldPassword)
+    if (!verified.ok) {
+      const failure = noteAuthFailure()
+      console.warn('[WebUI Auth] Password change rejected: current password mismatch')
+      json(res, {
+        ok: false,
+        error: failure && failure.message ? failure.message : '旧密码错误',
+        code: authLockdown ? 'AUTH_LOCKDOWN' : (failure && failure.status === 429 ? 'AUTH_COOLDOWN' : 'AUTH_INVALID'),
+        retryAfterMs: failure && failure.retryAfterMs
+      }, failure && failure.status ? failure.status : 400)
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      json(res, { ok: false, error: '两次输入的新密码不一致' }, 400)
+      return
+    }
+    const policyError = passwordPolicyError(newPassword)
+    if (policyError) {
+      json(res, { ok: false, error: policyError }, 400)
+      return
+    }
+    if (safeEqualText(oldPassword, newPassword)) {
+      json(res, { ok: false, error: '新密码不能与旧密码相同' }, 400)
+      return
+    }
+    try {
+      const auth = readAuthFile()
+      writePassword(newPassword, Boolean(auth && auth.agreement && auth.agreement.acceptedAt))
+      resetAuthFailures()
+      activeTokens.clear()
+      console.log('[WebUI Auth] Password changed successfully; all sessions revoked')
+      json(res, { ok: true, relogin: true, message: '密码已修改，请使用新密码重新登录' })
+    } catch (err) {
+      json(res, { ok: false, error: err.message || String(err) }, 500)
+    }
+    return
+  }
+
+  if (p === '/api/auth/incident/ack' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    try { fs.unlinkSync(AUTH_INCIDENT_FILE) } catch {}
+    json(res, { ok: true })
     return
   }
 
@@ -689,7 +1019,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/version') {
     json(res, {
       app: 'FlowBOT', version: CONTAINER_VERSION, protocol: 'v11.0',
-      onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT), flow_port: Number(FLOW_PORT)
+      onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT),
+      novnc_port: Number(NOVNC_PORT), flow_port: Number(FLOW_PORT)
     })
     return
   }
@@ -1037,6 +1368,16 @@ const server = http.createServer(async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════════
   // Accounts
   // ═══════════════════════════════════════════════════════════════════════════════
+
+  if (p === '/api/account/profile' && req.method === 'GET') {
+    try {
+      const result = await resolveAccountProfile()
+      json(res, { ok: true, profile: result.profile, source: result.source })
+    } catch (err) {
+      json(res, { ok: false, error: String(err && err.message || err) }, 502)
+    }
+    return
+  }
 
   if (p === '/api/accounts' && req.method === 'GET') {
     const cfg = loadWebuiConfig()
@@ -1665,6 +2006,120 @@ function getBotSelfId() {
   const learned = getSelfWxid()
   if (learned) return { self_id: learned, source: 'learned' }
   return { self_id: undefined, source: 'none' }
+}
+
+let accountProfileCache = { key: '', updatedAt: 0, data: null }
+const ACCOUNT_PROFILE_CACHE_MS = 5 * 60 * 1000
+
+function sameAccountId(left, right) {
+  const a = cleanAccountDirNameWxid(left).toLowerCase()
+  const b = cleanAccountDirNameWxid(right).toLowerCase()
+  return Boolean(a && b && a === b)
+}
+
+async function getFlowApiJson(pathname) {
+  const token = readApiToken()
+  const result = await proxyRequest('http://127.0.0.1:' + FLOW_PORT + pathname, {
+    headers: token ? { Authorization: 'Bearer ' + token } : {}
+  })
+  if (result.status < 200 || result.status >= 300) return null
+  return result.data && typeof result.data === 'object' ? result.data : null
+}
+
+async function resolveAccountProfile() {
+  const botSelf = getBotSelfId()
+  const rawWxid = String(botSelf.self_id || '').trim()
+  const wxid = cleanAccountDirNameWxid(rawWxid) || rawWxid
+  if (!wxid) {
+    return {
+      profile: { wxid: '', rawWxid: '', displayName: '未登录', avatarUrl: '' },
+      source: 'none'
+    }
+  }
+
+  const cacheKey = rawWxid + '|' + wxid
+  if (accountProfileCache.data && accountProfileCache.key === cacheKey &&
+      Date.now() - accountProfileCache.updatedAt < ACCOUNT_PROFILE_CACHE_MS) {
+    return accountProfileCache.data
+  }
+
+  let displayName = ''
+  let avatarUrl = ''
+  let source = botSelf.source || 'unknown'
+
+  const identity = identityMemory.get(rawWxid) || identityMemory.get(wxid)
+  if (identity) {
+    displayName = String(identity.display_name || identity.nickname || '').trim()
+    avatarUrl = String(identity.avatar_url || '').trim()
+    if (displayName || avatarUrl) source = 'identity'
+  }
+
+  if (!avatarUrl && identityDb) {
+    try {
+      const row = identityDb.prepare(
+        'SELECT nickname, avatar_url FROM group_nicknames ' +
+        'WHERE lower(member_wxid)=lower(?) AND avatar_url IS NOT NULL ' +
+        'ORDER BY updated_at DESC LIMIT 1'
+      ).get(wxid)
+      if (row) {
+        if (!displayName && row.nickname) displayName = String(row.nickname)
+        if (row.avatar_url) avatarUrl = String(row.avatar_url)
+        if (!displayName && avatarUrl) source = 'group'
+      }
+    } catch {}
+  }
+
+  if (!displayName || !avatarUrl) {
+    const contactsData = await getFlowApiJson('/api/v1/contacts?limit=10000')
+    const contacts = contactsData && Array.isArray(contactsData.contacts) ? contactsData.contacts : []
+    const contact = contacts.find(function (item) {
+      return item && sameAccountId(item.username, wxid)
+    })
+    if (contact) {
+      if (!displayName) {
+        displayName = String(contact.displayName || contact.nickname || contact.remark || '').trim()
+      }
+      if (!avatarUrl && contact.avatarUrl) avatarUrl = String(contact.avatarUrl)
+      if (displayName || avatarUrl) source = source === 'identity' ? 'identity+contacts' : 'contacts'
+    }
+  }
+
+  if (!avatarUrl) {
+    const sessionsData = await getFlowApiJson('/api/v1/sessions?limit=1000')
+    const sessions = sessionsData && Array.isArray(sessionsData.sessions) ? sessionsData.sessions : []
+    const groups = sessions.filter(function (item) {
+      return item && item.username && (item.sessionType === 'group' || String(item.username).endsWith('@chatroom'))
+    }).slice(0, 8)
+    for (const group of groups) {
+      const membersData = await getFlowApiJson(
+        '/api/v1/group-members?chatroomId=' + encodeURIComponent(String(group.username))
+      )
+      const members = membersData && Array.isArray(membersData.members) ? membersData.members : []
+      const selfMember = members.find(function (item) {
+        return item && sameAccountId(item.wxid || item.username, wxid)
+      })
+      if (selfMember && selfMember.avatarUrl) {
+        avatarUrl = String(selfMember.avatarUrl)
+        if (!displayName) {
+          displayName = String(selfMember.displayName || selfMember.nickname || '').trim()
+        }
+        source = source === 'identity' ? 'identity+group' : 'group'
+        break
+      }
+    }
+  }
+
+  const data = {
+    profile: {
+      wxid: wxid,
+      rawWxid: rawWxid,
+      displayName: displayName || wxid,
+      avatarUrl: avatarUrl || ''
+    },
+    source: source
+  }
+  accountProfileCache = { key: cacheKey, updatedAt: Date.now(), data: data }
+  return data
 }
 
 // 同步各群成员群昵称 → group_nicknames 表（供 @ 链路 / 未来特性读身份库）
