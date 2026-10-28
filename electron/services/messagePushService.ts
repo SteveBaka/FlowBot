@@ -6,7 +6,7 @@ import { resolveInboundVideo as mediaResolveInboundVideo, resolveInboundImage as
 import { groupAnalyticsService } from './groupAnalyticsService'
 import { broadcastToAllBots, cacheGroup, cachePrivate, getCachedGroupName, numericIdOf, resolveGroupSearchName, resolvePrivateSearchName, scheduleGroupRefresh, schedulePrivateRefresh } from './botManager'
 import { getEnhancedMessageSender } from '../plugins/enhancedMessageSender'
-import { promises as fs } from 'fs'
+import { existsSync, promises as fs } from 'fs'
 import path from 'path'
 import { createHash } from 'crypto'
 import { pathToFileURL } from 'url'
@@ -31,6 +31,23 @@ interface PushSessionOptions {
 
 type MessagePushEventName = 'message.new' | 'message.revoke'
 
+/** 推送事件的消息类型枚举（对外稳定契约，新增值只追加不改名） */
+export type ResolvedMessageType =
+  | 'text'
+  | 'sticker'
+  | 'image'
+  | 'voice'
+  | 'video'
+  | 'file'
+  | 'link'
+  | 'location'
+  | 'card'
+  | 'call'
+  | 'forward'
+  | 'quote'
+  | 'system'
+  | 'other'
+
 interface MessagePushPayload {
   event: MessagePushEventName
   sessionId: string
@@ -46,13 +63,26 @@ interface MessagePushPayload {
   selfId?: string
   atUsers?: string[]
   content: string | null
+  /**
+   * 归一化消息类型。插件侧无需再靠 imagePath/emojiUrl/voicePath 谁非空来反推类型。
+   * 与 OneBot 出站（47/49 统一标 sticker）和 HTTP API ChatLab 类型保持同一口径：
+   * - sticker: 微信 localType=47，或 49 复合消息内含表情（emojiCdnUrl 非空）
+   * - image:   localType=3 的普通图片
+   * - forward: 合并转发；quote: 引用回复；其他见 ResolvedMessageType
+   */
+  messageType: ResolvedMessageType
   timestamp: number
   imagePath?: string
   imagePathHd?: string
   imageBaseMd5?: string
   imageDecryptFailed?: boolean
   senderIdAlias?: string
+  /** 微信 CDN 原始地址（兜底用，可能受防盗链/时效影响） */
   emojiUrl?: string
+  /** 本地已落盘的表情文件绝对路径（同机可直读；容器内路径） */
+  emojiPath?: string
+  /** 表情 md5，供下游按内容去重缓存 */
+  emojiMd5?: string
   videoPath?: string
   videoMd5?: string
   videoPosterPath?: string
@@ -1025,6 +1055,11 @@ class MessagePushService {
     const imagePath = await this.resolveAndDecryptImage(message, sessionId)
     const imageDecryptFailed = Number(message.localType || 0) === 3 && !imagePath
     const emojiUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() || undefined : undefined
+    // 表情补本地落盘：微信侧已有的 emojiLocalPath 直接复用；没有则按 md5/CDN 下载一次。
+    // 这样下游（AstrBot 适配器等）可以像图片一样走本地文件，不再被微信 CDN 的
+    // 防盗链与时效绑定。下载失败不影响推送，emojiUrl 仍在，行为退化为原状。
+    const emojiPath = await this.resolveEmojiLocalPath(message)
+    const emojiMd5 = message.emojiMd5 ? String(message.emojiMd5).trim() || undefined : undefined
     const video = await this.resolveInboundVideo(message)
     const voice = await this.resolveInboundVoice(message, sessionId)
     const forward = await this.resolveInboundForward(message, createTime)
@@ -1097,12 +1132,15 @@ class MessagePushService {
         imageDecryptFailed,
         senderIdAlias,
         emojiUrl,
+        emojiPath,
+        emojiMd5,
         quoted,
         ...(video ?? {}),
         ...(voice ?? {}),
         ...(forward ?? {}),
         // content 恒为渲染全文（§3.8-3 兼容规则：旧适配器 Plain(content) 即可分析）
-        content: forward?.forwardText ?? content
+        content: forward?.forwardText ?? content,
+        messageType: this.resolveMessageType(message)
       }
     }
 
@@ -1129,11 +1167,14 @@ class MessagePushService {
       imageDecryptFailed,
       senderIdAlias,
       emojiUrl,
+      emojiPath,
+      emojiMd5,
       quoted,
       ...(video ?? {}),
       ...(voice ?? {}),
       ...(forward ?? {}),
-      content: forward?.forwardText ?? content
+      content: forward?.forwardText ?? content,
+      messageType: this.resolveMessageType(message)
     }
   }
 
@@ -1710,6 +1751,79 @@ class MessagePushService {
         lastTimestamp: createTime
       })
     }
+  }
+
+  /**
+   * 表情本地落盘解析。优先级：
+   * 1. WeFlow 侧已缓存（emojiLocalPath / 本地 Emojis 目录命中）→ 直接用
+   * 2. 有 CDN 地址 → 调 chatService.downloadEmoji 下载并缓存（带体积上限与淘汰）
+   * 3. 都失败 → undefined，推送仍带 emojiUrl，下游行为退化为原状
+   * 下载超时/异常一律吞掉：表情拿不到不该阻断整条消息推送。
+   */
+  private async resolveEmojiLocalPath(message: Message): Promise<string | undefined> {
+    if (!message.emojiCdnUrl && !message.emojiMd5 && !message.emojiLocalPath) return undefined
+    const existing = message.emojiLocalPath ? String(message.emojiLocalPath).trim() : ''
+    if (existing && existsSync(existing)) return existing
+    const cdnUrl = message.emojiCdnUrl ? String(message.emojiCdnUrl).trim() : ''
+    if (!cdnUrl) return undefined
+    try {
+      const r = await chatService.downloadEmoji(cdnUrl, message.emojiMd5 ? String(message.emojiMd5) : undefined)
+      if (r.success && r.localPath && existsSync(r.localPath)) return r.localPath
+    } catch {}
+    return undefined
+  }
+
+  /**
+   * 归一化消息类型。判定顺序刻意与 getMessageDisplayContent 的 switch 保持一致，
+   * 避免同一消息在 content 占位符与 messageType 上给出互相矛盾的结论。
+   * 表情优先于图片：resolveInboundImage 对非 3 类型返回 undefined，
+   * 但 49 复合消息可能同时带 emojiCdnUrl 与其它载荷，必须先判表情。
+   */
+  private resolveMessageType(message: Message): ResolvedMessageType {
+    const lt = Number(message.localType || 0)
+    if (lt === 47) return 'sticker'
+    if (lt === 49) {
+      if (message.emojiCdnUrl) return 'sticker'
+      // 引用回复在微信里是 49 + xmlType=57，必须在这里识别。
+      // 49 分支是独立 return，不识别就会落到下面的 other，永远走不到 quotedContent 兜底。
+      const kind = this.resolveType49Kind(message)
+      if (kind === 'quote') return 'quote'
+      if (kind === 'forward') return 'forward'
+      if (kind === 'file') return 'file'
+      if (kind === 'link') return 'link'
+      return 'other'
+    }
+    if (lt === 1) return this.isReplyMessage(message) ? 'quote' : 'text'
+    if (lt === 3) return 'image'
+    if (lt === 34) return 'voice'
+    if (lt === 43) return 'video'
+    if (lt === 42) return 'card'
+    if (lt === 48) return 'location'
+    if (lt === 50) return 'call'
+    if (lt === 10000 || lt === 10002) return 'system'
+    if (Number(message.quotedContent || message.quotedSvrid)) return 'quote'
+    return 'other'
+  }
+
+  /** 引用回复判定：本服务没有 quoteInfo 通道，直接用 parse 层已解析出的引用载荷 */
+  private isReplyMessage(message: Message): boolean {
+    return Boolean(String(message.quotedContent || '').trim() || String(message.quotedSvrid || '').trim())
+  }
+
+  /** 49 复合消息粗分类，仅用于 messageType；详细解析仍走内容渲染链路 */
+  private resolveType49Kind(message: Message): 'forward' | 'file' | 'link' | 'quote' | 'other' {
+    if (message.forwardItems && message.forwardItems.length > 0) return 'forward'
+    const xml = String(message.rawContent || '')
+    const subtype = /<type>\s*(\d+)\s*<\/type>/.exec(xml)
+    const t = subtype ? subtype[1] : ''
+    // 57 = 引用消息（与 httpService.mapType49 的 case '57' 对齐）
+    if (t === '57') return 'quote'
+    if (t === '19') return 'forward'
+    if (t === '6') return 'file'
+    if (t === '5' || t === '49' || t === '33' || t === '36') return 'link'
+    if (message.linkUrl || message.linkTitle) return 'link'
+    if (message.fileName) return 'file'
+    return 'other'
   }
 
   private getMessageDisplayContent(message: Message): string | null {

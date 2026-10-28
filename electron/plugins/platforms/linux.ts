@@ -12,6 +12,13 @@ const log = (msg: string) => console.log(`[LinuxSender] ${msg}`)
 const warn = (msg: string) => console.warn(`[LinuxSender] ${msg}`)
 
 const WECHAT_WINDOW_NAMES = ['Weixin', 'WeChat', 'wechat', '微信', 'WeChatAppEx', 'WMPF']
+// WM_CLASS 恒为纯 ASCII，不随界面语言变化：界面切成中文后 Qt 只写 _NET_WM_NAME（UTF-8）而留空 WM_NAME，
+// 而 xdotool search --name 只读 WM_NAME，主窗口便彻底搜不到，故按 class 查找优先于按名字查找。
+const WECHAT_CLASS_NAMES = ['wechat', 'WeChat', 'WMPF', 'Weixin']
+// 微信除主窗口外还会建若干不可见辅助窗（"Qt Selection Owner for wechat" 剪贴板选区守护窗、1×1 隐藏窗等），
+// 它们的名字同样含 wechat 且常排在 search 结果首位，直接取首个会让后续激活必然 BadMatch。
+// 实测这些辅助窗最大 20×20，用尺寸下限即可可靠排除。
+const MIN_WECHAT_WINDOW_SIZE = 100
 
 const DISPLAY_ENV = { ...process.env, DISPLAY: process.env.DISPLAY || ':99', PATH: '/usr/bin:/usr/sbin:/bin:/sbin:/usr/local/bin:' + (process.env.PATH || '') }
 
@@ -197,6 +204,46 @@ async function run(cmd: string, timeout = 5000): Promise<string> {
     if (e.stderr) warn(`  stderr: ${e.stderr?.substring(0, 300)}`)
     return ''
   }
+}
+
+interface WindowGeometry {
+  width: number
+  height: number
+}
+
+async function getWindowGeometry(wid: string): Promise<WindowGeometry | null> {
+  const out = await run(`xdotool getwindowgeometry --shell "${wid}"`)
+  const w = out.match(/^WIDTH=(\d+)$/m)
+  const h = out.match(/^HEIGHT=(\d+)$/m)
+  if (!w || !h) return null
+  return { width: parseInt(w[1], 10), height: parseInt(h[1], 10) }
+}
+
+async function isViewableWindow(wid: string): Promise<boolean> {
+  const out = await run(`xwininfo -id "${wid}"`)
+  return /Map State:\s*IsViewable/.test(out)
+}
+
+/**
+ * 从候选 wid 中挑出真正的微信主窗口。
+ * 不能取 search 结果的第一个：辅助窗与主窗口同属 wechat 进程，且辅助窗通常排在更前面。
+ * 判定：已映射可见 + 尺寸达到主窗口量级；多个候选时取面积最大者。
+ */
+async function pickWeChatMainWindow(wids: string[]): Promise<string> {
+  let best = ''
+  let bestArea = 0
+  for (const wid of wids) {
+    if (!wid) continue
+    const geo = await getWindowGeometry(wid)
+    if (!geo || geo.width < MIN_WECHAT_WINDOW_SIZE || geo.height < MIN_WECHAT_WINDOW_SIZE) continue
+    if (!await isViewableWindow(wid)) continue
+    const area = geo.width * geo.height
+    if (area > bestArea) {
+      bestArea = area
+      best = wid
+    }
+  }
+  return best
 }
 
 /**
@@ -618,11 +665,17 @@ export class LinuxSender implements IPlatformSender {
 
   private async findWeChatWindow(): Promise<string> {
     if (this.cachedWid) {
-      const alive = await run(`xdotool getwindowgeometry "${this.cachedWid}"`)
-      if (alive && !alive.includes('failed') && !alive.includes('error')) {
+      // 只验几何存在是不够的：被误缓存的辅助窗同样有合法几何，会一直命中错误窗口。
+      // 缓存命中也要复核尺寸与可见性，确保缓存不会把错误结果固化下来。
+      const geo = await getWindowGeometry(this.cachedWid)
+      const usable = geo
+        && geo.width >= MIN_WECHAT_WINDOW_SIZE
+        && geo.height >= MIN_WECHAT_WINDOW_SIZE
+        && await isViewableWindow(this.cachedWid)
+      if (usable) {
         return this.cachedWid
       }
-      log(`Cached window ${this.cachedWid} no longer valid, re-searching...`)
+      log(`Cached window ${this.cachedWid} no longer usable, re-searching...`)
       this.cachedWid = ''
     }
 
@@ -636,19 +689,9 @@ export class LinuxSender implements IPlatformSender {
       return ''
     }
 
-    for (const name of WECHAT_WINDOW_NAMES) {
-      const result = await run(`xdotool search --name "${name}"`)
-      const wid = result.split('\n').filter(Boolean)[0] || ''
-      if (wid) {
-        log(`Found window by name "${name}": ${wid}`)
-        this.cachedWid = wid
-        return wid
-      }
-    }
-
-    for (const cls of ['wechat', 'WeChat', 'WMPF', 'Weixin']) {
+    for (const cls of WECHAT_CLASS_NAMES) {
       const result = await run(`xdotool search --class "${cls}"`)
-      const wid = result.split('\n').filter(Boolean)[0] || ''
+      const wid = await pickWeChatMainWindow(result.split('\n').filter(Boolean))
       if (wid) {
         log(`Found window by class "${cls}": ${wid}`)
         this.cachedWid = wid
@@ -656,9 +699,20 @@ export class LinuxSender implements IPlatformSender {
       }
     }
 
+    // 回退：按窗口名查找，兼容未设置 WM_CLASS 的特殊构建
+    for (const name of WECHAT_WINDOW_NAMES) {
+      const result = await run(`xdotool search --name "${name}"`)
+      const wid = await pickWeChatMainWindow(result.split('\n').filter(Boolean))
+      if (wid) {
+        log(`Found window by name "${name}": ${wid}`)
+        this.cachedWid = wid
+        return wid
+      }
+    }
+
     const pid = await run('pidof wechat')
     if (pid) {
-      warn(`WeChat process running (PID: ${pid}) but no window found`)
+      warn(`WeChat process running (PID: ${pid}) but no usable window found`)
     } else {
       warn('WeChat process not found')
     }
@@ -670,6 +724,13 @@ export class LinuxSender implements IPlatformSender {
     const active = await run(`xdotool getactivewindow`)
     if (active === wid) {
       return true
+    }
+
+    // 未映射窗口无法获得输入焦点：windowactivate --sync 会一直阻塞到 5s 超时并回 BadMatch，
+    // 提前拦下并指明原因，避免把一次可定位的误判退化成一串 X 协议错误日志。
+    if (!await isViewableWindow(wid)) {
+      warn(`Window ${wid} is not viewable, activation skipped (likely a Qt helper window)`)
+      return false
     }
 
     log(`Activating window ${wid}...`)

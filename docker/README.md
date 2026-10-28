@@ -4,7 +4,7 @@
   <img src="docker/webui/public/icon.png" alt="FlowBOT" width="60" style="vertical-align: middle;" />&nbsp;&nbsp;<i>We Chat with AI Bot.</i>
 </p>
 
-FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础之上，增加了[OneBot v11](https://github.com/botuniverse/onebot-11) 协议，旨在为 `WeFlow` Linux 客户端增加聊天协议转换，并提供 WebSocket/HTTP 支持及 WebUI 管理。 
+FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础之上，增加了[OneBot v11](https://github.com/botuniverse/onebot-11) 协议和 [FlowBot适配器](https://github.com/SteveBaka/astrbot_plugin_flowbot_adapter)的原生支持，旨在为 `WeFlow` Linux 客户端增加聊天协议转换，并提供 WebSocket/HTTP 支持及 WebUI 管理。 
 
 关于[WeFlow](https://github.com/hicccc77/WeFlow)的使用说明敬请移步至 WeFlow 的仓库，并且可以的话为原仓库点亮Star。
 <p align="center">
@@ -20,10 +20,10 @@ FlowBot 是一个基于 [WeFlow](https://github.com/hicccc77/WeFlow) 的基础�
 
 镜像内置 Linux Weixin v4.1.1.8  + WeFlow v4.5.1 (支持消息发送的修改版本) + noVNC 力求做到开箱即用的体验。
 
-> ⚠️请不要在**任何互联网、社交平台**提到本项目以及相关延伸项目，否则即时停止项目维护和部署。<br>
-> ⚠️免责声明：FlowBot 旨在提供了一个能够让用户**学习并研究**能够与AI机器人进行聊天的协议，并且所有内容均在本地和对应部署的项目进行，开发者不收集任何隐私和安全信息。<br>
-> **不允许用于不正当以及非法用途**，并且请在使用时注意平台的用户协议和服务条款。请再三斟酌之后再思考是否使用，风险自负。
-
+> ⚠️请不要在**任何互联网、社交平台**提到本项目以及相关延伸项目，否则即时停止项目维护和部署。并且为了注意账号安全，请在**可靠的个人设备**进行内部学习，请不要暴露**任何端口**至**互联网**。<br>
+> ⚠️免责声明：FlowBot 旨在提供了一个能够让用户**学习并研究**能够与AI机器人进行聊天的协议，并且所有内容均在本地和对应部署的项目进行，开发者和项目不收集和上传任何隐私和安全信息。<br>
+> ⚠️**不允许用于不正当以及非法用途**，并且请在使用时注意平台的用户协议和服务条款。请再三斟酌之后再思考是否使用，风险自负。<br>
+> ⚠️本项目的**部分功能**为使用过程中遇到的问题而*额外开发*的，如有问题请提供**遇到问题**的**日志片段**提交 `Github issue` 或在聊天群进行交流。
 
 ## 核心功能
 
@@ -82,7 +82,7 @@ docker run -d --name FlowBOT \
 ### 2. 查看日志和密码
 
 ```bash
-# 查看容器日志（含 WebUI 登录密码）
+# 查看容器日志（含 WebUI 首次登录密码）
 docker logs FlowBOT 2>&1 | grep "WebUI Login Password"
 
 # 查看完整日志
