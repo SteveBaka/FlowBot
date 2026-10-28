@@ -191,7 +191,6 @@ function WelcomePage({ standalone = false }: WelcomePageProps) {
         window.electronAPI.notification?.show({
           title: 'WeFlow 准备就绪',
           content: '现在可以登录微信了',
-          avatarUrl: './logo.png',
           sessionId: 'weflow-system'
         })
       }

@@ -18,7 +18,7 @@
 }
 
 .account-manage-btn.is-launching svg {
-  animation: account-novnc-pulse 0.8s cubic-bezier(0.34, 1.56, 0.64, 1) both;
+  animation: account-novnc-pulse 0.8s var(--ease-standard) both;
 }
 
 @keyframes account-novnc-pulse {
@@ -211,7 +211,11 @@
 }
 
 .novnc-settings-card:hover {
-  transform: none;
+  transform: translateY(-2px);
+  box-shadow:
+    var(--shadow-hover),
+    inset 0 1px 0 var(--glass-inner-highlight-strong),
+    0 0 26px var(--glass-edge-glow-strong) !important;
 }
 
 .novnc-settings-hero {
@@ -303,6 +307,16 @@
   border-radius: 12px;
   background: var(--bg-input);
   text-align: center;
+  transition: transform 0.28s var(--ease-standard),
+              box-shadow 0.28s var(--ease-standard),
+              border-color 0.28s var(--ease-standard),
+              background 0.28s var(--ease-standard);
+}
+.novnc-meta-item:hover {
+  transform: translateY(-2px);
+  border-color: var(--glass-border-accent) !important;
+  box-shadow: 0 4px 16px var(--accent-glow) !important;
+  background: var(--bg-hover) !important;
 }
 
 .novnc-meta-item span {
@@ -605,7 +619,7 @@
 }
 
 .app-shell:not(.is-login-overlay) .home-reveal-card {
-  animation: home-card-reveal 0.52s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation: home-card-reveal 0.52s var(--ease-standard) backwards;
 }
 
 .app-shell:not(.is-login-overlay) .home-reveal-health {
@@ -673,7 +687,7 @@
 
 .settings-page-inner > .settings-security-shell {
   grid-column: 1 / -1;
-  grid-row: 2;
+  grid-row: 3;
   min-width: 0;
 }
 
@@ -690,7 +704,7 @@
 
 .settings-page-inner > .settings-novnc-inline {
   grid-column: 1;
-  grid-row: 3;
+  grid-row: 2;
 }
 
 .settings-page-inner > .settings-media-card {
@@ -700,7 +714,7 @@
 
 .settings-page-inner > .settings-command-shell {
   grid-column: 2;
-  grid-row: 3;
+  grid-row: 2;
   min-width: 0;
 }
 
@@ -713,6 +727,35 @@
   position: relative;
   --settings-editor-height: 430px;
   transition: height 0.42s var(--motion-emphasized-decelerate);
+}
+
+/* 顶部两卡（虚拟桌面 / 状态信息命令）同高：
+   grid 行默认 stretch，再让 shell 与内部卡片用 flex 一路撑满；
+   不用 height:100%（grid item 上百分比高度参照不确定，实测无效） */
+.settings-page-inner > .settings-novnc-inline {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+.settings-page-inner > .settings-command-shell {
+  align-self: stretch;
+  display: flex;
+  flex-direction: column;
+}
+.settings-page-inner > .settings-command-shell > .settings-command-card {
+  flex: 1 1 auto;
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+}
+/* 状态命令卡内部表单行在多余高度下均匀分布，视觉上与左卡齐平 */
+.settings-page-inner > .settings-command-shell > .settings-command-card > .form-row {
+  flex: 0 0 auto;
+}
+.settings-page-inner > .settings-command-shell > .settings-command-card > .form-row:last-of-type {
+  margin-bottom: 0;
 }
 
 .settings-security-shell.is-closing,

@@ -58,15 +58,12 @@ if [ -f "$LOGDIR/container.log" ]; then
   sed -i -E 's/(WebUI ([Ii]nitial|[Mm]igration|[Ll]ogin) Password:).*/\1 [REDACTED]/g' "$LOGDIR/container.log" 2>/dev/null || true
 fi
 
-# Redirect all output to log files for WebUI access
-# Add timestamp to lines without one, normalize Logger ISO timestamps
-exec > >(while IFS= read -r line; do
-  if echo "$line" | grep -qE '^\[[0-9]{2}-[0-9]{2} '; then
-    echo "$line" | sed 's/^\[20[0-9][0-9]-\([0-9][0-9]\)-\([0-9][0-9]\)T\([0-9][0-9]\):\([0-9][0-9]\):\([0-9][0-9]\)[^]]*]/[\1-\2 \3:\4:\5]/'
-  else
-    echo "[$(date '+%m-%d %H:%M:%S')] $line"
-  fi
-done | tee -a "$LOGDIR/container.log") 2>&1
+# Redirect all output to log files for WebUI access.
+# 每条日志在落盘瞬间就打上级别标签：docker logs 直读 stdout、WebUI 读同一个
+# tee 文件，两端看到的是同一份权威级别，不再各自靠关键词猜。
+# -W interactive 不可省略：mawk 默认整块缓冲，少了它 docker logs 要等缓冲区
+# 写满才吐字，现场排障时表现为日志"延迟几分钟突然刷一大片"。
+exec > >(awk -W interactive -f /opt/logfmt.awk | tee -a "$LOGDIR/container.log") 2>&1
 
 log INFO "Starting FlowBOT + OneBot container..."
 log INFO "Logs: $LOGDIR/container.log"
@@ -147,9 +144,15 @@ else
 fi
 
 # Start WeChat
+#
+# Do not export LD_LIBRARY_PATH=/opt/wechat globally. The root directory contains
+# the main WeChat runtime (owl::v8), while RadiumWMPF/runtime contains the
+# WeChatAppEx runtime (owl::v7). A global root path makes the child process load
+# the wrong libowl.so and fail with a missing owl::v7 typeinfo symbol. Both
+# binaries already carry their own RPATH/RUNPATH, so let the loader resolve the
+# correct runtime directory locally.
 log INFO "Starting WeChat..."
 sleep 2
-export LD_LIBRARY_PATH="/opt/wechat:${LD_LIBRARY_PATH}"
 DISPLAY=:99 /opt/wechat/wechat &
 WECHAT_PID=$!
 

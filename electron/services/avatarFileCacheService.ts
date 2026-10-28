@@ -1,7 +1,8 @@
 import https from "https";
 import http, { IncomingMessage } from "http";
 import { promises as fs } from "fs";
-import { join } from "path";
+import { isAbsolute, join } from "path";
+import { fileURLToPath } from "url";
 import { ConfigService } from "./config";
 
 // 头像文件缓存服务 - 复用项目已有的缓存目录结构
@@ -162,28 +163,53 @@ export class AvatarFileCacheService {
     });
   }
 
+  private async resolveLocalAvatar(pathOrUrl: string): Promise<string | null> {
+    let filePath: string;
+    try {
+      filePath = pathOrUrl.startsWith("file:")
+        ? fileURLToPath(pathOrUrl)
+        : pathOrUrl;
+    } catch {
+      return null;
+    }
+
+    if (!isAbsolute(filePath)) return null;
+
+    try {
+      const stat = await fs.stat(filePath);
+      return stat.isFile() ? filePath : null;
+    } catch {
+      return null;
+    }
+  }
+
   /**
    * 获取头像本地文件路径，如果需要会下载
    * 同一URL并发调用会复用同一个下载任务
    */
-  async getAvatarPath(url: string): Promise<string | null> {
-    if (!url) return null;
+  async getAvatarPath(source: string): Promise<string | null> {
+    const normalizedSource = source.trim();
+    if (!normalizedSource) return null;
+
+    if (!/^https?:\/\//i.test(normalizedSource)) {
+      return this.resolveLocalAvatar(normalizedSource);
+    }
 
     // 检查是否有正在进行的下载
-    const pending = this.pendingDownloads.get(url);
+    const pending = this.pendingDownloads.get(normalizedSource);
     if (pending) {
       return pending;
     }
 
     // 发起新下载
-    const downloadPromise = this.downloadAvatar(url);
-    this.pendingDownloads.set(url, downloadPromise);
+    const downloadPromise = this.downloadAvatar(normalizedSource);
+    this.pendingDownloads.set(normalizedSource, downloadPromise);
 
     try {
       const result = await downloadPromise;
       return result;
     } finally {
-      this.pendingDownloads.delete(url);
+      this.pendingDownloads.delete(normalizedSource);
     }
   }
 
