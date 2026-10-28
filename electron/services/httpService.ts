@@ -2533,6 +2533,10 @@ class HttpService {
    * 映射 Type 49 子类型
    */
   private mapType49(msg: Message): number {
+    // 49 复合消息内可能携带表情（emojiCdnUrl 非空），须先于 xmlType 判定，
+    // 否则会落到 LINK/OTHER，与 OneBot 出站层把 47/49 统一标 sticker 的口径不一致。
+    if (msg.emojiCdnUrl) return ChatLabType.EMOJI
+
     const xmlType = this.resolveType49Subtype(msg)
 
     switch (xmlType) {

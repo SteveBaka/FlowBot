@@ -383,6 +383,18 @@ interface MyFootprintData {
 // 表情包缓存
 const emojiCache: Map<string, string> = new Map()
 const emojiDownloading: Map<string, Promise<string | null>> = new Map()
+
+// 表情缓存上限：表情文件普遍 20-300KB，超出时按 mtime 最旧淘汰。
+// 与头像缓存（avatar-files，300 文件）同量级，避免长期运行把磁盘吃满。
+const EMOJI_CACHE_MAX_FILES = 600
+// 单文件上限：超过视为异常响应（可能是 HTML 错误页），不入缓存
+const EMOJI_MAX_BYTES = 4 * 1024 * 1024
+// 微信 CDN 对无 Referer 的直连可能返回占位图，带上来源头更接近正常客户端
+const EMOJI_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Referer': 'https://wx.qq.com/',
+  'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
+}
 const FRIEND_EXCLUDE_USERNAMES = new Set(['medianote', 'floatbottle', 'qmessage', 'qqmail', 'fmessage'])
 
 class ChatService {
@@ -7847,7 +7859,14 @@ class ChatService {
     if (cachePath) {
       return join(cachePath, 'Emojis')
     }
-    // 回退到默认目录
+    // 回退到持久化缓存根：容器里 /root/.config 是挂载卷，
+    // 而 app.getPath('documents') 落在容器可写层，重建即丢。
+    // 与头像缓存（cache/avatar-files）同根，便于统一清理与观察体积。
+    const persistentRoot = join(app.getPath('home'), '.config', 'weflow', 'cache')
+    if (existsSync(persistentRoot)) {
+      return join(persistentRoot, 'emojis')
+    }
+    // 最后兜底：非容器/无持久根时沿用 documents
     const documentsPath = app.getPath('documents')
     return join(documentsPath, 'WeFlow', 'Emojis')
   }
@@ -7999,11 +8018,41 @@ class ChatService {
   /**
    * 执行表情包下载
    */
+  /**
+   * 表情缓存按文件数上限淘汰，超出时删 mtime 最旧的。
+   * 与头像缓存同策略：只按数量控制，表情体积差异大但不值得引入字节级配额。
+   */
+  private async evictEmojiCacheIfNeeded(cacheDir: string): Promise<void> {
+    try {
+      const entries = await fsPromises.readdir(cacheDir)
+      const files: Array<{ name: string; mtime: number }> = []
+      for (const name of entries) {
+        try {
+          const st = await fsPromises.stat(join(cacheDir, name))
+          if (st.isFile()) files.push({ name, mtime: st.mtimeMs })
+        } catch {}
+      }
+      let over = files.length - EMOJI_CACHE_MAX_FILES
+      if (over <= 0) return
+      files.sort((a, b) => a.mtime - b.mtime)
+      for (const f of files) {
+        if (over-- <= 0) break
+        try {
+          await fsPromises.unlink(join(cacheDir, f.name))
+          // 同步清掉内存映射，否则下次会拿到已删除的路径
+          for (const [k, v] of emojiCache.entries()) {
+            if (v === join(cacheDir, f.name)) { emojiCache.delete(k); break }
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
   private doDownloadEmoji(url: string, cacheKey: string, cacheDir: string): Promise<string | null> {
     return new Promise((resolve) => {
       const protocol = url.startsWith('https') ? https : http
 
-      const request = protocol.get(url, (response) => {
+      const request = protocol.get(url, { headers: EMOJI_FETCH_HEADERS }, (response) => {
         // 处理重定向
         if (response.statusCode === 301 || response.statusCode === 302) {
           const redirectUrl = response.headers.location
@@ -8019,8 +8068,22 @@ class ChatService {
         }
 
         const chunks: Buffer[] = []
-        response.on('data', (chunk) => chunks.push(chunk))
+        let total = 0
+        let aborted = false
+        response.on('data', (chunk) => {
+          if (aborted) return
+          total += chunk.length
+          // 超限立刻断开：既防止把大盘内存吃满，也避免落一个残缺文件
+          if (total > EMOJI_MAX_BYTES) {
+            aborted = true
+            try { request.destroy() } catch {}
+            resolve(null)
+            return
+          }
+          chunks.push(chunk)
+        })
         response.on('end', () => {
+          if (aborted) return
           const buffer = Buffer.concat(chunks)
           if (buffer.length === 0) {
             resolve(null)
@@ -8033,6 +8096,7 @@ class ChatService {
 
           try {
             writeFileSync(filePath, buffer)
+            void this.evictEmojiCacheIfNeeded(cacheDir)
             resolve(filePath)
           } catch {
             resolve(null)

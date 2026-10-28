@@ -2655,6 +2655,16 @@ function normalizePushPayload(p) {
     const token = registerMediaPath(p.voicePath)
     if (token) voiceUrl = getPushImageBaseUrl() + '/api/media?token=' + token
   }
+  // 表情直链（P0）：与 image/video/voice 同构，自建 token 读本地文件，
+  // 不再让下游被微信 CDN 的防盗链与时效绑定。emojiPath 缺失时退回原始 CDN 地址。
+  let emojiUrl
+  let emojiCdnUrl = p.emojiUrl ? String(p.emojiUrl) : undefined
+  if (p.emojiPath) {
+    const token = registerImagePath(p.emojiPath, 60 * 60 * 1000)
+    if (token) emojiUrl = getPushImageBaseUrl() + '/api/image?token=' + token
+  }
+  if (!emojiUrl) emojiUrl = emojiCdnUrl
+
   // 自定义 wxid：私聊会话身份用微信号 alias
   const customWxid = isGroup ? null : getCustomWxid(realSessionId)
   const sessionId = customWxid || realSessionId
@@ -2671,13 +2681,20 @@ function normalizePushPayload(p) {
       sender_id: senderId,
       sender_name: p.senderName || p.senderCard || p.sourceName || p.groupName || p.senderId || undefined,
       type: type,
+      // 归一化消息类型（5031 源侧 resolveMessageType 产出）。与 type 并存：
+      // type 由本函数按字段反推、取值偏窄；message_type 是源侧权威判定，
+      // 能区分 sticker/sticker 与 sticker/image 的差异，且对 49 复合消息更准确。
+      message_type: p.messageType || undefined,
       content: String(p.content || p.forwardText || ''),
       timestamp: Number(p.timestamp || 0),
       avatar_url: p.avatarUrl ? String(p.avatarUrl) : undefined,
       group_avatar_url: p.groupAvatarUrl ? String(p.groupAvatarUrl) : undefined,
       image_path: p.imagePath || undefined,
       image_url: imageUrl,
-      emoji_url: p.emojiUrl || undefined,
+      emoji_url: emojiUrl,
+      emoji_cdn_url: emojiCdnUrl,
+      emoji_path: p.emojiPath || undefined,
+      emoji_md5: p.emojiMd5 || undefined,
       group_name: isGroup ? (p.groupName || undefined) : undefined,
       video_path: p.videoPath || undefined,
       video_md5: p.videoMd5 || undefined,

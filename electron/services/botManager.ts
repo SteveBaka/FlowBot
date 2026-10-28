@@ -782,7 +782,13 @@ export function broadcastToAllBots(event: string, data: any, selfWxid?: string, 
         } else if (data.imagePath) {
           messageSegments.push({ type: 'image', data: { file: `file://${data.imagePath}` } })
         } else if (data.emojiUrl) {
-          messageSegments.push({ type: 'image', data: { file: data.emojiUrl } })
+          // 微信 localType=47（动画表情）与 49 复合消息内含表情都会走到这里。
+          // resolveInboundImage 对非 3 类型直接返回 undefined，故此分支不会与 imagePath 并存。
+          // sub_type/summary 是段内扩展字段：不识别它们的消费方仍按标准 image 段解析，行为不变。
+          messageSegments.push({
+            type: 'image',
+            data: { file: data.emojiUrl, sub_type: 'sticker', summary: '[表情]' }
+          })
         }
 
         // 入站视频段（ADAPTER-MEDIA-CONTRACT §3）：视频无 base64 可行形态，
