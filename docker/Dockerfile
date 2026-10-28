@@ -59,12 +59,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install WeChat for Linux
-# 版本：4.1.13.23（SteveBaka/something-backup 备份包，GitHub Actions 可稳定拉取）。
-# 2026-10-01 在独立容器完成兼容性验证并通过：GUI 启动/登录、DB 密钥 hook
+# 版本：4.1.1.8
 # （com.Tencent.WCDB.Config.Cipher）、UI 自动化发送（xdotool+xclip）、
 # 图片密钥管线（kvcomm→xorKey/aesKey）、hdDat 懒下载时序。
 # 如需覆盖某次构建可用 --build-arg WECHAT_URL=<url>。
-ARG WECHAT_URL=https://github.com/SteveBaka/something-backup/releases/download/4.1.13.23/somechat-Linux_x86_64-4.1.13.23.deb
+ARG WECHAT_URL=https://github.com/SteveBaka/something-backup/releases/download/4.1.1.8/somechat-Linux_x86_64-4.1.1.8.deb
 RUN wget -q -O /tmp/wechat.deb "${WECHAT_URL}" \
     && dpkg -i /tmp/wechat.deb || apt-get install -y --no-install-recommends -f \
     && rm -f /tmp/wechat.deb \
@@ -118,6 +117,7 @@ COPY docker/VERSION /opt/weflow/VERSION
 
 # Copy startup script
 COPY docker/start.sh /opt/start.sh
+COPY docker/logfmt.awk /opt/logfmt.awk
 COPY docker/pinyin.py /opt/pinyin.py
 RUN chmod +x /opt/start.sh
 

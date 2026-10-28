@@ -1,0 +1,561 @@
+/* ═══════════════════════════════════════════════════════════════════════════
+   FlowBOT 登录页（DSM 风格）
+   在 style.css 之后加载：这里只负责登录页，深浅色分别使用 --accent 主题色。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.login-page {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 40px 7vw;
+  background: url('background.jpg') center/cover no-repeat fixed;
+  overflow: hidden;
+  z-index: 10000;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: opacity 0.48s var(--ease-standard);
+}
+
+.login-page input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* 轻微暗角：保证卡片文字在任意壁纸上都清晰，不做重模糊 */
+.login-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(120% 100% at 82% 50%, rgba(6, 8, 16, 0) 45%, rgba(6, 8, 16, 0.3) 100%);
+  pointer-events: none;
+  transition: opacity 0.5s ease;
+}
+
+:root[data-theme="light"] .login-page::before {
+  background: radial-gradient(120% 100% at 82% 50%, rgba(255, 255, 255, 0) 45%, rgba(255, 255, 255, 0.32) 100%);
+}
+
+/* 卡片：右侧悬浮的毛玻璃面板，圆形按钮要越出右下角，所以不裁剪 */
+.login-page .login-card {
+  position: relative;
+  z-index: 1;
+  width: min(430px, 100%);
+  min-height: 540px;
+  margin: 0;
+  padding: 72px 44px;
+  display: flex;
+  flex-direction: column;
+  border-radius: 30px;
+  text-align: left;
+  overflow: visible;
+  background: var(--bg-card) !important;
+  border: 1px solid var(--glass-border-light) !important;
+  backdrop-filter: var(--glass-blur);
+  -webkit-backdrop-filter: var(--glass-blur);
+  box-shadow: 0 30px 70px -18px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(255, 255, 255, 0.14) !important;
+  transition: opacity 0.5s ease, transform 0.55s var(--ease-exit);
+  animation: login-card-in 0.55s var(--ease-standard);
+}
+
+.login-page.is-first-change .login-card {
+  min-height: 540px;
+  padding: 34px 44px 72px;
+  transition: min-height 0.55s var(--ease-enter), background 0.4s ease, border-color 0.4s ease;
+}
+
+.login-card-content {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.login-card-content-clip {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  overflow: hidden;
+  will-change: transform;
+}
+
+.login-mode-enter-active,
+.login-mode-leave-active {
+  transition: opacity 0.36s ease, transform 0.58s var(--ease-enter);
+}
+
+.login-mode-enter-from {
+  opacity: 0;
+  transform: translateX(100%);
+}
+
+.login-mode-leave-to {
+  opacity: 0;
+  transform: translateX(-100%);
+}
+
+:root[data-theme="light"] .login-page .login-card {
+  background: var(--bg-card) !important;
+  border-color: rgba(15, 23, 42, 0.1) !important;
+  box-shadow: 0 30px 70px -22px rgba(34, 44, 76, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.9) !important;
+}
+
+.login-brand {
+  margin: 56px 0 0;
+  font-size: 34px;
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  color: var(--accent);
+  text-shadow: 0 2px 18px var(--accent-glow-strong);
+}
+
+/* 密码框：更圆润的矩形 + 毛玻璃底（用 .login-page 提高优先级，覆盖通用 input 样式） */
+.login-page .login-input {
+  width: 100%;
+  max-width: none;
+  height: auto;
+  margin-top: 82px;
+  padding: 15px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.22) !important;
+  border-radius: 22px !important;
+  background: rgba(255, 255, 255, 0.07) !important;
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  letter-spacing: 6px;
+  box-shadow: none !important;
+  transition: border-color 0.25s, box-shadow 0.25s, background 0.25s;
+}
+
+.login-page .login-input::placeholder {
+  color: var(--text-muted);
+  letter-spacing: normal;
+  opacity: 0.7;
+}
+
+.login-page .login-input:focus {
+  outline: none;
+  border-color: var(--accent) !important;
+  background: rgba(255, 255, 255, 0.1) !important;
+  box-shadow: 0 0 0 4px var(--accent-glow) !important;
+}
+
+:root[data-theme="light"] .login-page .login-input {
+  background: rgba(255, 255, 255, 0.8) !important;
+  border-color: rgba(15, 23, 42, 0.12) !important;
+  box-shadow: none !important;
+}
+
+:root[data-theme="light"] .login-page .login-input:focus {
+  background: #fff !important;
+}
+
+/* 错误提示：预留占位（报错文案后续再补），不做抖动 */
+.login-page .login-error {
+  min-height: 16px;
+  margin: 10px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  font-size: 12.5px;
+  color: var(--danger);
+  animation: none !important;
+}
+
+/* 密码错误：输入框变红，不做抖动（:root[data-theme] 前缀确保压过浅色主题的输入框规则） */
+:root[data-theme] .login-page.has-error .login-input {
+  border-color: var(--danger) !important;
+  background: rgba(239, 68, 68, 0.08) !important;
+  box-shadow: 0 0 0 4px rgba(239, 68, 68, 0.16) !important;
+}
+
+:root[data-theme] .login-page.has-error .login-input::placeholder {
+  color: var(--danger);
+  opacity: 0.75;
+}
+
+/* 校验通过：加载环切换为打勾 */
+.login-orb-check {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.35) rotate(-12deg);
+  transition: opacity 0.2s ease, transform 0.42s var(--ease-standard);
+}
+
+.login-orb-check svg {
+  width: 30px;
+  height: 30px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.login-orb-check svg path {
+  stroke-dasharray: 26;
+  stroke-dashoffset: 26;
+}
+
+.login-page.is-checked .login-orb-check {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.login-page.is-checked .login-orb-check svg path {
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 0.35s ease 0.08s;
+}
+
+.login-page.is-checked .login-spin {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.login-page.is-checked .login-orb-arrow {
+  opacity: 0;
+}
+
+/* 校验失败：加载环切换为打叉 */
+.login-orb-cross {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transform: scale(0.35) rotate(12deg);
+  transition: opacity 0.2s ease, transform 0.42s var(--ease-standard);
+}
+
+.login-orb-cross svg {
+  width: 28px;
+  height: 28px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+
+.login-page.is-failed .login-orb-cross {
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+}
+
+.login-page.is-failed .login-spin,
+.login-page.is-failed .login-orb-arrow {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.login-hint {
+  width: 100%;
+  margin: auto 0 58px;
+  font-size: 13px;
+  color: var(--text-muted);
+  opacity: 0.75;
+  text-align: center;
+}
+
+.login-notice {
+  margin: 12px 0 0;
+  color: var(--success);
+  font-size: 12.5px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.login-first-title {
+  margin-top: 14px;
+  color: var(--text-primary);
+  font-size: 27px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+
+.login-first-subtitle {
+  margin: 8px 0 20px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.login-first-label {
+  display: block;
+  margin: 8px 0 6px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.login-page.is-first-change .login-input {
+  margin-top: 0;
+  letter-spacing: normal;
+}
+
+.login-page.is-first-change .first-change-agreement {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 18px;
+  color: var(--text-secondary);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.login-page.is-first-change .first-change-agreement input {
+  margin: 3px 0 0;
+}
+
+.agreement-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+
+.agreement-link:hover {
+  text-decoration: underline;
+}
+
+.login-page.is-first-change .login-orb {
+  background: #596174;
+  box-shadow: none;
+}
+
+.login-page.is-first-change .login-orb.is-ready {
+  background: var(--accent);
+  box-shadow: 0 16px 34px -10px var(--accent-glow-strong), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+.login-page.is-first-change .login-orb-arrow {
+  opacity: 0 !important;
+  transform: scale(0.3) !important;
+}
+
+.login-page.is-first-change .login-orb-check {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.login-page.is-first-change .login-orb-check svg path {
+  stroke-dashoffset: 0;
+}
+
+.login-page.is-first-change .login-orb:not(.is-ready) .login-orb-check {
+  opacity: 0.62;
+}
+
+.login-page.is-first-change.is-loading .login-orb-check {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.login-agreement-overlay {
+  z-index: 30000;
+}
+
+.login-agreement-modal {
+  width: min(620px, calc(100vw - 32px));
+  max-height: min(78vh, 720px);
+  display: flex;
+  flex-direction: column;
+}
+
+.login-agreement-content {
+  overflow-y: auto;
+  padding-right: 6px;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 1.75;
+}
+
+.login-agreement-content p {
+  margin: 0 0 12px;
+}
+
+.login-agreement-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* 参考图：横向居中于登录卡片，纵向中心对齐卡片上边沿 */
+.login-mascot {
+  position: absolute;
+  left: 50%;
+  top: 18px;
+  width: 116px;
+  height: 116px;
+  transform: translate(-50%, -50%);
+  object-fit: contain;
+  pointer-events: none;
+  z-index: 2;
+  filter: drop-shadow(0 10px 22px rgba(0, 0, 0, 0.28));
+}
+
+/* 圆形登录按钮：深浅色分别使用主题色 */
+.login-orb {
+  position: absolute;
+  right: -34px;
+  bottom: -34px;
+  width: 84px;
+  height: 84px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  z-index: 3;
+  box-shadow: 0 16px 34px -10px var(--accent-glow-strong), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition: transform 0.3s var(--ease-standard), box-shadow 0.3s;
+}
+
+.login-orb:hover:not(:disabled) {
+  transform: translateY(-2px) scale(1.05);
+  box-shadow: 0 20px 42px -10px var(--accent-glow-strong), inset 0 1px 0 rgba(255, 255, 255, 0.4);
+}
+
+.login-orb:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.login-orb:disabled {
+  cursor: default;
+}
+
+.login-orb-arrow {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 1;
+  transform: scale(1) rotate(0deg);
+  transition: opacity 0.2s ease, transform 0.42s var(--ease-standard);
+}
+
+.login-orb-arrow svg {
+  width: 26px;
+  height: 26px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 加载环：透明度/缩放做非线性回弹切换，旋转放在伪元素上避免互相覆盖 */
+.login-spin {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 28px;
+  height: 28px;
+  opacity: 0;
+  transform: scale(0.35);
+  transition: opacity 0.22s ease, transform 0.42s var(--ease-standard);
+}
+
+.login-spin::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 2.5px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: login-spin 0.8s linear infinite;
+}
+
+.login-page.is-loading .login-orb-arrow {
+  opacity: 0;
+  transform: scale(0.3) rotate(120deg);
+}
+
+.login-page.is-loading .login-spin {
+  opacity: 1;
+  transform: scale(1);
+}
+
+/* 成功：登录卡片渐隐并微微下沉，随后进入首页 */
+.login-page.is-success .login-card {
+  opacity: 0;
+  transform: translateY(16px);
+  animation: none;
+  transition: opacity 0.64s var(--ease-standard), transform 0.64s var(--ease-standard);
+}
+
+.login-page.is-success {
+  opacity: 0;
+  pointer-events: none;
+  transition-duration: 0.64s;
+}
+
+.login-page.is-success::before {
+  opacity: 0;
+}
+
+@keyframes login-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 768px) {
+  .login-page {
+    justify-content: center;
+    padding: 24px 16px;
+  }
+
+  .login-page .login-card {
+    width: 100%;
+    min-height: 0;
+    padding: 48px 26px 78px;
+    border-radius: 26px;
+  }
+
+  .login-page.is-first-change .login-card {
+    min-height: 0;
+    padding: 34px 26px 78px;
+  }
+
+  .login-brand {
+    margin-top: 38px;
+    font-size: 30px;
+  }
+
+  .login-page .login-input {
+    margin-top: 46px;
+  }
+
+  .login-hint {
+    margin: auto 0 28px;
+  }
+
+  .login-page .login-mascot {
+    top: 12px;
+    width: 104px;
+    height: 104px;
+  }
+
+  .login-orb {
+    right: 18px;
+    bottom: 18px;
+    width: 72px;
+    height: 72px;
+  }
+}

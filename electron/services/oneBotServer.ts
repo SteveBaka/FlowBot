@@ -49,6 +49,7 @@ export class OneBotServer extends EventEmitter {
   private broadcastTimer: ReturnType<typeof setTimeout> | null = null
   private messageIdCounter = 0
   private started = false
+  private lastPeerActivityAt = 0
 
   private readonly broadcastBatchSize: number
   private readonly broadcastIntervalMs: number
@@ -122,6 +123,11 @@ export class OneBotServer extends EventEmitter {
 
   getClientCount(): number {
     return this.clients.size
+  }
+
+  // 对端最近一次真正连入/请求的时间（0 = 从未接入）。端口在监听不代表对端在用。
+  getLastPeerActivityAt(): number {
+    return this.lastPeerActivityAt
   }
 
   pushMessage(msg: OneBotMessage): void {
@@ -219,6 +225,7 @@ export class OneBotServer extends EventEmitter {
       const ws = this.createWebSocketFromUpgrade(req, socket, head)
       if (ws) {
         this.clients.add(ws)
+        this.lastPeerActivityAt = Date.now()
         this.setupClientEvents(ws)
         logger.info('onebot', `WebSocket client connected (total: ${this.clients.size})`)
       }
@@ -230,10 +237,9 @@ export class OneBotServer extends EventEmitter {
     socket: Buffer | import('net').Socket,
     head: Buffer
   ): WebSocketLike | null {
-    const key = crypto.randomBytes(16).toString('base64')
     const accept = crypto
       .createHash('sha1')
-      .update((_req.headers['sec-websocket-key'] || '') + '258EAFA5-E914-47DA-95CA-5AB9AABBDC61')
+      .update((_req.headers['sec-websocket-key'] || '') + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11')
       .digest('base64')
 
     const responseHeaders = [
@@ -320,7 +326,7 @@ export class OneBotServer extends EventEmitter {
         buffer = buffer.subarray(offset + payloadLength)
 
         if (opcode === 0x08) {
-          ws.readyState = 3
+          ws.close()
           socket.removeAllListeners('data')
           return
         }
@@ -334,6 +340,7 @@ export class OneBotServer extends EventEmitter {
       }
     }
 
+    ;(socket as import('net').Socket).on('error', () => {})
     ;(socket as import('net').Socket).on('data', onData)
     if (head.length > 0) onData(head)
 
@@ -355,6 +362,11 @@ export class OneBotServer extends EventEmitter {
 
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
     const pathname = url.pathname
+
+    // get_status 同时被健康自检和框架探活调用，计为对端活动会让「端口在听」永远等于「已连接」
+    if (pathname !== '/api/get_status' && pathname !== '/get_status') {
+      this.lastPeerActivityAt = Date.now()
+    }
 
     if (pathname === '/api/get_status' || pathname === '/get_status') {
       this.sendJsonResponse(res, 200, {

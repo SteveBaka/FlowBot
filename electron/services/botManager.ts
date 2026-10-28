@@ -607,6 +607,9 @@ export async function restartBot(botId: string, getConfig: (key: string) => any)
   return true
 }
 
+// 反向 HTTP 接入没有持久连接，只能靠活动痕迹判断，窗口需覆盖对端静默期
+const PEER_ACTIVITY_WINDOW_MS = 120_000
+
 export async function healthCheckAll(): Promise<void> {
   const now = Date.now()
   for (const [, entry] of bots) {
@@ -616,24 +619,13 @@ export async function healthCheckAll(): Promise<void> {
     }
 
     if (entry.mode === 'http' || (entry.mode === 'ws' && entry.direction === 'server')) {
-      try {
-        const controller = new AbortController()
-        const timeout = setTimeout(() => controller.abort(), 3000)
-        const res = await fetch(`http://127.0.0.1:${entry.port}/api/get_status`, {
-          signal: controller.signal,
-          headers: entry.token ? { Authorization: `Bearer ${entry.token}` } : {},
-        })
-        clearTimeout(timeout)
-        if (res.ok) {
-          const body = await res.json() as any
-          entry.connectionStatus = 'connected'
-          entry.clientCount = body?.data?.client_count ?? entry.server?.getClientCount() ?? 0
-        } else {
-          entry.connectionStatus = 'disconnected'
-        }
-      } catch {
-        entry.connectionStatus = 'disconnected'
-      }
+      // 探测本机端口只能证明本进程在监听，对端是否接入要看 WS 连接数与近期 HTTP 活动
+      const server = entry.server as any
+      const clientCount = server && typeof server.getClientCount === 'function' ? server.getClientCount() : 0
+      const lastPeer = server && typeof server.getLastPeerActivityAt === 'function' ? server.getLastPeerActivityAt() : 0
+      const peerAlive = clientCount > 0 || (lastPeer > 0 && now - lastPeer < PEER_ACTIVITY_WINDOW_MS)
+      entry.clientCount = clientCount
+      entry.connectionStatus = peerAlive ? 'connected' : 'disconnected'
       entry.lastHealthCheck = now
     } else if (entry.mode === 'ws' && entry.direction === 'client') {
       entry.connectionStatus = entry.server?.isConnected() ? 'connected' : 'disconnected'

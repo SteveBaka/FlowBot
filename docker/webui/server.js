@@ -9,6 +9,7 @@ const PORT = process.env.WEBUI_PORT || 7300
 // 本进程启动时间戳：用于引导期/重放过滤（重启后摒弃先前未发送的旧消息）
 const serverStartTime = Date.now()
 const ONEBOT_PORT = process.env.ONEBOT_PORT || 7100
+const NOVNC_PORT = process.env.NOVNC_PORT || 7600
 const FLOW_PORT = process.env.FLOW_API_PORT || 5031
 const CONFIG_DIR = process.env.WEFLOW_CONFIG_DIR || '/opt/weflow/data'
 
@@ -101,14 +102,196 @@ function ensureDirSync(dir) {
 // ─── Auth (scrypt-hashed password, in-memory tokens) ─────────────────────────
 
 const AUTH_FILE = path.join(CONFIG_DIR, 'webui-auth.json')
+const BOX_KEY_FILE = process.env.WEFLOW_BOX_KEY_FILE || path.join(CONFIG_DIR, '.box-key')
+const AUTH_INCIDENT_FILE = path.join(CONFIG_DIR, 'auth-incident.json')
+const AUTH_PASSWORD_POLICY = /^(?=.*[0-9])(?=.*[a-z])(?=.*[A-Z])(?=.*[^A-Za-z0-9]).{10,20}$/
+const AUTH_FAIL_WINDOW_MS = 3 * 60 * 1000
+const AUTH_COOLDOWN_MS = 3 * 60 * 1000
+const AUTH_MAX_TOTAL_FAILURES = 15
+const AUTH_MAX_WINDOW_FAILURES = 5
 const activeTokens = new Set()
+let authFailureTimes = []
+let authFailureTotal = 0
+let authCooldownUntil = 0
+let authLockdown = false
+
+function getBoxKey() {
+  try {
+    const existing = fs.readFileSync(BOX_KEY_FILE, 'utf8').trim()
+    if (/^[0-9a-f]{64}$/.test(existing)) return existing
+  } catch {}
+  try {
+    ensureDirSync(CONFIG_DIR)
+    const key = crypto.randomBytes(32).toString('hex')
+    fs.writeFileSync(BOX_KEY_FILE, key, { mode: 0o600 })
+    return key
+  } catch {
+    return ''
+  }
+}
+
+function boxEncrypt(plaintext) {
+  const keyHex = getBoxKey()
+  if (!keyHex) return ''
+  const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+  const iv = crypto.randomBytes(12)
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv)
+  const ciphertext = Buffer.concat([cipher.update(String(plaintext), 'utf8'), cipher.final()])
+  return 'box:' + Buffer.concat([iv, cipher.getAuthTag(), ciphertext]).toString('base64')
+}
+
+function boxDecrypt(stored) {
+  const keyHex = getBoxKey()
+  if (!keyHex || !stored || !stored.startsWith('box:')) return ''
+  try {
+    const buf = Buffer.from(stored.slice(4), 'base64')
+    const iv = buf.subarray(0, 12)
+    const tag = buf.subarray(12, 28)
+    const ciphertext = buf.subarray(28)
+    const key = crypto.pbkdf2Sync(keyHex, 'weflow-box-v1', 100000, 32, 'sha256')
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv)
+    decipher.setAuthTag(tag)
+    return Buffer.concat([decipher.update(ciphertext), decipher.final()]).toString('utf8')
+  } catch {
+    return ''
+  }
+}
+
+function readAuthFile() {
+  try {
+    return JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'))
+  } catch {
+    return null
+  }
+}
+
+function writeAuthFile(auth) {
+  fs.writeFileSync(AUTH_FILE, JSON.stringify(auth), { mode: 0o600 })
+  try { fs.chmodSync(AUTH_FILE, 0o600) } catch {}
+}
+
+function writePassword(newPassword, agreementAccepted) {
+  const passEnc = boxEncrypt(newPassword)
+  if (!passEnc) throw new Error('密码加密初始化失败')
+  writeAuthFile({
+    ver: 2,
+    passEnc,
+    salt: crypto.randomBytes(16).toString('hex'),
+    mustChange: false,
+    createdAt: new Date().toISOString(),
+    agreement: agreementAccepted ? { acceptedAt: new Date().toISOString(), version: 'v3' } : undefined
+  })
+}
+
+function safeEqualText(left, right) {
+  const a = crypto.createHash('sha256').update(String(left || '')).digest()
+  const b = crypto.createHash('sha256').update(String(right || '')).digest()
+  return crypto.timingSafeEqual(a, b)
+}
 
 function verifyPassword(password) {
+  const auth = readAuthFile()
+  if (!auth) return { ok: false, auth: null, mustChange: false }
+  if (auth.passEnc) {
+    const expected = boxDecrypt(auth.passEnc)
+    return {
+      ok: Boolean(expected) && safeEqualText(password, expected),
+      auth,
+      mustChange: auth.mustChange !== false
+    }
+  }
+  if (auth.hash && auth.salt) {
+    const hash = crypto.scryptSync(String(password || ''), auth.salt, 64).toString('hex')
+    return { ok: safeEqualText(hash, auth.hash), auth, mustChange: auth.mustChange !== false }
+  }
+  return { ok: false, auth, mustChange: true }
+}
+
+function readAuthIncident() {
   try {
-    const auth = JSON.parse(fs.readFileSync(AUTH_FILE, 'utf-8'))
-    const hash = crypto.scryptSync(password, auth.salt, 64).toString('hex')
-    return hash === auth.hash
-  } catch { return false }
+    const incident = JSON.parse(fs.readFileSync(AUTH_INCIDENT_FILE, 'utf-8'))
+    return incident && typeof incident === 'object' ? incident : null
+  } catch {
+    return null
+  }
+}
+
+function writeAuthIncident() {
+  try {
+    fs.writeFileSync(AUTH_INCIDENT_FILE, JSON.stringify({
+      time: new Date().toISOString(),
+      failures: AUTH_MAX_TOTAL_FAILURES,
+      reason: '连续密码输入错误'
+    }), { mode: 0o600 })
+  } catch {}
+}
+
+function stopWeFlowForLockdown() {
+  try {
+    const pidFile = path.join(CONFIG_DIR, 'weflow-watchdog.pid')
+    const pid = Number(fs.readFileSync(pidFile, 'utf8').trim())
+    if (Number.isFinite(pid) && pid > 1) process.kill(pid, 'SIGTERM')
+  } catch {}
+  try {
+    execSync("pkill -TERM -f 'weflow --no-sandbox --disable-gpu' 2>/dev/null || true", { timeout: 5000 })
+  } catch {}
+}
+
+function authGuard() {
+  if (authLockdown) {
+    return { blocked: true, status: 503, message: '密码输入错误次数已达上限，本次已停止服务' }
+  }
+  const remaining = authCooldownUntil - Date.now()
+  if (remaining > 0) {
+    return {
+      blocked: true,
+      status: 429,
+      message: '密码尝试过于频繁，请稍后再试',
+      retryAfterMs: remaining
+    }
+  }
+  return null
+}
+
+function noteAuthFailure() {
+  const now = Date.now()
+  authFailureTimes.push(now)
+  authFailureTimes = authFailureTimes.filter(function (stamp) { return now - stamp < AUTH_FAIL_WINDOW_MS })
+  authFailureTotal += 1
+  if (authFailureTimes.length >= AUTH_MAX_WINDOW_FAILURES) {
+    authCooldownUntil = now + AUTH_COOLDOWN_MS
+  }
+  if (authFailureTotal >= AUTH_MAX_TOTAL_FAILURES) {
+    authLockdown = true
+    writeAuthIncident()
+    stopWeFlowForLockdown()
+    return { blocked: true, status: 503, message: '密码输入错误次数已达上限，本次已停止服务' }
+  }
+  return authGuard()
+}
+
+function resetAuthFailures() {
+  authFailureTimes = []
+  authFailureTotal = 0
+  authCooldownUntil = 0
+}
+
+function isWebUiSecurityRequest(req) {
+  if (String(req.headers['x-weflow-page'] || '').toLowerCase() !== 'webui') return false
+  const origin = String(req.headers.origin || '').trim()
+  if (!origin) return false
+  try {
+    return new URL(origin).host === String(req.headers.host || '')
+  } catch {
+    return false
+  }
+}
+
+function passwordPolicyError(password) {
+  if (!AUTH_PASSWORD_POLICY.test(String(password || ''))) {
+    return '密码需为 10–20 位，且同时包含大写字母、小写字母、数字和特殊字符'
+  }
+  return ''
 }
 
 function generateToken() {
@@ -212,6 +395,158 @@ function readApiToken() {
   return ''
 }
 
+// ─── 会话头像本地缓存（与 Electron AvatarFileCacheService 共用同一目录与命名） ───
+// 设计要点：
+// 1) 缓存目录 = ~/.config/weflow/cache/avatar-files，正是 Electron 端 getCacheBasePath()+'/avatar-files'，
+//    且该目录位于容器持久卷（/root/.config → host flowbot/config），重启不丢、Electron 与 WebUI 可共用。
+// 2) 文件名 avatar_<hash>.png 与 Electron 端 hashString() 完全一致，命中同一 URL 即命中同一文件。
+// 3) 回源只在缓存缺失时发生一次；微信 CDN 需要 Referer/UA，否则可能被拒。
+// 4) 有上限的 LRU 淘汰，避免长期运行把磁盘吃满。
+
+const AVATAR_CACHE_DIR = path.join(HOME, '.config', 'weflow', 'cache', 'avatar-files')
+const AVATAR_MAX_FILES = 300
+const AVATAR_FETCH_TIMEOUT_MS = 8000
+const AVATAR_MAX_BYTES = 2 * 1024 * 1024
+// 与 Electron 端保持一致的 hash 算法（32 位整型滚动 hash，取绝对值转 16 进制）
+function avatarHashString(str) {
+  let hash = 0
+  const s = String(str || '')
+  for (let i = 0; i < s.length; i++) {
+    const code = s.charCodeAt(i)
+    hash = (hash << 5) - hash + code
+    hash = hash & hash
+  }
+  return Math.abs(hash).toString(16)
+}
+
+function avatarCachePath(url) {
+  return path.join(AVATAR_CACHE_DIR, 'avatar_' + avatarHashString(url) + '.png')
+}
+
+// 进行中的下载去重：同一 URL 并发只回源一次
+const avatarInflight = new Map()
+
+async function avatarEvictIfNeeded() {
+  try {
+    const names = await fs.promises.readdir(AVATAR_CACHE_DIR)
+    const files = names.filter(n => n.startsWith('avatar_') && n.endsWith('.png'))
+    if (files.length < AVATAR_MAX_FILES) return
+    const stats = []
+    for (const f of files) {
+      try {
+        const st = await fs.promises.stat(path.join(AVATAR_CACHE_DIR, f))
+        stats.push({ f, mtime: st.mtimeMs })
+      } catch {}
+    }
+    stats.sort((a, b) => a.mtime - b.mtime)
+    const removeCount = stats.length - AVATAR_MAX_FILES + 1
+    for (let i = 0; i < removeCount && i < stats.length; i++) {
+      try { await fs.promises.unlink(path.join(AVATAR_CACHE_DIR, stats[i].f)) } catch {}
+    }
+  } catch {}
+}
+
+// 下载头像到本地缓存；成功返回 Buffer 与 mime，失败返回 null（前端回退文字首字）
+function avatarDownload(url) {
+  const cachePath = avatarCachePath(url)
+  return fs.promises.readFile(cachePath)
+    .then(buf => ({ buf, mime: 'image/png', cached: true }))
+    .catch(() => {
+      if (avatarInflight.has(url)) return avatarInflight.get(url)
+      const task = (async () => {
+        try {
+          ensureDirSync(AVATAR_CACHE_DIR)
+          await avatarEvictIfNeeded()
+          const controller = new AbortController()
+          const timer = setTimeout(() => controller.abort(), AVATAR_FETCH_TIMEOUT_MS)
+          let resp
+          try {
+            resp = await fetch(url, {
+              signal: controller.signal,
+              headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.0.0 Safari/537.36 MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat(0x63090719) XWEB/8351',
+                Referer: 'https://servicewechat.com/',
+                Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+              }
+            })
+          } finally {
+            clearTimeout(timer)
+          }
+          if (!resp || !resp.ok) return null
+          const ab = await resp.arrayBuffer()
+          const buf = Buffer.from(ab)
+          if (!buf.length || buf.length > AVATAR_MAX_BYTES) return null
+          // 只接受图片魔数，避免把错误页当头像缓存下来
+          const isImg = (buf[0] === 0x89 && buf[1] === 0x50) ||
+                        (buf[0] === 0xff && buf[1] === 0xd8) ||
+                        (buf[0] === 0x47 && buf[1] === 0x49) ||
+                        (buf[0] === 0x52 && buf[1] === 0x49 && buf[8] === 0x57)
+          if (!isImg) return null
+          try { await fs.promises.writeFile(cachePath, buf) } catch {}
+          return { buf, mime: resp.headers.get('content-type') || 'image/png', cached: false }
+        } catch {
+          return null
+        } finally {
+          avatarInflight.delete(url)
+        }
+      })()
+      avatarInflight.set(url, task)
+      return task
+    })
+}
+
+// GET /api/avatar?u=<微信CDN地址>：命中本地缓存直接回图，未命中则回源一次并落盘
+// 头像短签名：HMAC(secret, url) 前 16 位。前端取 /api/avatar/sign 拿签后再拼 src，
+// 这样 <img> 无需 Authorization 头，也不会把接口变成任意 URL 代理。
+function avatarSign(u) {
+  const secret = getBoxKey()
+  if (!secret) return ''
+  return crypto.createHmac('sha256', secret).update(String(u)).digest('hex').slice(0, 16)
+}
+
+async function serveAvatar(req, res) {
+  let u = ''
+  let k = ''
+  try {
+    const parsed = new URL(req.url, 'http://localhost')
+    u = parsed.searchParams.get('u') || ''
+    k = parsed.searchParams.get('k') || ''
+  } catch {}
+  if (!u || !/^https?:\/\//i.test(u)) {
+    json(res, { ok: false, error: 'invalid url' }, 400)
+    return
+  }
+  // 签名不符直接拒（防止被当作开放代理滥用）
+  const expect = avatarSign(u)
+  if (!expect || k !== expect) {
+    json(res, { ok: false, error: 'bad signature' }, 403)
+    return
+  }
+  // 只允许微信头像域，避免被当作任意 URL 代理使用
+  let host = ''
+  try { host = new URL(u).hostname } catch {}
+  if (!/(^|\.)(qlogo\.cn|qpic\.cn|weixin\.qq\.com)$/i.test(host)) {
+    json(res, { ok: false, error: 'host not allowed' }, 403)
+    return
+  }
+  const hit = await avatarDownload(u)
+  if (!hit) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' })
+    res.end('avatar unavailable')
+    return
+  }
+  res.writeHead(200, {
+    'Content-Type': hit.mime,
+    'Content-Length': hit.buf.length,
+    // 本地缓存可放心强缓存：头像 URL 变更时 hash 会变
+    'Cache-Control': 'public, max-age=86400',
+    'X-Avatar-Cache': hit.cached ? 'hit' : 'miss'
+  })
+  res.end(hit.buf)
+}
+
+
+
 // 插件通道 API Key：未配置时自动生成并落盘，保证 WS/HTTP 插件链路可用
 function ensureApiToken() {
   const existing = readApiToken()
@@ -225,6 +560,63 @@ function ensureApiToken() {
     console.error('[WebUI] Failed to write API token:', err.message)
   }
   return token
+}
+
+// ─── 头像后台主动同步 ──────────────────────────────────────────────────
+// WeFlow 常驻、WebUI 页面很少打开，所以不能依赖页面访问才缓存。
+// 本进程随容器常驻，由它定期把全部会话头像拉到共用缓存目录，
+// 这样 Electron 与 WebUI 两边都读本地文件，且不再反复请求微信 CDN。
+const AVATAR_SYNC_INTERVAL_MS = 30 * 60 * 1000
+const AVATAR_SYNC_FIRST_DELAY_MS = 20 * 1000
+let avatarSyncRunning = false
+
+async function avatarSyncAll(reason) {
+  if (avatarSyncRunning) return
+  avatarSyncRunning = true
+  try {
+    const token = readApiToken()
+    const headers = token ? { Authorization: 'Bearer ' + token } : {}
+    const resp = await fetch('http://127.0.0.1:' + FLOW_PORT + '/api/v1/sessions?limit=2000', { headers })
+    if (!resp.ok) {
+      console.log('[AvatarSync] skip (' + reason + '): FLOW ' + resp.status)
+      return
+    }
+    const data = await resp.json()
+    const sessions = Array.isArray(data && data.sessions) ? data.sessions : []
+    const urls = []
+    const seen = new Set()
+    for (const s of sessions) {
+      if (!s || !s.avatarUrl) continue
+      const u = String(s.avatarUrl).trim()
+      if (!/^https?:\/\//i.test(u) || seen.has(u)) continue
+      seen.add(u)
+      urls.push(u)
+    }
+    if (urls.length === 0) return
+    let added = 0
+    let failed = 0
+    // 串行 + 小延迟：避免瞬间同时轰 CDN（行为异常也容易被对端注意）
+    for (const u of urls) {
+      const cachePath = avatarCachePath(u)
+      let exists = false
+      try { await fs.promises.access(cachePath); exists = true } catch {}
+      if (exists) continue
+      const hit = await avatarDownload(u)
+      if (hit) {
+        added++
+        try { const st = await fs.promises.stat(cachePath); void st } catch {}
+      } else {
+        failed++
+      }
+      await new Promise(r => setTimeout(r, 120))
+    }
+    console.log('[AvatarSync] ' + reason + ': sessions=' + sessions.length + ' urls=' + urls.length +
+      ' added=' + added + ' failed=' + failed)
+  } catch (err) {
+    console.log('[AvatarSync] error (' + reason + '): ' + ((err && err.message) || err))
+  } finally {
+    avatarSyncRunning = false
+  }
 }
 
 // ─── 图片 token 自建注册表（插件通道图片直链）────────────────────────────────
@@ -372,7 +764,29 @@ function saveWebuiConfig(cfg) {
 // ─── Logs (single source: container.log) ─────────────────────────────────────
 
 const CONTAINER_LOG = '/opt/weflow/data/logs/container.log'
+// 管道落盘格式（start.sh + logfmt.awk 产出，级别在写入时即已定死）
+const LOG_LINE_RE = /^\[(\d{2}-\d{2} \d{2}:\d{2}:\d{2})\] \[(INFO|WARN|ERROR|DEBUG|FATAL|TRACE)\] ?(.*)$/
+// 兼容升级前写下的历史日志：WeFlow Logger 自带级别，其余靠关键词猜
 const WEFLOW_LOG_RE = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s+\[(\w+)\]\s+\[(\w+)\]\s+(.*)/
+
+// 与 logfmt.awk 的 lv_of 保持同一套判定，避免新旧日志级别口径打架
+function guessLevel(text) {
+  var l = text.toLowerCase().replace(/[a-z_]+=0/g, ' ')
+  if (l.indexOf('fatal') !== -1) return 'fatal'
+  if (l.indexOf('error') !== -1) return 'error'
+  if (l.indexOf('warn') !== -1) return 'warn'
+  if (l.indexOf('fail') !== -1) return 'error'
+  if (l.indexOf('debug') !== -1) return 'debug'
+  return 'info'
+}
+
+function guessCategory(line) {
+  var l = line.toLowerCase()
+  if (l.indexOf('wechat') !== -1 || l.indexOf('wechatappex') !== -1) return 'wechat'
+  if (l.indexOf('x11vnc') !== -1 || l.indexOf('xvfb') !== -1 || l.indexOf('vnc') !== -1) return 'vnc'
+  if (l.indexOf('onebot') !== -1 || l.indexOf('wsclient') !== -1 || l.indexOf('botmanager') !== -1) return 'onebot'
+  return 'system'
+}
 
 function parseContainerLog(maxLines, categories, levels, search) {
   if (!fs.existsSync(CONTAINER_LOG)) return []
@@ -383,23 +797,30 @@ function parseContainerLog(maxLines, categories, levels, search) {
   for (var i = 0; i < rawLines.length; i++) {
     var line = rawLines[i]
     if (!line) continue
-    var m = WEFLOW_LOG_RE.exec(line)
+    var m = LOG_LINE_RE.exec(line)
+    var w = m ? null : WEFLOW_LOG_RE.exec(line)
     var ts = '', level = 'info', category = 'system', msg = line
     if (m) {
       ts = m[1]
       level = m[2].toLowerCase()
-      category = m[3].toLowerCase()
-      msg = m[4]
+      msg = m[3]
+      category = guessCategory(msg)
+    } else if (w) {
+      ts = w[1]
+      level = w[2].toLowerCase()
+      msg = w[4]
+      category = w[3].toLowerCase()
     } else {
-      var lower = line.toLowerCase()
-      if (lower.indexOf('wechat') !== -1 || lower.indexOf('wechatappex') !== -1) category = 'wechat'
-      else if (lower.indexOf('x11vnc') !== -1 || lower.indexOf('xvfb') !== -1 || lower.indexOf('vnc') !== -1) category = 'vnc'
-      else if (lower.indexOf('fluxbox') !== -1) category = 'system'
-      else if (lower.indexOf('onebot') !== -1 || lower.indexOf('wsclient') !== -1 || lower.indexOf('botmanager') !== -1) category = 'onebot'
-      else category = 'system'
-      if (lower.indexOf('error') !== -1 || lower.indexOf('fatal') !== -1 || lower.indexOf('fail') !== -1) level = 'error'
-      else if (lower.indexOf('warn') !== -1) level = 'warn'
-      else if (lower.indexOf('debug') !== -1) level = 'debug'
+      // 旧日志里微信引擎自带 "[E][时间][文件(行)]" 前缀，须先剥掉内层时间戳才能识别
+      var eng = /^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*\[([EWIDV])\]/.exec(line)
+      if (eng) {
+        var c = eng[1]
+        level = c === 'E' ? 'error' : c === 'W' ? 'warn' : (c === 'D' || c === 'V') ? 'debug' : 'info'
+        msg = line.replace(/^\[\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*\[[EWIDV]\]/, '')
+      } else {
+        level = guessLevel(line)
+      }
+      category = guessCategory(line)
     }
     if (categories && categories.length > 0 && categories.indexOf(category) === -1) continue
     if (levels && levels.length > 0 && levels.indexOf(level) === -1) continue
@@ -588,13 +1009,34 @@ const server = http.createServer(async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════════
 
   if (p === '/api/auth/login' && req.method === 'POST') {
+    let blocked = authGuard()
+    if (blocked && blocked.status === 429) blocked = noteAuthFailure() || blocked
+    if (blocked) {
+      json(res, { ok: false, error: blocked.message, code: authLockdown ? 'AUTH_LOCKDOWN' : 'AUTH_COOLDOWN', retryAfterMs: blocked.retryAfterMs }, blocked.status)
+      return
+    }
     const bodyData = await body(req)
-    if (verifyPassword(bodyData.password || '')) {
+    const verified = verifyPassword(bodyData.password || '')
+    if (verified.ok) {
+      resetAuthFailures()
       const token = generateToken()
+      activeTokens.clear()
       activeTokens.add(token)
-      json(res, { ok: true, token })
+      json(res, {
+        ok: true,
+        token,
+        mustChange: verified.mustChange,
+        agreementAccepted: Boolean(verified.auth && verified.auth.agreement && verified.auth.agreement.acceptedAt),
+        incident: readAuthIncident()
+      })
     } else {
-      json(res, { ok: false, error: '密码错误' }, 401)
+      const failure = noteAuthFailure()
+      json(res, {
+        ok: false,
+        error: failure && failure.message ? failure.message : '密码错误',
+        code: authLockdown ? 'AUTH_LOCKDOWN' : (failure && failure.status === 429 ? 'AUTH_COOLDOWN' : 'AUTH_INVALID'),
+        retryAfterMs: failure && failure.retryAfterMs
+      }, failure && failure.status ? failure.status : 401)
     }
     return
   }
@@ -602,6 +1044,132 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/auth/verify' && req.method === 'GET') {
     if (isAuthenticated(req)) json(res, { ok: true })
     else json(res, { ok: false }, 401)
+    return
+  }
+
+  if (p === '/api/auth/state' && req.method === 'GET') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    const auth = readAuthFile()
+    json(res, {
+      ok: true,
+      mustChange: !auth || auth.mustChange !== false,
+      agreementAccepted: Boolean(auth && auth.agreement && auth.agreement.acceptedAt),
+      incident: readAuthIncident()
+    })
+    return
+  }
+
+  if (p === '/api/auth/first-change' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    if (!isWebUiSecurityRequest(req)) {
+      json(res, { ok: false, error: 'Security context rejected' }, 403)
+      return
+    }
+    const auth = readAuthFile()
+    if (!auth || auth.mustChange === false) {
+      json(res, { ok: false, error: '当前会话无需首次改密' }, 409)
+      return
+    }
+    const bodyData = await body(req)
+    const newPassword = String(bodyData.newPassword || '')
+    const confirmPassword = String(bodyData.confirmPassword || '')
+    if (!bodyData.agreementAccepted) {
+      json(res, { ok: false, error: '请先阅读并同意用户协议与免责声明' }, 400)
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      json(res, { ok: false, error: '两次输入的新密码不一致' }, 400)
+      return
+    }
+    const policyError = passwordPolicyError(newPassword)
+    if (policyError) {
+      json(res, { ok: false, error: policyError }, 400)
+      return
+    }
+    if (verifyPassword(newPassword).ok) {
+      json(res, { ok: false, error: '新密码不能与旧密码相同' }, 400)
+      return
+    }
+    try {
+      writePassword(newPassword, true)
+      activeTokens.clear()
+      json(res, { ok: true, relogin: true, message: '密码已修改，请使用新密码重新登录' })
+    } catch (err) {
+      json(res, { ok: false, error: err.message || String(err) }, 500)
+    }
+    return
+  }
+
+  if (p === '/api/auth/change-password' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    if (!isWebUiSecurityRequest(req)) {
+      json(res, { ok: false, error: 'Security context rejected' }, 403)
+      return
+    }
+    let blocked = authGuard()
+    if (blocked && blocked.status === 429) blocked = noteAuthFailure() || blocked
+    if (blocked) {
+      json(res, { ok: false, error: blocked.message, code: authLockdown ? 'AUTH_LOCKDOWN' : 'AUTH_COOLDOWN', retryAfterMs: blocked.retryAfterMs }, blocked.status)
+      return
+    }
+    const bodyData = await body(req)
+    const oldPassword = String(bodyData.oldPassword || '')
+    const newPassword = String(bodyData.newPassword || '')
+    const confirmPassword = String(bodyData.confirmPassword || '')
+    const verified = verifyPassword(oldPassword)
+    if (!verified.ok) {
+      const failure = noteAuthFailure()
+      console.warn('[WebUI Auth] Password change rejected: current password mismatch')
+      json(res, {
+        ok: false,
+        error: failure && failure.message ? failure.message : '旧密码错误',
+        code: authLockdown ? 'AUTH_LOCKDOWN' : (failure && failure.status === 429 ? 'AUTH_COOLDOWN' : 'AUTH_INVALID'),
+        retryAfterMs: failure && failure.retryAfterMs
+      }, failure && failure.status ? failure.status : 400)
+      return
+    }
+    if (newPassword !== confirmPassword) {
+      json(res, { ok: false, error: '两次输入的新密码不一致' }, 400)
+      return
+    }
+    const policyError = passwordPolicyError(newPassword)
+    if (policyError) {
+      json(res, { ok: false, error: policyError }, 400)
+      return
+    }
+    if (safeEqualText(oldPassword, newPassword)) {
+      json(res, { ok: false, error: '新密码不能与旧密码相同' }, 400)
+      return
+    }
+    try {
+      const auth = readAuthFile()
+      writePassword(newPassword, Boolean(auth && auth.agreement && auth.agreement.acceptedAt))
+      resetAuthFailures()
+      activeTokens.clear()
+      console.log('[WebUI Auth] Password changed successfully; all sessions revoked')
+      json(res, { ok: true, relogin: true, message: '密码已修改，请使用新密码重新登录' })
+    } catch (err) {
+      json(res, { ok: false, error: err.message || String(err) }, 500)
+    }
+    return
+  }
+
+  if (p === '/api/auth/incident/ack' && req.method === 'POST') {
+    if (!isAuthenticated(req)) {
+      json(res, { ok: false, error: 'Unauthorized' }, 401)
+      return
+    }
+    try { fs.unlinkSync(AUTH_INCIDENT_FILE) } catch {}
+    json(res, { ok: true })
     return
   }
 
@@ -659,7 +1227,7 @@ const server = http.createServer(async (req, res) => {
     return
   }
 
-  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image' && p !== '/api/media') {
+  if (p.startsWith('/api/') && !p.startsWith('/api/auth/') && p !== '/api/status' && p !== '/api/version' && p !== '/api/image' && p !== '/api/media' && p !== '/api/avatar') {
     if (!isAuthenticated(req)) {
       json(res, { ok: false, error: 'Unauthorized' }, 401)
       return
@@ -689,7 +1257,8 @@ const server = http.createServer(async (req, res) => {
   if (p === '/api/version') {
     json(res, {
       app: 'FlowBOT', version: CONTAINER_VERSION, protocol: 'v11.0',
-      onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT), flow_port: Number(FLOW_PORT)
+      onebot_port: Number(ONEBOT_PORT), webui_port: Number(PORT),
+      novnc_port: Number(NOVNC_PORT), flow_port: Number(FLOW_PORT)
     })
     return
   }
@@ -1037,6 +1606,40 @@ const server = http.createServer(async (req, res) => {
   // ═══════════════════════════════════════════════════════════════════════════════
   // Accounts
   // ═══════════════════════════════════════════════════════════════════════════════
+
+  // 头像签名批量获取：返回 { url: signedPath } 映射，供 <img src> 直接使用
+  if (p === '/api/avatar/sign' && req.method === 'POST') {
+    const d = await body(req)
+    const urls = Array.isArray(d && d.urls) ? d.urls.slice(0, 500) : []
+    const out = {}
+    for (const u of urls) {
+      const s0 = String(u || '').trim()
+      if (!/^https?:\/\//i.test(s0)) continue
+      let host = ''
+      try { host = new URL(s0).hostname } catch { continue }
+      if (!/(^|\.)(qlogo\.cn|qpic\.cn|weixin\.qq\.com)$/i.test(host)) continue
+      const sig = avatarSign(s0)
+      if (sig) out[s0] = '/api/avatar?u=' + encodeURIComponent(s0) + '&k=' + sig
+    }
+    json(res, { ok: true, signed: out })
+    return
+  }
+
+  // 会话头像：本地缓存优先，缺失时回源微信 CDN 一次并落盘（Electron 共用同一目录）
+  if (p === '/api/avatar' && (req.method === 'GET' || req.method === 'HEAD')) {
+    await serveAvatar(req, res)
+    return
+  }
+
+  if (p === '/api/account/profile' && req.method === 'GET') {
+    try {
+      const result = await resolveAccountProfile()
+      json(res, { ok: true, profile: result.profile, source: result.source })
+    } catch (err) {
+      json(res, { ok: false, error: String(err && err.message || err) }, 502)
+    }
+    return
+  }
 
   if (p === '/api/accounts' && req.method === 'GET') {
     const cfg = loadWebuiConfig()
@@ -1667,6 +2270,120 @@ function getBotSelfId() {
   return { self_id: undefined, source: 'none' }
 }
 
+let accountProfileCache = { key: '', updatedAt: 0, data: null }
+const ACCOUNT_PROFILE_CACHE_MS = 5 * 60 * 1000
+
+function sameAccountId(left, right) {
+  const a = cleanAccountDirNameWxid(left).toLowerCase()
+  const b = cleanAccountDirNameWxid(right).toLowerCase()
+  return Boolean(a && b && a === b)
+}
+
+async function getFlowApiJson(pathname) {
+  const token = readApiToken()
+  const result = await proxyRequest('http://127.0.0.1:' + FLOW_PORT + pathname, {
+    headers: token ? { Authorization: 'Bearer ' + token } : {}
+  })
+  if (result.status < 200 || result.status >= 300) return null
+  return result.data && typeof result.data === 'object' ? result.data : null
+}
+
+async function resolveAccountProfile() {
+  const botSelf = getBotSelfId()
+  const rawWxid = String(botSelf.self_id || '').trim()
+  const wxid = cleanAccountDirNameWxid(rawWxid) || rawWxid
+  if (!wxid) {
+    return {
+      profile: { wxid: '', rawWxid: '', displayName: '未登录', avatarUrl: '' },
+      source: 'none'
+    }
+  }
+
+  const cacheKey = rawWxid + '|' + wxid
+  if (accountProfileCache.data && accountProfileCache.key === cacheKey &&
+      Date.now() - accountProfileCache.updatedAt < ACCOUNT_PROFILE_CACHE_MS) {
+    return accountProfileCache.data
+  }
+
+  let displayName = ''
+  let avatarUrl = ''
+  let source = botSelf.source || 'unknown'
+
+  const identity = identityMemory.get(rawWxid) || identityMemory.get(wxid)
+  if (identity) {
+    displayName = String(identity.display_name || identity.nickname || '').trim()
+    avatarUrl = String(identity.avatar_url || '').trim()
+    if (displayName || avatarUrl) source = 'identity'
+  }
+
+  if (!avatarUrl && identityDb) {
+    try {
+      const row = identityDb.prepare(
+        'SELECT nickname, avatar_url FROM group_nicknames ' +
+        'WHERE lower(member_wxid)=lower(?) AND avatar_url IS NOT NULL ' +
+        'ORDER BY updated_at DESC LIMIT 1'
+      ).get(wxid)
+      if (row) {
+        if (!displayName && row.nickname) displayName = String(row.nickname)
+        if (row.avatar_url) avatarUrl = String(row.avatar_url)
+        if (!displayName && avatarUrl) source = 'group'
+      }
+    } catch {}
+  }
+
+  if (!displayName || !avatarUrl) {
+    const contactsData = await getFlowApiJson('/api/v1/contacts?limit=10000')
+    const contacts = contactsData && Array.isArray(contactsData.contacts) ? contactsData.contacts : []
+    const contact = contacts.find(function (item) {
+      return item && sameAccountId(item.username, wxid)
+    })
+    if (contact) {
+      if (!displayName) {
+        displayName = String(contact.displayName || contact.nickname || contact.remark || '').trim()
+      }
+      if (!avatarUrl && contact.avatarUrl) avatarUrl = String(contact.avatarUrl)
+      if (displayName || avatarUrl) source = source === 'identity' ? 'identity+contacts' : 'contacts'
+    }
+  }
+
+  if (!avatarUrl) {
+    const sessionsData = await getFlowApiJson('/api/v1/sessions?limit=1000')
+    const sessions = sessionsData && Array.isArray(sessionsData.sessions) ? sessionsData.sessions : []
+    const groups = sessions.filter(function (item) {
+      return item && item.username && (item.sessionType === 'group' || String(item.username).endsWith('@chatroom'))
+    }).slice(0, 8)
+    for (const group of groups) {
+      const membersData = await getFlowApiJson(
+        '/api/v1/group-members?chatroomId=' + encodeURIComponent(String(group.username))
+      )
+      const members = membersData && Array.isArray(membersData.members) ? membersData.members : []
+      const selfMember = members.find(function (item) {
+        return item && sameAccountId(item.wxid || item.username, wxid)
+      })
+      if (selfMember && selfMember.avatarUrl) {
+        avatarUrl = String(selfMember.avatarUrl)
+        if (!displayName) {
+          displayName = String(selfMember.displayName || selfMember.nickname || '').trim()
+        }
+        source = source === 'identity' ? 'identity+group' : 'group'
+        break
+      }
+    }
+  }
+
+  const data = {
+    profile: {
+      wxid: wxid,
+      rawWxid: rawWxid,
+      displayName: displayName || wxid,
+      avatarUrl: avatarUrl || ''
+    },
+    source: source
+  }
+  accountProfileCache = { key: cacheKey, updatedAt: Date.now(), data: data }
+  return data
+}
+
 // 同步各群成员群昵称 → group_nicknames 表（供 @ 链路 / 未来特性读身份库）
 async function syncBotGroupNicknames() {
   const myWxid = getSelfWxid()
@@ -1746,7 +2463,7 @@ function upsertContactRow(c) {
 }
 
 // 启动/30min 全量同步：从 WCDB contacts API 物化身份库
-function fullSyncIdentityDb() {
+function fullSyncIdentityDb(quiet) {
   const internalToken = readApiToken()
   return fetch('http://127.0.0.1:' + FLOW_PORT + '/api/v1/contacts?limit=10000&forceRefresh=1', {
     headers: internalToken ? { Authorization: 'Bearer ' + internalToken } : {}
@@ -1769,7 +2486,8 @@ function fullSyncIdentityDb() {
       return true
     })
     .catch(function (e) {
-      console.error('[IdentityDB] full sync error: ' + (e && e.message || e))
+      // quiet 仅用于启动首次调用：此时 5031 尚未就绪，重试循环会接手
+      if (!quiet) console.error('[IdentityDB] full sync error: ' + (e && e.message || e))
       return false
     })
 }
@@ -2083,6 +2801,10 @@ function startPushConsumer() {
   const token = readApiToken()
   const headers = token ? { Authorization: 'Bearer ' + token } : {}
   let retry = 0
+  // 启动阶段 WeFlow 的 5031 还没监听，头几轮失败是必然过程，不该打扰人；
+  // 只有曾经连上过之后掉线，或连续失败到明显不正常，才算真故障。
+  let connectedOnce = false
+  let failStreak = 0
   const connect = () => {
     if (!pushConsumerActive) return
     const controller = new AbortController()
@@ -2094,6 +2816,8 @@ function startPushConsumer() {
       .then(async (resp) => {
         if (!resp.ok) throw new Error('HTTP ' + resp.status)
         retry = 0
+        connectedOnce = true
+        failStreak = 0
         const reader = resp.body.getReader()
         const decoder = new TextDecoder()
         let buffer = ''
@@ -2111,7 +2835,11 @@ function startPushConsumer() {
         }
       })
       .catch((err) => {
-        if (pushAbort === controller && pushConsumerActive) console.error('[PluginAPI] push consumer error: ' + ((err && err.message) || err))
+        if (pushAbort !== controller || !pushConsumerActive) return
+        failStreak += 1
+        if (connectedOnce || failStreak >= 4) {
+          console.error('[PluginAPI] push consumer error (streak ' + failStreak + '): ' + ((err && err.message) || err))
+        }
       })
       .finally(() => {
         if (pushAbort === controller && pushConsumerActive) {
@@ -2183,6 +2911,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`[WebUI] Disclaimer accepted: ${isDisclaimerAccepted()}`)
   // 身份库：建库/加载快照 + 启动全量同步（5031 就绪前的失败由 5s 重试兜底）
   initIdentityDb()
-  fullSyncIdentityDb()
+  fullSyncIdentityDb(true)
+  // 头像缓存：容器常驻即开始预热，与 Electron 共用同一目录
+  setTimeout(function () { avatarSyncAll('startup') }, AVATAR_SYNC_FIRST_DELAY_MS)
+  setInterval(function () { avatarSyncAll('periodic') }, AVATAR_SYNC_INTERVAL_MS)
   refreshPluginApiBots()
 })
