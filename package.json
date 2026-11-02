@@ -33,7 +33,7 @@
     "koffi": "^3.3.3",
     "sherpa-onnx-node": "^1.13.7",
     "silk-wasm": "^3.7.1",
-    "wechat-emojis": "^1.0.2",
+    "wechat-emojis": "^2.2.0",
     "ws": "^8.22.0"
   },
   "devDependencies": {
