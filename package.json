@@ -31,7 +31,7 @@
     "fzstd": "^0.1.1",
     "jszip": "^3.10.2",
     "koffi": "^3.3.3",
-    "sherpa-onnx-node": "^1.13.7",
+    "sherpa-onnx-node": "^2.0.1",
     "silk-wasm": "^3.7.1",
     "wechat-emojis": "^1.0.2",
     "ws": "^8.22.0"
